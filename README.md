@@ -2,9 +2,9 @@
 
 **Annotation-free Multi-Animal Direction Estimation Using Self-supervised learning**
 
-AMADEUS is a markerless multi-animal tracking system for laboratory videos. It estimates an oriented bounding box (OBB) and front direction for each animal while maintaining individual identities over time. No manual training annotation or physical marking is required.
+AMADEUS is a markerless multi-animal tracking system for laboratory videos. It estimates an oriented bounding box (OBB) and head direction for each animal while maintaining individual identities over time. No manual training annotation or physical marking is required.
 
-After you configure foreground segmentation, AMADEUS extracts images of isolated animals, assigns front direction classes using movement, and synthesizes interaction images by copy-paste augmentation. A detector trained on these images estimates OBBs and front direction classes during crossings and crowding. Staged association and refinement produce individual tracks. When almost complete occlusion is expected, contrastive learning is additionally used for identity verification and correction.
+After you configure foreground segmentation, AMADEUS extracts single-animal blobs, assigns direction classes using movement direction, and synthesizes interaction images by copy-paste augmentation. A detector trained on these images estimates OBBs and direction classes during crossings and crowding. Staged association and refinement produce individual tracks. When almost complete occlusion is expected, contrastive learning is additionally used for identity verification and correction.
 
 - [Website](https://amadeus.jpmyrmecol.com/)
 - [Online manual](https://amadeus.jpmyrmecol.com/Manual_EN.html)
@@ -32,15 +32,15 @@ Use **Advanced Tracking** to configure individual stages and parameters, or **Mu
 
 ## Outputs and recording conditions
 
-The standard output includes individual identity, OBB center and dimensions, and front direction in degrees over time. Front and rear keypoints are derived geometrically from OBBs. In the final CSV, columns named `heading` store front direction. See the [output format](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-12) for coordinates, angles, and processing stages.
+The standard output includes individual identity, OBB center and dimensions, and head direction in degrees over time. Front and rear keypoints are derived geometrically from OBBs. In the final CSV, columns named `heading` store head direction. See the [output format](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-12) for coordinates, angles, and processing stages.
 
-AMADEUS learns directly from the input videos. Recommended conditions include a fixed camera viewing animals from above, movement approximately confined to a two-dimensional plane, stable illumination, an essentially static background, and sufficient contrast, resolution, and frame rate for reliable visual tracking in each frame. Front direction estimation requires a body axis and visually distinguishable front and rear. The video must contain sufficient periods in which animals are separated from one another to generate training data. Training and analysis videos can be recorded separately under the same conditions.
+AMADEUS learns directly from the input videos. Recommended conditions include a fixed camera viewing animals from above, movement approximately confined to a two-dimensional plane, stable illumination, an essentially static background, and sufficient contrast, resolution, and frame rate for reliable visual tracking in each frame. Head direction estimation requires a body axis and visually distinguishable front and rear. The video must contain sufficient periods in which animals are separated from one another to generate training data. Training and analysis videos can be recorded separately under the same conditions.
 
-A constant number of animals is recommended. **Variable population** supports animals entering or leaving the field of view, but an animal may receive a new ID after returning. **Without direction estimation** tracks OBBs and identities without assigning front or rear, allowing AMADEUS to be applied to animals without a visually distinguishable front and rear, including animals with approximately round body shapes. See the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-6) for these modes and their limitations.
+**Variable population** supports animals entering or leaving the field of view, but an animal may receive a new ID after returning. **Without direction estimation** tracks OBBs and identities without assigning front or rear, allowing AMADEUS to be applied to animals without a visually distinguishable front and rear. See the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-6) for these modes and their limitations.
 
 ## Citation
 
-Citation details will be added to the [website](https://amadeus.jpmyrmecol.com/#cite) when the manuscript is available.
+See the [Publication page](https://amadeus.jpmyrmecol.com/publication.html) for citation information when the preprint is available. Please also cite the project website: https://amadeus.jpmyrmecol.com/.
 
 ## License
 
