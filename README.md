@@ -21,6 +21,26 @@ Use the [installers on the website](https://amadeus.jpmyrmecol.com/#install), or
 
 macOS and Linux have not yet been extensively tested. For platform requirements, installation details, and troubleshooting, see the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html).
 
+## macOS setup
+
+On Apple Silicon Macs, Python does not need to be installed in advance. Both the website's `AMADEUS-Setup.command` and this repository's `AMADEUS.command` check for a working native Python 3.10–3.12 with Tcl/Tk 8.6 before preparing dependencies. Compatible existing installations are reused, including python.org, Homebrew, and executables on PATH. Intel Macs and Rosetta are not supported.
+
+If none is found, setup asks `Allow Python installation? [y/N]`. Enter `y` to download the official python.org package and install it with macOS administrator authentication. Declining, an empty response, or end of input stops setup. Download, verification, installation, or GUI-check failures also stop setup; rerun the launcher to retry.
+
+The package installs a system-wide Python framework and `/Applications/Python 3.12`; it may replace an existing python.org 3.12 installation. AMADEUS does not remove this shared Python when its own environment is removed. The download is checked against a pinned SHA-256 and macOS package-signature/Gatekeeper checks before installation.
+
+Advanced configuration: set `AMADEUS_PYTHON` to a compatible Python executable or `AMADEUS_VENV` to the environment directory. An invalid explicit Python or an incompatible/incomplete existing environment stops setup without replacement. To preserve an old environment and start fresh, choose a new directory, for example:
+
+```bash
+AMADEUS_VENV="$HOME/Applications/AMADEUS/.venv-tk86" bash AMADEUS.command
+```
+
+### Bootstrap maintenance
+
+The installer pins [Python 3.12.10](https://www.python.org/downloads/release/python-31210/), the last Python 3.12 release with an official macOS binary installer, for the current Python/Tk compatibility requirements. This is not the latest security-only Python 3.12 release. Review this pin and its security tradeoff when updating GUI dependencies; do not replace it with an untested latest Python/Tk version. The SHA-256 comes from the release's `.pkg.sigstore` message digest. Installation is followed by a native architecture, Python version, Tcl/Tk version, and GUI initialization check.
+
+`tools/macos_python.sh` is embedded verbatim between the shared-bootstrap markers in `AMADEUS-site/AMADEUS-Setup.command`; update both copies together. This allows the standalone installer to check Python before downloading AMADEUS or uv. Publish the main repository changes before the site changes. Run `python -m unittest discover -s tests` for mocked bootstrap regression tests; a native Apple Silicon smoke test is still needed for administrator authentication, package installation, and GUI behavior.
+
 ## Run tracking
 
 1. Open **Easy Tracking** and select the video and session folder.

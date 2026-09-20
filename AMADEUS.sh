@@ -28,6 +28,12 @@ case "$(uname -s)" in
         ;;
 esac
 
+export AMADEUS_VENV="${AMADEUS_VENV:-$SCRIPT_DIR/.venv}"
+if [ "$(uname -s)" = Darwin ]; then
+    source "$SCRIPT_DIR/tools/macos_python.sh"
+    amadeus_ensure_macos_python || exit 1
+fi
+
 find_uv() {
     if command -v uv >/dev/null 2>&1; then
         command -v uv
@@ -67,8 +73,12 @@ echo "[AMADEUS] Using uv: $UV_EXE"
 
 # The bootstrap interpreter only runs setup; setup selects and checks the GUI Python.
 # AMADEUS_VENV explicitly selects an alternate environment. Do not infer it from activation.
-export AMADEUS_VENV="${AMADEUS_VENV:-$SCRIPT_DIR/.venv}"
-if ! "$UV_EXE" run --no-project --python 3.10 python tools/setup_environment.py --uv "$UV_EXE"; then
+if [ "$(uname -s)" = Darwin ]; then
+    setup_python="$AMADEUS_PYTHON"
+else
+    setup_python=3.10
+fi
+if ! "$UV_EXE" run --no-project --python "$setup_python" python tools/setup_environment.py --uv "$UV_EXE"; then
     echo "[ERROR] AMADEUS environment setup failed. See the diagnostic above." >&2
     exit 1
 fi
