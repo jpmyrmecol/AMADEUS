@@ -21,12 +21,6 @@ Use the [installers on the website](https://amadeus.jpmyrmecol.com/#install), or
 
 macOS and Linux have not yet been extensively tested. For platform requirements, installation details, and troubleshooting, see the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html).
 
-### Bootstrap maintenance
-
-The installer pins [Python 3.12.10](https://www.python.org/downloads/release/python-31210/), the last Python 3.12 release with an official macOS binary installer, for the current Python/Tk compatibility requirements. This is not the latest security-only Python 3.12 release. Review this pin and its security tradeoff when updating GUI dependencies; do not replace it with an untested latest Python/Tk version. The SHA-256 comes from the release's `.pkg.sigstore` message digest. On the next launch, the same native architecture, Python version, Tcl/Tk version, and GUI initialization checks run before environment setup.
-
-`tools/macos_python.sh` is embedded verbatim between the shared-bootstrap markers in `AMADEUS-site/AMADEUS-Setup.command`; update both copies together. This allows the standalone installer to check Python before downloading AMADEUS or uv. Publish the main repository changes before the site changes. Run `python -m unittest discover -s tests` for mocked bootstrap regression tests; native Apple Silicon confirmation dialogs, Installer.app handoff, and GUI behavior require a macOS smoke test.
-
 ## Run tracking
 
 1. Open **Easy Tracking** and select the video and session folder.
