@@ -188,7 +188,7 @@ def select_python(requested: str | None) -> str:
                     continue
         raise RuntimeError(
             "macOS requires native Python 3.10–3.12 with Tcl/Tk 8.6. "
-            "Install a compatible Python distribution, then set AMADEUS_PYTHON to its executable. "
+            "Run AMADEUS.command (or AMADEUS-Setup.command) to check Python and offer installation. "
             "Tk 9 is not supported with CustomTkinter 5.2.2. See README macOS setup."
         )
     return "3.10"
