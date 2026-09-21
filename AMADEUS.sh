@@ -31,7 +31,13 @@ esac
 export AMADEUS_VENV="${AMADEUS_VENV:-$SCRIPT_DIR/.venv}"
 if [ "$(uname -s)" = Darwin ]; then
     source "$SCRIPT_DIR/tools/macos_python.sh"
-    amadeus_ensure_macos_python || exit 1
+    if amadeus_ensure_macos_python; then
+        :
+    else
+        status=$?
+        [ "$status" -eq 2 ] && exit 0
+        exit "$status"
+    fi
 fi
 
 find_uv() {

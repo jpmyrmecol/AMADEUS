@@ -34,8 +34,8 @@ amadeus_python_candidates() {
     if [ "$candidate" != /usr/bin/python3 ]; then printf '%s\n' "$candidate"; fi
 }
 
-amadeus_install_python() (
-    # Subshell confines the cleanup trap to this one download.
+amadeus_open_python_installer() (
+    # Clean up failures, but retain the pkg while Installer.app uses it.
     local temp_dir pkg digest
     temp_dir="$(mktemp -d)" || return 1
     trap 'rm -rf "$temp_dir"' EXIT
@@ -53,12 +53,17 @@ amadeus_install_python() (
     fi
     /usr/sbin/pkgutil --check-signature "$pkg" || return 1
     /usr/sbin/spctl --assess --type install "$pkg" || return 1
-    echo '[AMADEUS] macOS administrator authentication is required to install Python.'
-    /usr/bin/sudo /usr/sbin/installer -pkg "$pkg" -target / || return 1
+    /usr/bin/open -a /System/Library/CoreServices/Installer.app "$pkg" || return 1
+    trap - EXIT
+    echo "[AMADEUS] Python package opened in Installer.app: $pkg"
+    echo '[AMADEUS] Complete the Python installation in Installer.app, then run AMADEUS Setup again.'
+    echo '[AMADEUS] Setup is exiting now. The package can be deleted after installation.'
 )
 
+# Returns 0 for a compatible Python, 1 for failure, or 2 to stop normally
+# after cancellation or handing the package to Installer.app.
 amadeus_ensure_macos_python() {
-    local candidate answer existing
+    local candidate existing
     case "${AMADEUS_VENV:?AMADEUS_VENV must be set}" in
         /*) ;;
         *) export AMADEUS_VENV="$PWD/$AMADEUS_VENV" ;;
@@ -91,23 +96,13 @@ amadeus_ensure_macos_python() {
     done < <(amadeus_python_candidates)
 
     echo 'No compatible Python was found (native arm64, Python 3.10-3.12, Tcl/Tk 8.6).'
-    echo 'Install Python 3.12.10 with Tcl/Tk 8.6 using the official python.org package?'
-    echo 'This installs a system-wide Python framework and /Applications/Python 3.12.'
-    echo 'An existing python.org 3.12 installation may be replaced. Administrator access is required.'
-    printf 'Allow Python installation? [y/N] '
-    if ! IFS= read -r answer; then answer=''; fi
-    case "$answer" in
-        y|Y|yes|YES|Yes) ;;
-        *) echo '[AMADEUS] Python installation cancelled; setup stopped.'; return 1 ;;
-    esac
-    if ! amadeus_install_python; then
-        echo '[ERROR] Python installation failed or was cancelled. Retry setup when ready.' >&2
+    if ! /usr/bin/osascript -e 'display dialog "No compatible Python was found. Download the official Python 3.12.10 package from python.org and open it in Installer.app?\n\nInstaller.app will handle installation and any administrator authentication. It installs a system-wide Python and may replace an existing python.org 3.12 installation.\n\nAfter completing the Python installation, run AMADEUS Setup again." with title "AMADEUS Setup" buttons {"Cancel", "Download Python"} default button "Download Python" cancel button "Cancel"' >/dev/null; then
+        echo '[AMADEUS] Python download was not approved; setup stopped.'
+        return 2
+    fi
+    if ! amadeus_open_python_installer; then
+        echo '[ERROR] Could not prepare or open the Python installer. Retry AMADEUS Setup.' >&2
         return 1
     fi
-    candidate=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
-    if ! amadeus_check_python "$candidate"; then
-        echo '[ERROR] Installed Python failed the Python/arm64/Tcl/Tk GUI check. Setup stopped.' >&2
-        return 1
-    fi
-    export AMADEUS_PYTHON="$candidate"
+    return 2
 }
