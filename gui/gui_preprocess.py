@@ -38,6 +38,7 @@ from gui.video_input import (
     video_conversion_record,
 )
 from main.video_compat import ffmpeg_executable
+from main.video_frame_count import detect_seekable_frame_count
 
 
 ctk.set_appearance_mode("dark")
@@ -418,7 +419,8 @@ class VideoFrameReader:
         self.cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self.raw_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         self.raw_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        self.reported_frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        self.frame_count = detect_seekable_frame_count(video_path, self.reported_frame_count)
         self.fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
         self.fps_estimated = self.fps <= 0.0
         if self.fps_estimated:
@@ -432,6 +434,7 @@ class VideoFrameReader:
         self.height, self.width = first.shape[:2]
         if self.frame_count <= 0:
             self.frame_count = 1
+        self.frame_count_adjusted = self.frame_count != self.reported_frame_count
         self._cache_put(0, first)
 
     def _configure_orientation(self) -> str:
@@ -1506,6 +1509,7 @@ class PreprocessApp(ctk.CTk):
             "source_height": int(self.reader.height),
             "source_fps": float(self.reader.fps),
             "source_frame_count": int(self.reader.frame_count),
+            "source_reported_frame_count": int(self.reader.reported_frame_count),
             "default_color_mode": self.default_color_mode,
             "trim": {
                 "in_frame": int(self.in_frame),
@@ -1673,6 +1677,11 @@ class PreprocessApp(ctk.CTk):
         )
         if reader.fps_estimated:
             self._log("FPS metadata was unavailable; timeline uses 30 fps.")
+        if reader.frame_count_adjusted:
+            self._log(
+                f"Usable frame count adjusted to {reader.frame_count:,} "
+                f"(container reported {reader.reported_frame_count:,})."
+            )
         self._flush_crop_trimming_config_save(log_success=True)
         self.set_status(f"Loaded: {os.path.basename(path)}")
         _start_maximized(self)
@@ -1682,10 +1691,13 @@ class PreprocessApp(ctk.CTk):
             self.meta_var.set("No video loaded.")
             return
         duration = self.reader.frame_count / max(1e-9, self.reader.fps)
+        frame_count_text = f"{self.reader.frame_count:,}"
+        if self.reader.frame_count_adjusted:
+            frame_count_text += f" usable (reported {self.reader.reported_frame_count:,})"
         self.meta_var.set(
             f"{self.reader.width} x {self.reader.height}\n"
             f"fps: {self.reader.fps:.3f}\n"
-            f"frames: {self.reader.frame_count:,}\n"
+            f"frames: {frame_count_text}\n"
             f"duration: {_format_seconds(duration)}\n"
             f"codec: {self.reader.codec}\n"
             f"default color mode: {'Grayscale' if self.default_color_mode == 'grayscale' else 'Color'}\n"
@@ -2666,9 +2678,13 @@ class PreprocessApp(ctk.CTk):
             self.export_queue.put(("error", str(exc)))
 
     def _build_ffmpeg_command(self, job: ExportJob, region: ExportRegion) -> list[str]:
-        in_s = job.in_frame / max(1e-9, job.fps)
-        out_s = (job.out_frame + 1) / max(1e-9, job.fps)
-        filters: list[str] = []
+        filters: list[str] = [
+            f"trim=start_frame={job.in_frame}:end_frame={job.out_frame + 1}",
+            (
+                f"setpts=N/({max(1e-9, job.fps):.12f}*"
+                f"{max(OUTPUT_SPEED_MIN, job.output_speed):.12f}*TB)"
+            ),
+        ]
         if region.rect is not None:
             x, y, w, h = region.rect
             assert w % 2 == 0 and h % 2 == 0
@@ -2702,13 +2718,7 @@ class PreprocessApp(ctk.CTk):
         elif turns == 3:
             filters.append("transpose=cclock")
         filters.append("pad=ceil(iw/2)*2:ceil(ih/2)*2")
-        if abs(float(job.output_speed) - 1.0) > 1e-9:
-            filters.append(f"setpts=PTS/{job.output_speed:.12f}")
-        if (
-            abs(float(job.output_fps) - float(job.fps)) > 1e-6
-            or abs(float(job.output_speed) - 1.0) > 1e-9
-        ):
-            filters.append(f"fps=fps={job.output_fps:.6f}")
+        filters.append(f"fps=fps={job.output_fps:.6f}")
 
         cmd = [
             job.ffmpeg,
@@ -2718,10 +2728,6 @@ class PreprocessApp(ctk.CTk):
             "error",
             "-i",
             job.video_path,
-            "-ss",
-            f"{in_s:.9f}",
-            "-to",
-            f"{out_s:.9f}",
             "-map",
             "0:v:0",
             "-an",
@@ -2763,29 +2769,57 @@ class PreprocessApp(ctk.CTk):
         finally:
             cap.release()
 
-        expected_bgr = self._expected_export_frame_bgr(source_reader.read_bgr(source_frame_idx), region)
-        if expected_bgr.shape != exported_bgr.shape:
+        best_mad: float | None = None
+        best_source_frame_idx: int | None = None
+        expected_shape = None
+        candidate_indices = range(
+            max(job.in_frame, source_frame_idx - 2),
+            min(job.out_frame, source_frame_idx + 2) + 1,
+        )
+        for candidate_idx in candidate_indices:
+            try:
+                expected_bgr = self._expected_export_frame_bgr(
+                    source_reader.read_bgr(candidate_idx), region
+                )
+            except Exception:
+                continue
+            if expected_shape is None:
+                expected_shape = expected_bgr.shape
+            h = min(expected_bgr.shape[0], exported_bgr.shape[0])
+            w = min(expected_bgr.shape[1], exported_bgr.shape[1])
+            if h <= 0 or w <= 0:
+                continue
+            diff = np.abs(
+                expected_bgr[:h, :w].astype(np.int16)
+                - exported_bgr[:h, :w].astype(np.int16)
+            )
+            mad = float(np.mean(diff))
+            if best_mad is None or mad < best_mad:
+                best_mad = mad
+                best_source_frame_idx = candidate_idx
+
+        if expected_shape is None or best_mad is None:
+            warnings.append(f"{region.display_name}: source verification frame could not be read.")
+            return warnings
+        if expected_shape != exported_bgr.shape:
             warnings.append(
                 f"{region.display_name}: verification shape mismatch "
-                f"expected {expected_bgr.shape[1]}x{expected_bgr.shape[0]}, "
+                f"expected {expected_shape[1]}x{expected_shape[0]}, "
                 f"got {exported_bgr.shape[1]}x{exported_bgr.shape[0]}."
             )
-        h = min(expected_bgr.shape[0], exported_bgr.shape[0])
-        w = min(expected_bgr.shape[1], exported_bgr.shape[1])
-        if h <= 0 or w <= 0:
-            warnings.append(f"{region.display_name}: verification frame had no comparable pixels.")
-            return warnings
-        diff = np.abs(
-            expected_bgr[:h, :w].astype(np.int16) - exported_bgr[:h, :w].astype(np.int16)
-        )
-        mad = float(np.mean(diff))
-        if mad > VERIFY_MAD_THRESHOLD:
+        if best_mad > VERIFY_MAD_THRESHOLD:
             warnings.append(
-                f"{region.display_name}: preview/export mean absolute difference {mad:.2f}/255 "
+                f"{region.display_name}: preview/export mean absolute difference {best_mad:.2f}/255 "
                 f"exceeded {VERIFY_MAD_THRESHOLD:.2f}/255."
             )
         else:
-            self.export_queue.put(("log", f"{region.display_name}: verification MAD {mad:.2f}/255"))
+            self.export_queue.put(
+                (
+                    "log",
+                    f"{region.display_name}: verification MAD {best_mad:.2f}/255 "
+                    f"(source frame {best_source_frame_idx})",
+                )
+            )
         return warnings
 
     def _expected_export_frame_bgr(self, source_bgr: np.ndarray, region: ExportRegion) -> np.ndarray:
