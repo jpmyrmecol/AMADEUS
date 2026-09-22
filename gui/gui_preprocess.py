@@ -492,6 +492,9 @@ class PreprocessApp(ctk.CTk):
         self.out_frame_var = tk.StringVar(value="0")
         self.output_folder_var = tk.StringVar()
         self.template_var = tk.StringVar(value="{stem}_{region}")
+        self.source_output_info_var = tk.StringVar(value="fps —  |  total frames —")
+        self.output_speed_var = tk.StringVar(value="~—x")
+        self.output_frame_count_var = tk.StringVar(value="total frames —")
         self.brightness_var = tk.DoubleVar(value=0.0)
         self.contrast_var = tk.DoubleVar(value=1.0)
         self.color_mode_var = tk.StringVar(value="Color")
@@ -750,9 +753,28 @@ class PreprocessApp(ctk.CTk):
         self.template_entry = ctk.CTkEntry(export, textvariable=self.template_var)
         self.template_entry.pack(fill="x", padx=8, pady=(0, 6))
 
+        source_row = ctk.CTkFrame(export, corner_radius=0)
+        source_row.pack(fill="x", padx=8, pady=(4, 0))
+        ctk.CTkLabel(source_row, text="Source", width=58, anchor="w").pack(side="left")
+        ctk.CTkLabel(
+            source_row,
+            textvariable=self.source_output_info_var,
+            anchor="e",
+            text_color=MUTED_TEXT,
+        ).pack(side="right", fill="x", expand=True)
+
+        ctk.CTkLabel(export, text="↓", height=18, text_color=MUTED_TEXT).pack(fill="x", padx=8)
+
         fps_row = ctk.CTkFrame(export, corner_radius=0)
-        fps_row.pack(fill="x", padx=8, pady=(2, 8))
-        ctk.CTkLabel(fps_row, text="Output fps", width=110, anchor="w").pack(side="left")
+        fps_row.pack(fill="x", padx=8, pady=(0, 8))
+        ctk.CTkLabel(fps_row, text="Output", width=58, anchor="w").pack(side="left")
+        ctk.CTkLabel(
+            fps_row,
+            textvariable=self.output_speed_var,
+            width=52,
+            anchor="w",
+        ).pack(side="left")
+        ctk.CTkLabel(fps_row, text="fps", width=24, anchor="e").pack(side="left", padx=(0, 4))
         self.output_fps_spin = tk.Spinbox(
             fps_row,
             from_=1.0,
@@ -762,13 +784,19 @@ class PreprocessApp(ctk.CTk):
             format="%.3f",
             **_SPIN_CFG,
         )
-        self.output_fps_spin.pack(side="right")
+        self.output_fps_spin.pack(side="left")
         self.output_fps_spin.delete(0, tk.END)
         self.output_fps_spin.insert(0, f"{self.output_fps_var.get():.3f}")
         self.output_fps_spin.configure(command=self._commit_output_fps)
         self.output_fps_spin.bind("<Return>", self._commit_output_fps, add="+")
         self.output_fps_spin.bind("<KP_Enter>", self._commit_output_fps, add="+")
         self.output_fps_spin.bind("<FocusOut>", self._commit_output_fps, add="+")
+        ctk.CTkLabel(
+            fps_row,
+            textvariable=self.output_frame_count_var,
+            anchor="e",
+            text_color=MUTED_TEXT,
+        ).pack(side="right", fill="x", expand=True, padx=(6, 0))
 
         action_row = ctk.CTkFrame(export, corner_radius=0)
         action_row.pack(fill="x", padx=8, pady=(0, 8))
@@ -970,8 +998,31 @@ class PreprocessApp(ctk.CTk):
         self.output_fps_var.set(value)
         self.output_fps_spin.delete(0, tk.END)
         self.output_fps_spin.insert(0, f"{value:.3f}")
+        self._update_output_summary()
         self._schedule_crop_trimming_config_save()
         return "break"
+
+    def _update_output_summary(self) -> None:
+        if self.reader is None:
+            self.source_output_info_var.set("fps —  |  total frames —")
+            self.output_speed_var.set("~—x")
+            self.output_frame_count_var.set("total frames —")
+            return
+
+        source_fps = max(1e-9, float(self.reader.fps))
+        source_frames = max(1, int(self.reader.frame_count))
+        output_fps = max(1e-9, float(self.output_fps_var.get()))
+        selected_frames = max(1, int(self.out_frame) - int(self.in_frame) + 1)
+        source_duration = selected_frames / source_fps
+        output_frames = max(1, int(round(source_duration * output_fps)))
+        output_duration = output_frames / output_fps
+        speed = source_duration / output_duration if output_duration > 0.0 else 1.0
+
+        self.source_output_info_var.set(
+            f"{source_fps:.3f} fps  |  total {source_frames:,} frames"
+        )
+        self.output_speed_var.set(f"~{speed:.2f}x")
+        self.output_frame_count_var.set(f"total {output_frames:,} frames")
 
     def _bind_events(self) -> None:
         self.canvas.bind("<Configure>", lambda _event: self.fit_canvas_to_window())
@@ -1692,6 +1743,7 @@ class PreprocessApp(ctk.CTk):
 
     def _update_timeline_labels(self) -> None:
         self._sync_trim_frame_inputs()
+        self._update_output_summary()
         if self.reader is None:
             self.frame_label_var.set("frame 0 / 0   00:00.000")
             self.trim_label_var.set("in 0 / out 0 / length 0 frames")
