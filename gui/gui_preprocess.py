@@ -53,6 +53,8 @@ BRIGHTNESS_MIN = -1.0
 BRIGHTNESS_MAX = 1.0
 CONTRAST_MIN = 0.0
 CONTRAST_MAX = 2.0
+OUTPUT_SPEED_MIN = 0.1
+OUTPUT_SPEED_MAX = 100.0
 MIN_CROP_SIZE = 16
 HANDLE_HIT_PX = 8
 HANDLE_DRAW_PX = 7
@@ -461,6 +463,7 @@ class ExportJob:
     output_folder: str
     fps: float
     output_fps: float
+    output_speed: float
     frame_count: int
     source_width: int
     source_height: int
@@ -493,7 +496,7 @@ class PreprocessApp(ctk.CTk):
         self.output_folder_var = tk.StringVar()
         self.template_var = tk.StringVar(value="{stem}_{region}")
         self.source_output_info_var = tk.StringVar(value="fps —  |  total frames —")
-        self.output_speed_var = tk.StringVar(value="~—x")
+        self.output_speed_var = tk.DoubleVar(value=1.0)
         self.output_frame_count_var = tk.StringVar(value="total frames —")
         self.brightness_var = tk.DoubleVar(value=0.0)
         self.contrast_var = tk.DoubleVar(value=1.0)
@@ -768,12 +771,23 @@ class PreprocessApp(ctk.CTk):
         fps_row = ctk.CTkFrame(export, corner_radius=0)
         fps_row.pack(fill="x", padx=8, pady=(0, 8))
         ctk.CTkLabel(fps_row, text="Output", width=58, anchor="w").pack(side="left")
-        ctk.CTkLabel(
+        self.output_speed_spin = tk.Spinbox(
             fps_row,
-            textvariable=self.output_speed_var,
-            width=52,
-            anchor="w",
-        ).pack(side="left")
+            from_=OUTPUT_SPEED_MIN,
+            to=OUTPUT_SPEED_MAX,
+            increment=0.1,
+            width=6,
+            format="%.2f",
+            **_SPIN_CFG,
+        )
+        self.output_speed_spin.pack(side="left")
+        self.output_speed_spin.delete(0, tk.END)
+        self.output_speed_spin.insert(0, f"{self.output_speed_var.get():.2f}")
+        self.output_speed_spin.configure(command=self._commit_output_speed)
+        self.output_speed_spin.bind("<Return>", self._commit_output_speed, add="+")
+        self.output_speed_spin.bind("<KP_Enter>", self._commit_output_speed, add="+")
+        self.output_speed_spin.bind("<FocusOut>", self._commit_output_speed, add="+")
+        ctk.CTkLabel(fps_row, text="x", width=16, anchor="w").pack(side="left", padx=(2, 4))
         ctk.CTkLabel(fps_row, text="fps", width=24, anchor="e").pack(side="left", padx=(0, 4))
         self.output_fps_spin = tk.Spinbox(
             fps_row,
@@ -989,6 +1003,19 @@ class PreprocessApp(ctk.CTk):
         sync_from_var()
         return spinbox
 
+    def _commit_output_speed(self, _event=None):
+        try:
+            value = float(self.output_speed_spin.get().strip())
+        except Exception:
+            value = float(self.output_speed_var.get())
+        value = _clamp(value, OUTPUT_SPEED_MIN, OUTPUT_SPEED_MAX)
+        self.output_speed_var.set(value)
+        self.output_speed_spin.delete(0, tk.END)
+        self.output_speed_spin.insert(0, f"{value:.2f}")
+        self._update_output_summary()
+        self._schedule_crop_trimming_config_save()
+        return "break"
+
     def _commit_output_fps(self, _event=None):
         try:
             value = float(self.output_fps_spin.get().strip())
@@ -1005,23 +1032,21 @@ class PreprocessApp(ctk.CTk):
     def _update_output_summary(self) -> None:
         if self.reader is None:
             self.source_output_info_var.set("fps —  |  total frames —")
-            self.output_speed_var.set("~—x")
             self.output_frame_count_var.set("total frames —")
             return
 
         source_fps = max(1e-9, float(self.reader.fps))
         source_frames = max(1, int(self.reader.frame_count))
         output_fps = max(1e-9, float(self.output_fps_var.get()))
+        output_speed = max(OUTPUT_SPEED_MIN, float(self.output_speed_var.get()))
         selected_frames = max(1, int(self.out_frame) - int(self.in_frame) + 1)
         source_duration = selected_frames / source_fps
-        output_frames = max(1, int(round(source_duration * output_fps)))
-        output_duration = output_frames / output_fps
-        speed = source_duration / output_duration if output_duration > 0.0 else 1.0
+        output_duration = source_duration / output_speed
+        output_frames = max(1, int(round(output_duration * output_fps)))
 
         self.source_output_info_var.set(
             f"{source_fps:.3f} fps  |  total {source_frames:,} frames"
         )
-        self.output_speed_var.set(f"~{speed:.2f}x")
         self.output_frame_count_var.set(f"total {output_frames:,} frames")
 
     def _bind_events(self) -> None:
@@ -1373,6 +1398,7 @@ class PreprocessApp(ctk.CTk):
             "output": {
                 "folder": self.output_folder_var.get().strip(),
                 "template": self.template_var.get().strip() or "{stem}_{region}",
+                "speed": float(self.output_speed_var.get()),
                 "fps": float(self.output_fps_var.get()),
                 "apply_view_rotation": bool(self.export_view_rotation_var.get()),
                 "view_rotation_degrees_clockwise": self.preview_turns * 90,
@@ -1499,6 +1525,9 @@ class PreprocessApp(ctk.CTk):
         self.in_frame = 0
         self.out_frame = reader.frame_count - 1
         self.frame_bgr_cache = None
+        self.output_speed_var.set(1.0)
+        self.output_speed_spin.delete(0, tk.END)
+        self.output_speed_spin.insert(0, "1.00")
         self.output_fps_var.set(float(reader.fps))
         self.output_fps_spin.delete(0, tk.END)
         self.output_fps_spin.insert(0, f"{reader.fps:.3f}")
@@ -2260,8 +2289,14 @@ class PreprocessApp(ctk.CTk):
             raise RuntimeError(f"Invalid output name template: {exc}") from exc
         if not (0 <= self.in_frame <= self.out_frame < self.reader.frame_count):
             raise RuntimeError("Invalid trim range: in must be less than or equal to out.")
+        self._commit_output_speed()
         self._commit_output_fps()
+        output_speed = float(self.output_speed_var.get())
         output_fps = float(self.output_fps_var.get())
+        if not (OUTPUT_SPEED_MIN <= output_speed <= OUTPUT_SPEED_MAX):
+            raise RuntimeError(
+                f"Output speed must be between {OUTPUT_SPEED_MIN:.1f}x and {OUTPUT_SPEED_MAX:.1f}x."
+            )
         if not (1.0 <= output_fps <= 240.0):
             raise RuntimeError("Output fps must be between 1.0 and 240.0.")
 
@@ -2316,6 +2351,7 @@ class PreprocessApp(ctk.CTk):
             output_folder=output_folder,
             fps=float(self.reader.fps),
             output_fps=output_fps,
+            output_speed=output_speed,
             frame_count=int(self.reader.frame_count),
             source_width=int(self.reader.width),
             source_height=int(self.reader.height),
@@ -2353,6 +2389,7 @@ class PreprocessApp(ctk.CTk):
         self.brightness_entry.configure(state=state)
         self.contrast_entry.configure(state=state)
         self.color_mode_combo.configure(state="disabled" if running else "readonly")
+        self.output_speed_spin.configure(state=state)
         self.output_fps_spin.configure(state=state)
         self._set_region_list_state(state)
         self._set_crop_controls_state(not running and self._crop_control_index() is not None)
@@ -2375,7 +2412,11 @@ class PreprocessApp(ctk.CTk):
         self.set_status("Canceling export...", auto_clear=False)
 
     def _expected_export_frame_count(self, job: ExportJob) -> int:
-        duration_s = (job.out_frame - job.in_frame + 1) / max(1e-9, job.fps)
+        duration_s = (
+            (job.out_frame - job.in_frame + 1)
+            / max(1e-9, job.fps)
+            / max(OUTPUT_SPEED_MIN, job.output_speed)
+        )
         return max(1, int(round(duration_s * max(1e-9, job.output_fps))))
 
     def _export_worker(self, job: ExportJob) -> None:
@@ -2507,7 +2548,12 @@ class PreprocessApp(ctk.CTk):
         elif turns == 3:
             filters.append("transpose=cclock")
         filters.append("pad=ceil(iw/2)*2:ceil(ih/2)*2")
-        if abs(float(job.output_fps) - float(job.fps)) > 1e-6:
+        if abs(float(job.output_speed) - 1.0) > 1e-9:
+            filters.append(f"setpts=PTS/{job.output_speed:.12f}")
+        if (
+            abs(float(job.output_fps) - float(job.fps)) > 1e-6
+            or abs(float(job.output_speed) - 1.0) > 1e-9
+        ):
             filters.append(f"fps=fps={job.output_fps:.6f}")
 
         cmd = [
@@ -2548,7 +2594,11 @@ class PreprocessApp(ctk.CTk):
             output_frame_idx = max(0, expected_frames // 2)
             if actual_frames > 0:
                 output_frame_idx = min(output_frame_idx, actual_frames - 1)
-            source_offset_s = output_frame_idx / max(1e-9, job.output_fps)
+            source_offset_s = (
+                output_frame_idx
+                / max(1e-9, job.output_fps)
+                * max(OUTPUT_SPEED_MIN, job.output_speed)
+            )
             source_frame_idx = job.in_frame + int(round(source_offset_s * job.fps))
             source_frame_idx = max(job.in_frame, min(job.out_frame, source_frame_idx))
             cap.set(cv2.CAP_PROP_POS_FRAMES, output_frame_idx)
