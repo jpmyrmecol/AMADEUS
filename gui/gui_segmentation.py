@@ -5375,8 +5375,10 @@ class CrossingReviewApp(ctk.CTk):
         self._close_progress_popup()
         popup = tk.Toplevel(self)
         popup.title(title)
-        # Do not make this popup transient/modal.
-        # A normal Toplevel can be minimized and can appear on the OS taskbar.
+        # Aqua can restack an independent Toplevel behind the maximized parent.
+        # Keep the independent taskbar window behavior on Windows and Linux.
+        if platform.system() == "Darwin":
+            popup.transient(self)
         popup.resizable(False, False)
         popup.configure(bg="#f3f4f6")
         try:
@@ -5406,7 +5408,7 @@ class CrossingReviewApp(ctk.CTk):
         popup.deiconify()
         popup.lift()
         popup.focus_force()
-        self._flush_ui()
+        self._flush_ui(maximize=False)
 
     def _place_progress_popup(self):
         if self.progress_popup is None:
@@ -5422,11 +5424,12 @@ class CrossingReviewApp(ctk.CTk):
         y = root_y + max(0, (root_h - height) // 2)
         self.progress_popup.geometry(f"{width}x{height}+{x}+{y}")
 
-    def _flush_ui(self):
+    def _flush_ui(self, *, maximize: bool = True):
         try:
             self.update_idletasks()
             self.update()
-            self._maximize_window()
+            if maximize:
+                self._maximize_window()
         except tk.TclError:
             pass
 
@@ -5517,7 +5520,6 @@ class CrossingReviewApp(ctk.CTk):
                     pass
             try:
                 self.update()
-                self._maximize_window()
             except tk.TclError:
                 pass
             done_event.wait(timeout=0.02)
