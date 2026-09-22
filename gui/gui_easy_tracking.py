@@ -71,6 +71,71 @@ def _simplify_progress_line(line: str) -> str:
     return line
 # Matches YOLO training tqdm desc: "3/50  3.05G  0.8756  0.7188  1.492 ..."
 _YOLO_LOSS_PAT = re.compile(r'\d+/\d+\s+[\d.]+G?\s+([\d.]+)')
+# The whole row Ultralytics' DetectionTrainer.progress_string() prints:
+# epoch, GPU memory, box/cls/dfl loss, instances, image size. Matching all of it
+# is what tells a training epoch apart from every other tqdm bar (dataset
+# scanning, validation, the non-YOLO steps), which keep their existing display.
+_YOLO_TRAIN_DESC_PAT = re.compile(
+    r'^(\d+)/(\d+)\s+([\d.]+)G\s+\S+\s+\S+\s+\S+\s+\d+\s+(\d+)$'
+)
+# Field separator in the training status line; wide enough to read at a glance.
+_TRAIN_FIELD_GAP = "   "
+
+# Both halves of the VRAM field are shown in GiB so they share one unit.
+# Ultralytics prints reserved memory as bytes / 1e9, nvidia-smi reports MiB, and
+# GiB is what nvidia-smi, Task Manager and the card's own advertised capacity
+# all use -- a 12 GiB board reads 12.0.
+_DECIMAL_GB_IN_GIB = 1e9 / (1024 ** 3)
+
+_total_vram_gib_cache: list = []
+
+
+def _total_vram_gib() -> float | None:
+    """Total VRAM of the first NVIDIA GPU in GiB, or None if it cannot be read."""
+    if _total_vram_gib_cache:
+        return _total_vram_gib_cache[0]
+
+    import shutil
+
+    total: float | None = None
+    executable = shutil.which("nvidia-smi")
+    if executable:
+        try:
+            completed = subprocess.run(
+                [executable, "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            lines = (completed.stdout or "").strip().splitlines()
+            if completed.returncode == 0 and lines:
+                total = int(lines[0].strip()) / 1024.0  # MiB -> GiB
+        except (OSError, ValueError, subprocess.SubprocessError):
+            total = None
+    _total_vram_gib_cache.append(total)
+    return total
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Running time, to the second: "8s", "2m 08s", "1h 05m 08s"."""
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def _format_estimate(seconds: float) -> str:
+    """Estimated run, to the minute: "~52m", "~1h 30m".
+
+    Whole minutes only, so the figure does not twitch on every redraw.
+    """
+    minutes = max(1, int(round(max(0.0, seconds) / 60.0)))
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"~{hours}h {minutes:02d}m"
+    return f"~{minutes}m"
 
 try:
     import cv2
@@ -229,6 +294,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._step_start_times: dict[int, float] = {}
         self._batch_losses: list[float] = []   # live per-batch box_loss from YOLO training
         self._refine_losses: list[float] = []  # live per-batch box_loss from direction_class_filtering
+        self._reset_training_progress()
 
         self._build_ui()
         self._set_skip_flags(self._default_skip_flags(), render=True)
@@ -1308,6 +1374,71 @@ class EasyTrackingGUI(ctk.CTk):
 
     # Progress helpers
 
+    def _reset_training_progress(self) -> None:
+        self._train_epoch: int = 0
+        self._train_total_epochs: int = 0
+        self._train_epoch_started_at: float = 0.0
+        self._train_first_epoch_at: float = 0.0
+        self._train_epoch_seconds: list[float] = []
+
+    def _training_estimate(self, started_at: float) -> str:
+        """Estimated total run time, or "Calculating..." before an epoch ends."""
+        if not self._train_epoch_seconds:
+            return "Calculating..."
+        # Mean over every finished epoch rather than the latest one, so the
+        # estimate settles instead of following each epoch's noise.
+        mean_epoch = sum(self._train_epoch_seconds) / len(self._train_epoch_seconds)
+        setup = max(0.0, self._train_first_epoch_at - started_at)
+        return _format_estimate(setup + mean_epoch * self._train_total_epochs)
+
+    def _training_progress(self, desc: str, batch: int, batch_total: int):
+        """Turn one Ultralytics training row into (fraction, status text).
+
+        Returns None for anything else, which leaves every other progress
+        display exactly as it was. Called on the output-reader thread, like the
+        per-batch loss capture beside it.
+        """
+        match = _YOLO_TRAIN_DESC_PAT.match(desc)
+        if match is None:
+            return None
+        epoch = int(match.group(1))
+        total_epochs = max(1, int(match.group(2)))
+        reserved_decimal_gb = float(match.group(3))
+        image_size = int(match.group(4))
+
+        now = time.time()
+        self._train_total_epochs = total_epochs
+        if epoch != self._train_epoch:
+            if self._train_epoch_started_at:
+                self._train_epoch_seconds.append(now - self._train_epoch_started_at)
+            else:
+                self._train_first_epoch_at = now
+            self._train_epoch = epoch
+            self._train_epoch_started_at = now
+
+        started_at = self._step_start_times.get(
+            self._active_step, self._train_first_epoch_at or now
+        )
+
+        fields = [f"Epoch: {epoch}/{total_epochs}"]
+        # Ultralytics prints 0G whenever torch.cuda is unavailable, which is
+        # exactly the CPU and MPS case where there is no VRAM to report.
+        if reserved_decimal_gb > 0.0:
+            used_gib = reserved_decimal_gb * _DECIMAL_GB_IN_GIB
+            total_gib = _total_vram_gib()
+            fields.append(
+                f"VRAM: {used_gib:.2f}/{total_gib:.1f} GiB" if total_gib
+                else f"VRAM: {used_gib:.2f} GiB"
+            )
+        fields.append(f"Image size: {image_size} px")
+        fields.append(
+            f"Time: {_format_elapsed(now - started_at)} / {self._training_estimate(started_at)}"
+        )
+
+        # One continuous bar across the whole run, not per-epoch.
+        fraction = ((epoch - 1) + batch / max(1, batch_total)) / total_epochs
+        return max(0.0, min(1.0, fraction)), _TRAIN_FIELD_GAP.join(fields)
+
     def _redraw_progress(self) -> None:
         c = self._progress_canvas
         c.delete("all")
@@ -2174,7 +2305,11 @@ class EasyTrackingGUI(ctk.CTk):
                 desc = prefix[:colon].strip() if colon >= 0 else prefix.strip()
             else:
                 desc = ""
-            text = f"{desc}  {n}/{tot}" if desc else f"{n}/{tot}"
+            training = self._training_progress(desc, n, tot)
+            if training is not None:
+                pct, text = training
+            else:
+                text = f"{desc}  {n}/{tot}" if desc else f"{n}/{tot}"
             self.after(0, lambda p=pct, t=text: self._on_tqdm_progress(p, t))
 
             # Extract per-batch box_loss from YOLO tqdm lines (training and refine_blobs)
@@ -2275,6 +2410,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._active_step = self._vis_indices[vis_i] if vis_i < len(self._vis_indices) else -1
         if self._active_step >= 0:
             self._step_start_times[self._active_step] = time.time()
+        self._reset_training_progress()
         if script == "obb_detector_training":
             self._batch_losses = []
         elif script == "direction_class_filtering":
