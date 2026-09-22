@@ -103,6 +103,61 @@ def disk_kernel(radius: int) -> np.ndarray:
     return (np.hypot(dy, dx) <= radius).astype(np.uint8)
 
 
+def smooth_single_animal_contour(contour: np.ndarray, level: int) -> np.ndarray:
+    """Remove thin protrusions with a thickness-relative disk opening.
+
+    Level 1..10 selects 4..40% of the maximum inscribed radius, rounded to
+    pixels. Opening restores the eroded body rather than replacing it with
+    a fitted ellipse. Work on the original contour on every call, not the
+    previous preview, so changing the slider is reversible.
+
+    Reduce the radius if opening would split the animal, create a hole, or
+    remove over a third of its pixels. Never add foreground pixels.
+    """
+    level = max(1, min(10, int(level)))
+    x, y, w, h = cv2.boundingRect(contour)
+    original = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    cv2.drawContours(original, [contour], -1, 255, cv2.FILLED, offset=(1 - x, 1 - y))
+    thickness = float(cv2.distanceTransform(original, cv2.DIST_L2, 5).max())
+    radius = min(int(thickness) - 1, max(1, int(round(thickness * level * 0.04))))
+    original_pixels = cv2.countNonZero(original)
+    for r in range(radius, 0, -1):
+        opened = cv2.morphologyEx(
+            original, cv2.MORPH_OPEN, disk_kernel(r),
+            borderType=cv2.BORDER_CONSTANT, borderValue=0,
+        )
+        opened = cv2.bitwise_and(opened, original)
+        if cv2.countNonZero(opened) < original_pixels * (2.0 / 3.0):
+            continue
+        contours, _ = cv2.findContours(opened, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        if len(contours) != 1 or cv2.contourArea(contours[0]) <= 0:
+            continue
+        return contours[0] + np.array([[[x - 1, y - 1]]], dtype=np.int32)
+    return contour
+
+
+def solid_contours_from_mask(mask: np.ndarray) -> list[np.ndarray]:
+    """Represent a mask as filled contours without accidentally filling holes.
+
+    Segmentation pickles store filled contours, not contour hierarchies.
+    If subtracting smoothed-away pixels leaves an outlier with a hole, split
+    that residual at a row through the hole. The pieces keep exactly the
+    remaining foreground; none of the removed pixels can reappear on export.
+    """
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return []
+    holes = [i for i, entry in enumerate(hierarchy[0]) if entry[3] >= 0]
+    if not holes:
+        return list(contours)
+    _, y, _, h = cv2.boundingRect(contours[holes[0]])
+    split = max(1, min(mask.shape[0] - 1, y + h // 2))
+    top = solid_contours_from_mask(mask[:split].copy())
+    bottom = solid_contours_from_mask(mask[split:].copy())
+    offset = np.array([[[0, split]]], dtype=np.int32)
+    return top + [cnt + offset for cnt in bottom]
+
+
 def expand_mask(mask: np.ndarray, expand_px: int, merge_only: bool) -> np.ndarray:
     """Mirrors gui_segmentation._expand_mask.
 

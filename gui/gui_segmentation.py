@@ -393,6 +393,8 @@ class _SegConfig:
     # protected from Additional Outlier segmentation.  During the first IQR
     # analysis pass this is None, so every normal blob is protected.
     protected_area_bounds: Optional[tuple[float, float]] = None
+    single_blob_smoothing_enabled: bool = False
+    single_blob_smoothing_level: int = 3
 
 
 def _fill_binary_holes(mask: np.ndarray) -> np.ndarray:
@@ -496,6 +498,78 @@ def _draw_blob_mask(image_shape: tuple, blobs: list[BlobMetrics]) -> np.ndarray:
     if blobs:
         cv2.drawContours(mask, [blob.contour for blob in blobs], -1, 255, thickness=cv2.FILLED)
     return mask
+
+
+def _draw_blob_union_mask(image_shape: tuple, blobs: list[BlobMetrics]) -> np.ndarray:
+    """Draw overlapping blob contours as their foreground union."""
+    mask = np.zeros(image_shape[:2], dtype=np.uint8)
+    for blob in blobs:
+        cv2.drawContours(mask, [blob.contour], -1, 255, thickness=cv2.FILLED)
+    return mask
+
+
+def _blob_with_contour(blob: BlobMetrics, contour: np.ndarray) -> BlobMetrics:
+    """Refresh geometry without reclassifying the already selected animal."""
+    _, _, w, h = cv2.boundingRect(contour)
+    cx, cy = contour_center(contour)
+    return replace(
+        blob, contour=contour, center_x=cx, center_y=cy,
+        area=contour_area(contour), bbox_area=float(w * h), w=float(w), h=float(h),
+    )
+
+
+def _smooth_classified_blobs(
+    blobs: list[BlobMetrics], image_shape: tuple, cfg: _SegConfig,
+) -> list[BlobMetrics]:
+    """Final output step, after area/OBB classification and Additional Outlier.
+
+    Raw masks and sampled statistics remain untouched. Removed pixels are
+    background, even where an Additional Outlier overlaps a rescued animal.
+    """
+    if not cfg.single_blob_smoothing_enabled:
+        return blobs
+    from main.segmentation_core import smooth_single_animal_contour, solid_contours_from_mask
+
+    removed = np.zeros(image_shape[:2], dtype=np.uint8)
+    smoothed = []
+    for blob in blobs:
+        if blob.is_crossing or blob.manual_outlier:
+            smoothed.append(blob)
+            continue
+        contour = smooth_single_animal_contour(blob.contour, cfg.single_blob_smoothing_level)
+        if np.array_equal(contour, blob.contour):
+            smoothed.append(blob)
+            continue
+        x, y, w, h = cv2.boundingRect(blob.contour)
+        before = np.zeros((h, w), dtype=np.uint8)
+        after = np.zeros_like(before)
+        cv2.drawContours(before, [blob.contour], -1, 255, cv2.FILLED, offset=(-x, -y))
+        cv2.drawContours(after, [contour], -1, 255, cv2.FILLED, offset=(-x, -y))
+        removed[y:y + h, x:x + w] |= cv2.bitwise_and(before, cv2.bitwise_not(after))
+        smoothed.append(_blob_with_contour(blob, contour))
+
+    if not cv2.countNonZero(removed):
+        return smoothed
+    output = []
+    for blob in smoothed:
+        if not (blob.is_crossing or blob.manual_outlier):
+            output.append(blob)
+            continue
+        x, y, w, h = cv2.boundingRect(blob.contour)
+        excluded = removed[y:y + h, x:x + w]
+        if not cv2.countNonZero(excluded):
+            output.append(blob)
+            continue
+        residual = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(residual, [blob.contour], -1, 255, cv2.FILLED, offset=(-x, -y))
+        if not cv2.countNonZero(cv2.bitwise_and(residual, excluded)):
+            output.append(blob)
+            continue
+        residual[excluded != 0] = 0
+        offset = np.array([[[x, y]]], dtype=np.int32)
+        for contour in solid_contours_from_mask(residual):
+            output.append(_blob_with_contour(blob, contour + offset))
+    return [replace(blob, blob_index=index) for index, blob in enumerate(output)]
 
 
 def _build_protected_blue_mask(
@@ -1161,6 +1235,8 @@ class CrossingReviewApp(ctk.CTk):
 
         self.region_expand_px_var = tk.IntVar(value=0)
         self.region_expand_merge_only_var = tk.BooleanVar(value=False)
+        self.single_blob_smoothing_enabled_var = tk.BooleanVar(value=False)
+        self.single_blob_smoothing_level_var = tk.IntVar(value=3)
 
         self.additional_outlier_enabled_var = tk.BooleanVar(value=False)
         self.additional_outlier_frame_start_var = tk.IntVar(value=0)
@@ -1336,6 +1412,7 @@ class CrossingReviewApp(ctk.CTk):
         self.ana_section = section("Outlier Extraction", expanded=True)
         self.result_section = section("Result OBB Import (beta)")
         self.additional_outlier_section = section("Additional Outlier (Optional)")
+        self.single_blob_smoothing_section = section("Single-animal Smoothing (Optional)")
 
         seg = self.seg_section
         self._pack_combobox(seg, "Segmentation mode", self.segmentation_mode_var, ["background_diff", "dark_region", "bright_region", "dark_region_and_background_diff", "bright_region_and_background_diff"])
@@ -1462,6 +1539,26 @@ class CrossingReviewApp(ctk.CTk):
         )
         self._refresh_additional_outlier_controls()
         self._toggle_additional_outlier_params()
+
+        smoothing = self.single_blob_smoothing_section
+        ctk.CTkCheckBox(
+            smoothing, text="Smooth single-animal blobs",
+            variable=self.single_blob_smoothing_enabled_var,
+        ).pack(anchor="w", padx=6, pady=(4, 4))
+        self.single_blob_smoothing_params_frame = ctk.CTkFrame(smoothing, corner_radius=0)
+        self._pack_scale_entry(
+            self.single_blob_smoothing_params_frame, "Smoothing level",
+            self.single_blob_smoothing_level_var, 1, 10, 1,
+        )
+        ctk.CTkLabel(
+            self.single_blob_smoothing_params_frame,
+            text="Blue blobs only, after Outlier Extraction.\n"
+                 "Higher levels remove thicker protrusions.\n"
+                 "Removed pixels become background.\n"
+                 "Analyze first when using IQR.",
+            anchor="w", justify="left", wraplength=280,
+        ).pack(fill="x", padx=6, pady=(2, 6))
+        self._toggle_single_blob_smoothing_params()
 
         expansion = self.region_expansion_section
         self._pack_scale_entry(expansion, "Expand region (px)", self.region_expand_px_var,
@@ -1636,6 +1733,7 @@ class CrossingReviewApp(ctk.CTk):
             getattr(self, "ana_section", None),
             getattr(self, "result_section", None),
             getattr(self, "additional_outlier_section", None),
+            getattr(self, "single_blob_smoothing_section", None),
         ]:
             if section is not None:
                 self._pack_sidebar_section(section)
@@ -1684,6 +1782,8 @@ class CrossingReviewApp(ctk.CTk):
             "additional_outlier_min_area": self.additional_outlier_min_area_var,
             "region_expand_px": self.region_expand_px_var,
             "region_expand_merge_only": self.region_expand_merge_only_var,
+            "single_blob_smoothing_enabled": self.single_blob_smoothing_enabled_var,
+            "single_blob_smoothing_level": self.single_blob_smoothing_level_var,
             "analysis_sample_count": self.analysis_sample_count_var,
             "area_outlier_method": self.area_outlier_method_var,
             "area_iqr_min": self.area_iqr_min_var,
@@ -1914,6 +2014,9 @@ class CrossingReviewApp(ctk.CTk):
                 pass
         if "show_centers" not in settings:
             self.show_centers_var.set(True)
+        # Loading an older session must not inherit smoothing from the last one.
+        self.single_blob_smoothing_enabled_var.set(bool(settings.get("single_blob_smoothing_enabled", False)))
+        self.single_blob_smoothing_level_var.set(max(1, min(10, int(settings.get("single_blob_smoothing_level", 3)))))
 
         self._apply_frame_ranges_from_settings(settings)
         self._toggle_area_outlier_method_controls()
@@ -3184,6 +3287,12 @@ class CrossingReviewApp(ctk.CTk):
             var.trace_add("write", lambda *_: self._refresh_bounds_from_fixed_stats(show_error=False))
         for var in [self.show_overlay_var, self.show_centers_var, self.show_contours_var]:
             var.trace_add("write", lambda *_: self.redraw_current_frame())
+        # Smoothing is post-classification: neither raw-mask caches nor the
+        # area-analysis statistics depend on it. Always redraw from raw blobs.
+        self.single_blob_smoothing_enabled_var.trace_add(
+            "write", lambda *_: self._toggle_single_blob_smoothing_params())
+        for var in [self.single_blob_smoothing_enabled_var, self.single_blob_smoothing_level_var]:
+            var.trace_add("write", lambda *_: self.redraw_current_frame())
 
     def set_status(self, text: str, auto_clear: bool = True):
         if self.status_clear_job is not None:
@@ -4008,6 +4117,12 @@ class CrossingReviewApp(ctk.CTk):
             return None
         return self._result_match.obbs_by_frame.get(
             int(self.current_frame) + int(self._result_match.frame_offset))
+
+    def _toggle_single_blob_smoothing_params(self):
+        if self.single_blob_smoothing_enabled_var.get():
+            self.single_blob_smoothing_params_frame.pack(fill="x", pady=(0, 4))
+        else:
+            self.single_blob_smoothing_params_frame.pack_forget()
 
     def _toggle_additional_outlier_params(self):
         if not hasattr(self, "additional_outlier_params_frame"):
@@ -5012,7 +5127,12 @@ class CrossingReviewApp(ctk.CTk):
             except ValueError as exc:
                 self.set_status(str(exc))
                 return mask, [self._clone_blob(b) for b in blobs]
-            return mask, self._classify_blobs(blobs, self.analysis_bounds)
+            classified = self._classify_blobs(blobs, self.analysis_bounds)
+            if self.single_blob_smoothing_enabled_var.get():
+                cfg = self._capture_seg_config()
+                classified = _smooth_classified_blobs(classified, mask.shape, cfg)
+                mask = _draw_blob_union_mask(mask.shape, classified)
+            return mask, classified
         # Before Analyze sampled frames, no fixed sampled-frame result exists.
         # Show only segmentation results without crossing classification.
         return mask, [self._clone_blob(b) for b in blobs]
@@ -5797,6 +5917,8 @@ class CrossingReviewApp(ctk.CTk):
             background_bgr=self.background_bgr,  # read-only; no copy needed
             additional_backgrounds=self._additional_outlier_backgrounds_for_config(),
             protected_area_bounds=protected_area_bounds,
+            single_blob_smoothing_enabled=bool(self.single_blob_smoothing_enabled_var.get()),
+            single_blob_smoothing_level=max(1, min(10, int(self.single_blob_smoothing_level_var.get()))),
         )
 
     def _additional_outlier_backgrounds_for_config(self) -> dict[str, np.ndarray]:
@@ -5931,6 +6053,8 @@ class CrossingReviewApp(ctk.CTk):
                         blobs = future.result()
                         source[fid] = self._classify_blobs(
                             blobs, bounds, clone=False, result_match=result_match)
+                        source[fid] = _smooth_classified_blobs(
+                            source[fid], (self.reader.height, self.reader.width), cfg)
 
                     n = batch_fids[-1] + 1 - start_frame
                     elapsed = max(1e-9, time.perf_counter() - start_time)
