@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -142,6 +143,79 @@ def ffmpeg_exe() -> str:
     shows it instead of letting a traceback end the export.
     """
     return ffmpeg_executable()
+
+
+HARDWARE_ENCODER_LABELS = {
+    "h264_videotoolbox": "Apple VideoToolbox",
+    "h264_nvenc": "NVIDIA NVENC",
+    "h264_qsv": "Intel Quick Sync",
+    "h264_amf": "AMD AMF",
+}
+
+
+def _hardware_encoder_candidates() -> tuple[str, ...]:
+    if sys.platform == "darwin":
+        return ("h264_videotoolbox",)
+    if os.name == "nt":
+        return ("h264_nvenc", "h264_qsv", "h264_amf")
+    return ("h264_nvenc", "h264_qsv")
+
+
+def _video_encoder_args(encoder: str) -> list[str]:
+    if encoder == "h264_nvenc":
+        return [
+            "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq",
+            "-rc:v", "vbr", "-cq:v", "12", "-b:v", "0", "-pix_fmt", "yuv420p",
+        ]
+    if encoder == "h264_qsv":
+        return [
+            "-c:v", "h264_qsv", "-preset", "medium",
+            "-global_quality:v", "12", "-pix_fmt", "nv12",
+        ]
+    if encoder == "h264_amf":
+        return [
+            "-c:v", "h264_amf", "-quality", "quality", "-rc:v", "cqp",
+            "-qp_i", "12", "-qp_p", "12", "-qp_b", "12", "-pix_fmt", "yuv420p",
+        ]
+    if encoder == "h264_videotoolbox":
+        return [
+            "-c:v", "h264_videotoolbox", "-q:v", "85",
+            "-allow_sw", "0", "-pix_fmt", "yuv420p",
+        ]
+    return ["-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p"]
+
+
+def _detect_hardware_video_encoder() -> str | None:
+    try:
+        executable = ffmpeg_exe()
+    except Exception:
+        return None
+    for encoder in _hardware_encoder_candidates():
+        cmd = [
+            executable,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-f", "lavfi",
+            "-i", "color=s=128x128:r=1:d=0.1",
+            "-frames:v", "1",
+            *_video_encoder_args(encoder),
+            "-f", "null",
+            "-",
+        ]
+        try:
+            completed = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if completed.returncode == 0:
+            return encoder
+    return None
 
 
 def _rgb_hex(color: tuple[int, int, int]) -> str:
@@ -464,6 +538,7 @@ class ExportJob:
     fps: float
     output_fps: float
     output_speed: float
+    video_encoder: str
     frame_count: int
     source_width: int
     source_height: int
@@ -498,6 +573,7 @@ class PreprocessApp(ctk.CTk):
         self.source_output_info_var = tk.StringVar(value="fps —  |  total frames —")
         self.output_speed_var = tk.DoubleVar(value=1.0)
         self.output_frame_count_var = tk.StringVar(value="total frames —")
+        self.gpu_acceleration_var = tk.BooleanVar(value=False)
         self.brightness_var = tk.DoubleVar(value=0.0)
         self.contrast_var = tk.DoubleVar(value=1.0)
         self.color_mode_var = tk.StringVar(value="Color")
@@ -543,6 +619,8 @@ class PreprocessApp(ctk.CTk):
         self.status_clear_job: str | None = None
         self.config_save_job: str | None = None
         self.export_queue: queue.Queue = queue.Queue()
+        self.hardware_encoder_queue: queue.Queue = queue.Queue()
+        self.hardware_video_encoder: str | None = None
         self.export_thread: threading.Thread | None = None
         self.export_cancel = threading.Event()
         self.export_proc: subprocess.Popen | None = None
@@ -561,6 +639,7 @@ class PreprocessApp(ctk.CTk):
         self._refresh_region_list(select_index=0)
         self._sync_adjustment_controls_from_region()
         self._refresh_video_controls()
+        self._start_hardware_encoder_detection()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         _start_maximized(self)
 
@@ -812,6 +891,15 @@ class PreprocessApp(ctk.CTk):
             text_color=MUTED_TEXT,
         ).pack(side="right", fill="x", expand=True, padx=(6, 0))
 
+        self.gpu_acceleration_check = ctk.CTkCheckBox(
+            export,
+            text="Detecting GPU acceleration...",
+            variable=self.gpu_acceleration_var,
+            command=self._schedule_crop_trimming_config_save,
+            state="disabled",
+        )
+        self.gpu_acceleration_check.pack(fill="x", padx=8, pady=(0, 8))
+
         action_row = ctk.CTkFrame(export, corner_radius=0)
         action_row.pack(fill="x", padx=8, pady=(0, 8))
         self.export_button = ctk.CTkButton(action_row, text="Export", command=self.start_export)
@@ -1049,6 +1137,35 @@ class PreprocessApp(ctk.CTk):
         )
         self.output_frame_count_var.set(f"total {output_frames:,} frames")
 
+    def _start_hardware_encoder_detection(self) -> None:
+        def worker() -> None:
+            self.hardware_encoder_queue.put(_detect_hardware_video_encoder())
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(100, self._poll_hardware_encoder_detection)
+
+    def _poll_hardware_encoder_detection(self) -> None:
+        try:
+            encoder = self.hardware_encoder_queue.get_nowait()
+        except queue.Empty:
+            self.after(100, self._poll_hardware_encoder_detection)
+            return
+
+        self.hardware_video_encoder = encoder
+        if encoder is None:
+            self.gpu_acceleration_var.set(False)
+            self.gpu_acceleration_check.configure(
+                text="GPU acceleration unavailable",
+                state="disabled",
+            )
+            return
+
+        label = HARDWARE_ENCODER_LABELS.get(encoder, encoder)
+        self.gpu_acceleration_check.configure(
+            text=f"Use GPU acceleration ({label})",
+            state="disabled" if self.export_running else "normal",
+        )
+
     def _bind_events(self) -> None:
         self.canvas.bind("<Configure>", lambda _event: self.fit_canvas_to_window())
         for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
@@ -1058,6 +1175,7 @@ class PreprocessApp(ctk.CTk):
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release, add="+")
         self.canvas.bind("<Motion>", self._on_canvas_motion, add="+")
         self.canvas.bind("<Leave>", self._on_canvas_leave, add="+")
+        self.frame_slider.bind("<Double-Button-1>", self._on_frame_slider_double_click, add="+")
         self.trim_canvas.bind("<Configure>", lambda _event: self._draw_trim_markers(), add="+")
 
     def _last_frame_index(self) -> int:
@@ -1400,6 +1518,12 @@ class PreprocessApp(ctk.CTk):
                 "template": self.template_var.get().strip() or "{stem}_{region}",
                 "speed": float(self.output_speed_var.get()),
                 "fps": float(self.output_fps_var.get()),
+                "use_gpu_acceleration": bool(self.gpu_acceleration_var.get()),
+                "video_encoder": (
+                    self.hardware_video_encoder
+                    if self.gpu_acceleration_var.get() and self.hardware_video_encoder
+                    else "libx264"
+                ),
                 "apply_view_rotation": bool(self.export_view_rotation_var.get()),
                 "view_rotation_degrees_clockwise": self.preview_turns * 90,
                 "selected_regions": [
@@ -1691,6 +1815,25 @@ class PreprocessApp(ctk.CTk):
         if self.reader is None:
             return
         self.set_frame(int(round(float(value))))
+
+    def _on_frame_slider_double_click(self, _event=None) -> None:
+        if self.reader is None or self.export_running:
+            return
+        # Let the slider finish handling the click before reading its value.
+        self.after_idle(self._fit_nearest_trim_boundary_to_slider)
+
+    def _fit_nearest_trim_boundary_to_slider(self) -> None:
+        if self.reader is None or self.export_running:
+            return
+        frame_idx = max(
+            0,
+            min(self._last_frame_index(), int(round(float(self.frame_slider.get())))),
+        )
+        self.set_frame(frame_idx)
+        if abs(frame_idx - self.in_frame) <= abs(frame_idx - self.out_frame):
+            self.set_in_frame()
+        else:
+            self.set_out_frame()
 
     def set_frame(self, frame_idx: int) -> None:
         if self.reader is None:
@@ -2299,6 +2442,11 @@ class PreprocessApp(ctk.CTk):
             )
         if not (1.0 <= output_fps <= 240.0):
             raise RuntimeError("Output fps must be between 1.0 and 240.0.")
+        video_encoder = "libx264"
+        if self.gpu_acceleration_var.get():
+            if self.hardware_video_encoder is None:
+                raise RuntimeError("GPU acceleration is selected, but no supported GPU encoder is available.")
+            video_encoder = self.hardware_video_encoder
 
         stem = Path(video_path).stem
         reserved: set[str] = set()
@@ -2352,6 +2500,7 @@ class PreprocessApp(ctk.CTk):
             fps=float(self.reader.fps),
             output_fps=output_fps,
             output_speed=output_speed,
+            video_encoder=video_encoder,
             frame_count=int(self.reader.frame_count),
             source_width=int(self.reader.width),
             source_height=int(self.reader.height),
@@ -2391,6 +2540,9 @@ class PreprocessApp(ctk.CTk):
         self.color_mode_combo.configure(state="disabled" if running else "readonly")
         self.output_speed_spin.configure(state=state)
         self.output_fps_spin.configure(state=state)
+        self.gpu_acceleration_check.configure(
+            state="disabled" if running or self.hardware_video_encoder is None else "normal"
+        )
         self._set_region_list_state(state)
         self._set_crop_controls_state(not running and self._crop_control_index() is not None)
         self.export_button.configure(state="disabled" if running else "normal")
@@ -2427,6 +2579,8 @@ class PreprocessApp(ctk.CTk):
             os.makedirs(job.output_folder, exist_ok=True)
             source_reader = VideoFrameReader(job.video_path)
             try:
+                encoder_label = HARDWARE_ENCODER_LABELS.get(job.video_encoder, "CPU (libx264)")
+                self.export_queue.put(("log", f"Video encoder: {encoder_label}"))
                 total_regions = max(1, len(job.regions))
                 for region_index, region in enumerate(job.regions):
                     if self.export_cancel.is_set():
@@ -2572,7 +2726,7 @@ class PreprocessApp(ctk.CTk):
             "0:v:0",
             "-an",
         ]
-        cmd.extend(["-vf", ",".join(filters), "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p"])
+        cmd.extend(["-vf", ",".join(filters), *_video_encoder_args(job.video_encoder)])
         cmd.extend(["-progress", "pipe:1", region.output_path])
         return cmd
 
