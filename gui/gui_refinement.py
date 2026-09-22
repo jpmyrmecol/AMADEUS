@@ -50,6 +50,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_refinement
 
 ensure_import_paths(PROJECT_ROOT, MAIN_DIR)
 from gui.color import WHITE_RGB, make_id_palette
+from main.video_compat import SUPPORTED_VIDEO_SUFFIXES, VIDEO_DROP_SUFFIXES, VIDEO_FILETYPES
 
 from assign_types import (
     # id_tracking S0/S1 labels used for refinement-candidate exclusion.
@@ -100,9 +101,8 @@ ZOOM_IN_FACTOR = 1.12
 ZOOM_OUT_FACTOR = 1.0 / ZOOM_IN_FACTOR
 MIN_ZOOM = 0.2
 MAX_ZOOM = 20.0
-VIDEO_EXTS = [("Video files", "*.mp4 *.avi *.mov *.mkv *.m4v"), ("All files", "*.*")]
+VIDEO_EXTS = VIDEO_FILETYPES
 CSV_EXTS = [("CSV files", "*.csv"), ("All files", "*.*")]
-VIDEO_DROP_SUFFIXES = frozenset({".mp4", ".avi", ".mov", ".mkv", ".m4v"})
 TRACKING_DROP_SUFFIXES = frozenset({".csv", ".h5", ".hdf5"})
 FRAME_CACHE_SIZE = 96
 PREFETCH_FORWARD = 16
@@ -175,7 +175,7 @@ _FILTER_STAGE_INFO: dict[int, str] = {
     ATYPE_VITERBI:      "direction_viterbi_updated.csv",
     ATYPE_ID_SWAP:      "long_swap_updated.csv",
 }
-VIDEO_SUFFIXES = (".mp4", ".avi", ".mov", ".mkv", ".m4v")
+VIDEO_SUFFIXES = SUPPORTED_VIDEO_SUFFIXES
 TRACK_SOURCE_FAMILIES = (
     "id_resolved",
     "final",

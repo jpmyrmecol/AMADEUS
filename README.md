@@ -30,6 +30,16 @@ macOS and Linux have not yet been extensively tested. For platform requirements,
 
 Use **Advanced Tracking** to configure individual stages and parameters, or **Multi Config Batch** to run several saved configurations.
 
+## Input videos
+
+MP4, MOV, AVI, MTS, M2TS, MKV, MPG/MPEG, TS and WebM can be selected. Whether a file can be used is decided by inspecting it, not by its extension: AMADEUS reads its codec, pixel format, frame rate mode, colour transfer and rotation with FFmpeg, then checks that OpenCV can decode it and seek to an arbitrary frame, which is how segmentation and tracking read frames.
+
+A video that already passes -- an 8-bit H.264 MP4/MOV/AVI with a constant frame rate, as before -- is used exactly as it is, with no prompt and no re-encoding. Anything else (HEVC, 10-bit, HDR, variable frame rate, rotation metadata, transport-stream containers) raises a dialog that explains what was found and offers to write an **analysis copy** beside the video, in `amadeus_<name>/converted/`. Conversion never starts on its own, and the original file is never modified.
+
+The analysis copy keeps the original resolution and is normalised to H.264 MP4, 8-bit SDR, constant frame rate, CRF 12 with short keyframe intervals so frame seeking stays exact. HDR is tone mapped to SDR, and rotation metadata is applied to the pixels. A frame range can be chosen; it defaults to the whole video. Each copy is written with a `.amadeus_conversion.json` record naming the source, the frame range, the frame rate, the codec, the FFmpeg version and how a converted frame number maps back onto the source, so a result stays reproducible.
+
+FFmpeg is not installed separately: AMADEUS uses the build pinned by `imageio-ffmpeg` in `uv.lock`, so the same encoder runs on every machine. See [third-party notices](THIRD_PARTY_NOTICES.md).
+
 ## Outputs and recording conditions
 
 The standard output includes individual identity, OBB center and dimensions, and head direction in degrees over time. Front and rear keypoints are derived geometrically from OBBs. In the final CSV, columns named `heading` store head direction. See the [output format](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-12) for coordinates, angles, and processing stages.

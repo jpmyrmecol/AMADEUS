@@ -47,6 +47,13 @@ except ImportError:  # Preserve direct execution with: python gui/gui_segmentati
 
 ensure_import_paths(PROJECT_ROOT)
 from gui.color import OBB_COLOR, OUTLIER_COLOR, ROI_COLOR, WHITE
+from gui.video_input import (
+    VIDEO_DROP_SUFFIXES,
+    VIDEO_FILETYPES,
+    ask_open_analysis_video,
+    prepare_analysis_video,
+    video_conversion_record,
+)
 from main.path_utils import resolve_config_paths
 from main.video_frame_count import detect_seekable_frame_count
 
@@ -58,8 +65,7 @@ WINDOW_MIN_H = 860
 CANVAS_BG = "black"
 CTK_THEME = str(gui_asset("deep_green.json"))
 
-VIDEO_EXTS = [("Video files", "*.mp4 *.avi *.mov *.mkv *.m4v"), ("All files", "*.*")]
-VIDEO_DROP_SUFFIXES = frozenset({".mp4", ".avi", ".mov", ".mkv", ".m4v"})
+VIDEO_EXTS = VIDEO_FILETYPES
 PKL_EXTS = [("Pickle files", "*.pickle *.pkl"), ("All files", "*.*")]
 PNG_EXTS = [("PNG files", "*.png"), ("All files", "*.*")]
 RESULT_CSV_EXTS = [("Result CSV files", "*.csv"), ("All files", "*.*")]
@@ -1719,6 +1725,9 @@ class CrossingReviewApp(ctk.CTk):
             "version": 4,
             "app": APP_TITLE,
             "settings": settings,
+            # Empty unless this video is an analysis copy; read back from the
+            # record FFmpeg conversion left beside it, so it is never stale.
+            "video_conversion": video_conversion_record(self.video_path_var.get().strip()),
             "hidden_state": {
                 "sampled_frame_indices": [int(x) for x in self.analysis_frames],
                 "analysis_iqr_stats": analysis_iqr_stats,
@@ -3189,8 +3198,19 @@ class CrossingReviewApp(ctk.CTk):
         self.status_var.set("")
 
     def _handle_selected_video(self, path: str) -> None:
-        """Load a selected video while preserving the existing config lookup."""
-        found = self._find_existing_config_for_video(path)
+        """Check a newly selected video, then load it or its analysis copy.
+
+        Only this path -- browsing and dropping -- runs the compatibility check.
+        Loading a video named by a saved config goes straight to load_video, so
+        reopening a session never re-asks about a conversion already decided.
+        """
+        prepared = prepare_analysis_video(self, path, log=self.set_status)
+        if prepared is None:
+            return
+        self._handle_prepared_video(prepared)
+
+    def _handle_prepared_video(self, prepared) -> None:
+        found = self._find_existing_config_for_video(prepared.path)
         if found:
             config_path, config = found
             try:
@@ -3199,12 +3219,12 @@ class CrossingReviewApp(ctk.CTk):
             except Exception as exc:
                 self.set_status(f"Failed to load existing config ({config_path}): {exc}")
         self.config_path = None
-        self.load_video(path)
+        self.load_video(prepared.path)
 
     def browse_video(self):
-        path = filedialog.askopenfilename(title="Select video", filetypes=VIDEO_EXTS)
-        if path:
-            self._handle_selected_video(path)
+        prepared = ask_open_analysis_video(self, title="Select video", log=self.set_status)
+        if prepared is not None:
+            self._handle_prepared_video(prepared)
 
     def load_video(self, path: str):
         if not path or not os.path.exists(path):

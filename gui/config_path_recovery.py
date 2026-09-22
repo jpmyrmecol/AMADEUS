@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from tkinter import filedialog, messagebox
 from typing import Any
 
+try:
+    from .video_input import VIDEO_DROP_SUFFIXES, VIDEO_FILETYPES
+except ImportError:  # Preserve direct execution of the GUIs that import this.
+    from video_input import VIDEO_DROP_SUFFIXES, VIDEO_FILETYPES
+
 
 _CONFIG_PATH_KEYS = (
     "TRAINING_VIDEO_PATH",
@@ -21,7 +26,7 @@ _CONFIG_PATH_KEYS = (
     "YOLO_DATASET_DIR",
 )
 _VIDEO_KEYS = ("TRAINING_VIDEO_PATH", "TRACKING_VIDEO_PATH")
-_VIDEO_SUFFIXES = frozenset({".mp4", ".avi", ".mov", ".mkv", ".m4v"})
+_VIDEO_SUFFIXES = VIDEO_DROP_SUFFIXES
 _SKIP_SEARCH_DIRS = frozenset({".git", ".venv", "venv", "__pycache__"})
 
 
@@ -254,7 +259,7 @@ def _ask_for_video_path(parent, key: str, current_path: str, *, directory: bool)
         title="Select video file",
         initialdir=initial_dir or None,
         initialfile=os.path.basename(current_path) if current_path else "",
-        filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv *.m4v"), ("All files", "*.*")],
+        filetypes=VIDEO_FILETYPES,
     ) or None
 
 

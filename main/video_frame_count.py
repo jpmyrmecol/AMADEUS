@@ -1,6 +1,29 @@
 # Copyright (C) 2026 Yusuke Notomi
 # SPDX-License-Identifier: AGPL-3.0-only
 
+"""How many frames of a video OpenCV can actually address, and which ones.
+
+This module owns one problem: a container can report more frames than OpenCV
+can seek to and decode. AMADEUS addresses frames directly, so the reported count
+is not usable as an upper bound. Three places deal with that, and they do not
+overlap:
+
+* here -- the one implementation of the probe itself. Every tracking stage calls
+  read_video_frame_info() and clamps its frame range to the result, and
+  video_compat.probe_opencv() calls detect_seekable_frame_count() rather than
+  repeating it.
+* video_compat.assess_video() -- decides whether the loss is small enough to
+  clamp silently or large enough to offer a conversion. An analysis video made
+  by video_compat needs no clamping at all: plain frame access reaches every
+  frame of it.
+* gui_segmentation.VideoFrameReader -- recovers a *displayable* preview frame
+  when one seek fails mid-session, by stepping forward from an earlier frame.
+  That is a different job from counting, and it is the only other copy.
+
+Add nothing else. A new workaround for a video AMADEUS cannot seek in belongs in
+video_compat's conversion, not in a fourth place.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
