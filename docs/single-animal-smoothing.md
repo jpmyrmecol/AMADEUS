@@ -2,7 +2,7 @@
 
 In Segmentation, expand **Single-animal Smoothing (Optional)** below
 **Additional Outlier** and enable **Smooth single-animal blobs**. It is off by
-default. **Smoothing level** ranges from 1 to 10 (initial value 3); increase it
+default. **Smoothing level** ranges from 1 to 20 (initial value 3); increase it
 to remove thicker protrusions. With IQR classification, run **Analyze** first.
 The preview updates when the level changes. Save or run Processing to persist
 the settings in `segmentation_gui_config.json`.
@@ -39,7 +39,7 @@ returns to the existing pipeline. Parallel Processing uses a settings snapshot
 rather than reading Tk variables from worker threads.
 
 Saved settings are `single_blob_smoothing_enabled` (boolean, default `false`)
-and `single_blob_smoothing_level` (integer, 1–10, default `3`). Loading an older
+and `single_blob_smoothing_level` (integer, 1–20, default `3`). Loading an older
 configuration without these keys resets this option to its defaults.
 
 The raw foreground-mask helper used independently by identity correction is

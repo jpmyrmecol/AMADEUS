@@ -106,7 +106,7 @@ def disk_kernel(radius: int) -> np.ndarray:
 def smooth_single_animal_contour(contour: np.ndarray, level: int) -> np.ndarray:
     """Remove thin protrusions with a thickness-relative disk opening.
 
-    Level 1..10 selects 4..40% of the maximum inscribed radius, rounded to
+    Level 1..20 selects 4..80% of the maximum inscribed radius, rounded to
     pixels. Opening restores the eroded body rather than replacing it with
     a fitted ellipse. Work on the original contour on every call, not the
     previous preview, so changing the slider is reversible.
@@ -114,7 +114,7 @@ def smooth_single_animal_contour(contour: np.ndarray, level: int) -> np.ndarray:
     Reduce the radius if opening would split the animal, create a hole, or
     remove over a third of its pixels. Never add foreground pixels.
     """
-    level = max(1, min(10, int(level)))
+    level = max(1, min(20, int(level)))
     x, y, w, h = cv2.boundingRect(contour)
     original = np.zeros((h + 2, w + 2), dtype=np.uint8)
     cv2.drawContours(original, [contour], -1, 255, cv2.FILLED, offset=(1 - x, 1 - y))

@@ -1548,7 +1548,7 @@ class CrossingReviewApp(ctk.CTk):
         self.single_blob_smoothing_params_frame = ctk.CTkFrame(smoothing, corner_radius=0)
         self._pack_scale_entry(
             self.single_blob_smoothing_params_frame, "Smoothing level",
-            self.single_blob_smoothing_level_var, 1, 10, 1,
+            self.single_blob_smoothing_level_var, 1, 20, 1,
         )
         ctk.CTkLabel(
             self.single_blob_smoothing_params_frame,
@@ -2016,7 +2016,7 @@ class CrossingReviewApp(ctk.CTk):
             self.show_centers_var.set(True)
         # Loading an older session must not inherit smoothing from the last one.
         self.single_blob_smoothing_enabled_var.set(bool(settings.get("single_blob_smoothing_enabled", False)))
-        self.single_blob_smoothing_level_var.set(max(1, min(10, int(settings.get("single_blob_smoothing_level", 3)))))
+        self.single_blob_smoothing_level_var.set(max(1, min(20, int(settings.get("single_blob_smoothing_level", 3)))))
 
         self._apply_frame_ranges_from_settings(settings)
         self._toggle_area_outlier_method_controls()
@@ -5918,7 +5918,7 @@ class CrossingReviewApp(ctk.CTk):
             additional_backgrounds=self._additional_outlier_backgrounds_for_config(),
             protected_area_bounds=protected_area_bounds,
             single_blob_smoothing_enabled=bool(self.single_blob_smoothing_enabled_var.get()),
-            single_blob_smoothing_level=max(1, min(10, int(self.single_blob_smoothing_level_var.get()))),
+            single_blob_smoothing_level=max(1, min(20, int(self.single_blob_smoothing_level_var.get()))),
         )
 
     def _additional_outlier_backgrounds_for_config(self) -> dict[str, np.ndarray]:
