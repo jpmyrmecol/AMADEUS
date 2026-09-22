@@ -488,6 +488,8 @@ class PreprocessApp(ctk.CTk):
         self.active_region_var = tk.StringVar(value="Full image")
         self.frame_label_var = tk.StringVar(value="frame 0 / 0   00:00.000")
         self.trim_label_var = tk.StringVar(value="in 0 / out 0 / length 0 frames")
+        self.in_frame_var = tk.StringVar(value="0")
+        self.out_frame_var = tk.StringVar(value="0")
         self.output_folder_var = tk.StringVar()
         self.template_var = tk.StringVar(value="{stem}_{region}")
         self.brightness_var = tk.DoubleVar(value=0.0)
@@ -543,6 +545,7 @@ class PreprocessApp(ctk.CTk):
         self.export_running = False
         self._syncing_adjustments = False
         self._syncing_crop_controls = False
+        self._syncing_trim_inputs = False
         self._last_progress_update = 0.0
         self.output_folder_var.trace_add("write", lambda *_: self._schedule_crop_trimming_config_save())
         self.template_var.trace_add("write", lambda *_: self._schedule_crop_trimming_config_save())
@@ -601,7 +604,7 @@ class PreprocessApp(ctk.CTk):
 
         self.timeline_pane = ctk.CTkFrame(self, corner_radius=0)
         self.timeline_pane.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 6))
-        self.timeline_pane.grid_columnconfigure(7, weight=1)
+        self.timeline_pane.grid_columnconfigure(11, weight=1)
 
         self.status_label = ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", text_color=MUTED_TEXT)
         self.status_label.grid(row=2, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 6))
@@ -802,14 +805,51 @@ class PreprocessApp(ctk.CTk):
         self.set_in_button.grid(row=0, column=5, padx=4, pady=(7, 3))
         self.set_out_button = ctk.CTkButton(self.timeline_pane, text="Set Out", width=78, command=self.set_out_frame)
         self.set_out_button.grid(row=0, column=6, padx=(4, 10), pady=(7, 3))
+        ctk.CTkLabel(self.timeline_pane, text="In frame", width=58, anchor="e").grid(
+            row=0, column=7, padx=(0, 3), pady=(7, 3)
+        )
+        self.in_frame_spin = tk.Spinbox(
+            self.timeline_pane,
+            from_=0,
+            to=0,
+            increment=1,
+            width=8,
+            textvariable=self.in_frame_var,
+            **_SPIN_CFG,
+        )
+        self.in_frame_spin.grid(row=0, column=8, padx=(0, 6), pady=(7, 3))
+        ctk.CTkLabel(self.timeline_pane, text="Out frame", width=68, anchor="e").grid(
+            row=0, column=9, padx=(0, 3), pady=(7, 3)
+        )
+        self.out_frame_spin = tk.Spinbox(
+            self.timeline_pane,
+            from_=0,
+            to=0,
+            increment=1,
+            width=8,
+            textvariable=self.out_frame_var,
+            **_SPIN_CFG,
+        )
+        self.out_frame_spin.grid(row=0, column=10, padx=(0, 10), pady=(7, 3))
+        for spinbox, which in (
+            (self.in_frame_spin, "in"),
+            (self.out_frame_spin, "out"),
+        ):
+            spinbox.configure(command=lambda k=which: self._commit_trim_frame_input(k))
+            for event in ("<Return>", "<KP_Enter>", "<FocusOut>"):
+                spinbox.bind(
+                    event,
+                    lambda _event, k=which: self._commit_trim_frame_input(k),
+                    add="+",
+                )
         self.frame_slider = ctk.CTkSlider(self.timeline_pane, orientation="horizontal", command=self.on_frame_slider)
-        self.frame_slider.grid(row=0, column=7, sticky="ew", padx=(0, 8), pady=(7, 3))
+        self.frame_slider.grid(row=0, column=11, sticky="ew", padx=(0, 8), pady=(7, 3))
         self.frame_label = ctk.CTkLabel(self.timeline_pane, textvariable=self.frame_label_var, width=180, anchor="e")
-        self.frame_label.grid(row=0, column=8, sticky="e", pady=(7, 3))
+        self.frame_label.grid(row=0, column=12, sticky="e", pady=(7, 3))
         self.trim_canvas = tk.Canvas(self.timeline_pane, height=18, bg=TIMELINE_BG, highlightthickness=0)
-        self.trim_canvas.grid(row=1, column=7, sticky="ew", padx=(0, 8), pady=(0, 7))
+        self.trim_canvas.grid(row=1, column=11, sticky="ew", padx=(0, 8), pady=(0, 7))
         self.trim_label = ctk.CTkLabel(self.timeline_pane, textvariable=self.trim_label_var, anchor="w", text_color=MUTED_TEXT)
-        self.trim_label.grid(row=1, column=0, columnspan=7, sticky="ew", padx=(0, 10), pady=(0, 7))
+        self.trim_label.grid(row=1, column=0, columnspan=11, sticky="ew", padx=(0, 10), pady=(0, 7))
 
     def _pack_float_slider(
         self,
@@ -1451,8 +1491,51 @@ class PreprocessApp(ctk.CTk):
     def _configure_frame_slider(self) -> None:
         last = self._last_frame_index()
         self.frame_slider.configure(from_=0, to=max(0, last))
+        self.in_frame_spin.configure(from_=0, to=max(0, last))
+        self.out_frame_spin.configure(from_=0, to=max(0, last))
         self.frame_slider.set(0)
         self._update_timeline_labels()
+
+    def _sync_trim_frame_inputs(self) -> None:
+        self._syncing_trim_inputs = True
+        try:
+            self.in_frame_var.set(str(int(self.in_frame)))
+            self.out_frame_var.set(str(int(self.out_frame)))
+        finally:
+            self._syncing_trim_inputs = False
+
+    def _commit_trim_frame_input(self, which: str | None = None):
+        """Apply the editable In/Out frame fields to the active trim range."""
+        if self._syncing_trim_inputs or self.reader is None:
+            return "break"
+        try:
+            in_frame = int(self.in_frame_var.get().strip())
+            out_frame = int(self.out_frame_var.get().strip())
+        except (AttributeError, TypeError, ValueError):
+            self.set_status("Trim frame values must be integers.", auto_clear=False)
+            self._sync_trim_frame_inputs()
+            return "break"
+
+        if which == "in" and in_frame > out_frame:
+            out_frame = in_frame
+        elif which == "out" and out_frame < in_frame:
+            in_frame = out_frame
+
+        last = self._last_frame_index()
+        if not (0 <= in_frame <= out_frame <= last):
+            self.set_status(
+                f"Trim frame range must satisfy 0 <= in <= out <= {last}.",
+                auto_clear=False,
+            )
+            self._sync_trim_frame_inputs()
+            return "break"
+
+        self.in_frame = int(in_frame)
+        self.out_frame = int(out_frame)
+        self._sync_trim_frame_inputs()
+        self._update_timeline_labels()
+        self._schedule_crop_trimming_config_save()
+        return "break"
 
     def _refresh_video_controls(self) -> None:
         has_video = self.reader is not None and not self.export_running
@@ -1466,6 +1549,8 @@ class PreprocessApp(ctk.CTk):
             self.last_button,
             self.set_in_button,
             self.set_out_button,
+            self.in_frame_spin,
+            self.out_frame_spin,
             self.frame_slider,
         ]:
             widget.configure(state=normal)
@@ -1552,6 +1637,7 @@ class PreprocessApp(ctk.CTk):
         self.in_frame = int(self.current_frame)
         if self.in_frame > self.out_frame:
             self.out_frame = self.in_frame
+        self._sync_trim_frame_inputs()
         self._update_timeline_labels()
         self._schedule_crop_trimming_config_save()
 
@@ -1561,6 +1647,7 @@ class PreprocessApp(ctk.CTk):
         self.out_frame = int(self.current_frame)
         if self.out_frame < self.in_frame:
             self.in_frame = self.out_frame
+        self._sync_trim_frame_inputs()
         self._update_timeline_labels()
         self._schedule_crop_trimming_config_save()
 
@@ -1604,6 +1691,7 @@ class PreprocessApp(ctk.CTk):
             self.play_button.configure(text=">")
 
     def _update_timeline_labels(self) -> None:
+        self._sync_trim_frame_inputs()
         if self.reader is None:
             self.frame_label_var.set("frame 0 / 0   00:00.000")
             self.trim_label_var.set("in 0 / out 0 / length 0 frames")
@@ -2206,6 +2294,8 @@ class PreprocessApp(ctk.CTk):
             self.last_button,
             self.set_in_button,
             self.set_out_button,
+            self.in_frame_spin,
+            self.out_frame_spin,
         ]:
             widget.configure(state=state)
         self.brightness_entry.configure(state=state)
