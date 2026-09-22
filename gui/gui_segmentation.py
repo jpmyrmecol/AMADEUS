@@ -2382,6 +2382,7 @@ class CrossingReviewApp(ctk.CTk):
         self._area_reference_key = None
         self._min_area_slider_cap = None
         self._absolute_zoomed = False
+        self._absolute_dragging = False
         self._update_area_control_ranges()
         # Persist the loaded state (and any replacement video path) immediately.
 
@@ -2773,6 +2774,7 @@ class CrossingReviewApp(ctk.CTk):
         self._absolute_spins = []
         self._absolute_slider_cap = 100000
         self._absolute_zoomed = False
+        self._absolute_dragging = False
         variables = (self.area_absolute_min_var, self.area_absolute_max_var)
         validate = (self.register(lambda value: value == "" or value.isascii() and value.isdecimal()), "%P")
         for index, label in enumerate(("Minimum area", "Maximum area")):
@@ -2796,6 +2798,7 @@ class CrossingReviewApp(ctk.CTk):
         self._absolute_canvas.bind("<Button-1>", self._start_absolute_drag)
         self._absolute_canvas.bind("<Double-Button-1>", self._reset_absolute_handle_to_default)
         self._absolute_canvas.bind("<B1-Motion>", self._drag_absolute_handle)
+        self._absolute_canvas.bind("<ButtonRelease-1>", self._end_absolute_drag)
         for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self._absolute_canvas.bind(event, self._zoom_absolute_slider)
         for var in variables:
@@ -2869,12 +2872,16 @@ class CrossingReviewApp(ctk.CTk):
         return "break"
 
     def _start_absolute_drag(self, event):
+        self._absolute_dragging = True
         left, right = self._absolute_handle_positions()
         if abs(left - right) < 1:
             self._absolute_active_handle = 0 if event.y < 18 else 1
         else:
             self._absolute_active_handle = 0 if abs(event.x - left) <= abs(event.x - right) else 1
         self._drag_absolute_handle(event)
+
+    def _end_absolute_drag(self, _event=None):
+        self._absolute_dragging = False
 
     def _drag_absolute_handle(self, event):
         width = max(1, self._absolute_canvas.winfo_width() - 24)
@@ -2939,7 +2946,7 @@ class CrossingReviewApp(ctk.CTk):
             self.min_area_scale.set_value_range(
                 1, MIN_AREA_ENTRY_MAX, clamp_current=False, slider_upper=self._min_area_slider_cap,
             )
-            if reference_changed and not self._absolute_zoomed:
+            if reference_changed and not self._absolute_zoomed and not self._absolute_dragging:
                 self._absolute_slider_cap = area_cap
             self._sync_absolute_control(force=True)
             if self._area_reference_max <= 0:
@@ -3362,6 +3369,7 @@ class CrossingReviewApp(ctk.CTk):
         self._min_area_slider_cap = None
         self._absolute_defaults_pending = not self._applying_config
         self._absolute_zoomed = False
+        self._absolute_dragging = False
         self.frame_count = reader.frame_count
         self.current_frame = 0
         self.frame_var.set(0)
