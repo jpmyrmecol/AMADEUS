@@ -65,6 +65,8 @@ _RUNTIME_PACKAGE_ASSETS = (
 _RUNTIME_REQUIRED_FILES = (
     "pyproject.toml",
     "uv.lock",
+    # The pinned uv version travels with the lockfile it resolves.
+    "UV_VERSION",
     "VERSION",
     "README.md",
     RUNTIME_NOTEBOOK_TEMPLATE_RELATIVE_PATH,

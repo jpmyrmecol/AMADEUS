@@ -15,6 +15,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [AMADEUS] Uninstall complete. Your projects and uv installation were kept.
+echo [AMADEUS] Uninstall complete. Your projects were kept, as was any uv you installed yourself.
 pause
 exit /b 0

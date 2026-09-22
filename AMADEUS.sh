@@ -40,13 +40,31 @@ if [ "$(uname -s)" = Darwin ]; then
     fi
 fi
 
-find_uv() {
-    if command -v uv >/dev/null 2>&1; then
-        command -v uv
-        return 0
-    fi
-    for candidate in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
-        if [ -x "$candidate" ]; then
+# --- pinned uv (tests split AMADEUS.sh at this marker) ---------------------
+# uv resolves uv.lock, so its version is pinned like any other dependency:
+# UV_VERSION is the single source of truth, shared with AMADEUS.bat, Colab and
+# tools/setup_environment.py. A uv already installed on this machine is used
+# only when it matches; otherwise AMADEUS installs its own copy under .uv and
+# leaves the existing installation alone.
+if [ ! -f "$SCRIPT_DIR/UV_VERSION" ]; then
+    echo "[ERROR] UV_VERSION is missing from $SCRIPT_DIR; the AMADEUS folder is incomplete." >&2
+    exit 1
+fi
+UV_VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/UV_VERSION")"
+AMADEUS_UV_DIR="$SCRIPT_DIR/.uv"
+
+uv_version_of() {
+    # "uv 1.2.3 (abc1234 2026-01-01)" -> "1.2.3"
+    [ -x "$1" ] || return 1
+    "$1" --version 2>/dev/null | awk 'NR == 1 { print $2 }'
+}
+
+find_pinned_uv() {
+    path_uv="$(command -v uv 2>/dev/null || true)"
+    for candidate in "$AMADEUS_UV_DIR/bin/uv" "$AMADEUS_UV_DIR/uv" "$path_uv" \
+                     "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+        [ -n "$candidate" ] || continue
+        if [ "$(uv_version_of "$candidate" || true)" = "$UV_VERSION" ]; then
             printf '%s\n' "$candidate"
             return 0
         fi
@@ -54,28 +72,37 @@ find_uv() {
     return 1
 }
 
-UV_EXE="$(find_uv || true)"
+UV_EXE="$(find_pinned_uv || true)"
 
 if [ -z "$UV_EXE" ]; then
-    echo "[AMADEUS] uv not found; installing via the official installer..."
+    echo "[AMADEUS] Installing uv $UV_VERSION into $AMADEUS_UV_DIR ..."
+    echo "[AMADEUS] Any other uv on this machine is left untouched."
+    installer_url="https://astral.sh/uv/$UV_VERSION/install.sh"
     if command -v curl >/dev/null 2>&1; then
-        curl -LsSf https://astral.sh/uv/install.sh | sh
+        fetch_installer() { curl -LsSf "$1"; }
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO- https://astral.sh/uv/install.sh | sh
+        fetch_installer() { wget -qO- "$1"; }
     else
         echo "[ERROR] Neither curl nor wget is available, so uv cannot be installed automatically." >&2
-        echo "[ERROR] Install curl (e.g. 'sudo apt install curl') and re-run, or install uv manually: https://docs.astral.sh/uv/" >&2
+        echo "[ERROR] Install curl (e.g. 'sudo apt install curl') and re-run, or install uv $UV_VERSION manually: https://docs.astral.sh/uv/" >&2
         exit 1
     fi
-    UV_EXE="$(find_uv || true)"
+    # INSTALLER_NO_MODIFY_PATH keeps the user's shell profile and PATH as they are.
+    if ! fetch_installer "$installer_url" |
+        env UV_INSTALL_DIR="$AMADEUS_UV_DIR" INSTALLER_NO_MODIFY_PATH=1 sh; then
+        echo "[ERROR] Installing uv $UV_VERSION failed. Check your network connection and retry." >&2
+        exit 1
+    fi
+    UV_EXE="$(find_pinned_uv || true)"
 fi
 
 if [ -z "$UV_EXE" ]; then
-    echo "[ERROR] uv could not be installed or found." >&2
+    echo "[ERROR] uv $UV_VERSION could not be installed or found." >&2
+    echo "[ERROR] Install it manually and re-run: https://docs.astral.sh/uv/" >&2
     exit 1
 fi
 
-echo "[AMADEUS] Using uv: $UV_EXE"
+echo "[AMADEUS] Using uv $UV_VERSION: $UV_EXE"
 
 # The bootstrap interpreter only runs setup; setup selects and checks the GUI Python.
 # AMADEUS_VENV explicitly selects an alternate environment. Do not infer it from activation.

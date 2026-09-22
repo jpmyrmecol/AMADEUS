@@ -24,6 +24,10 @@ PYTORCH_CU128_INDEX = "https://download.pytorch.org/whl/cu128"
 PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 ENVIRONMENT_ROOT = Path(os.environ.get("AMADEUS_VENV", PROJECT_ROOT / ".venv")).expanduser().absolute()
 READY_MARKER = ENVIRONMENT_ROOT / ".amadeus-ready"
+# uv resolves uv.lock, so its version is pinned like the packages it installs.
+# The launchers read the same file and hand over a matching uv; this check keeps
+# a hand-run setup honest too.
+UV_VERSION_FILE = PROJECT_ROOT / "UV_VERSION"
 
 
 def nvidia_smi_candidates() -> list[str]:
@@ -487,6 +491,52 @@ def install_amadeus_command() -> Path:
     return command_path
 
 
+def required_uv_version() -> str:
+    """Return the uv version AMADEUS is pinned to."""
+    try:
+        version = UV_VERSION_FILE.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"Could not read {UV_VERSION_FILE}: {exc}") from exc
+    if not version:
+        raise RuntimeError(f"UV_VERSION is empty: {UV_VERSION_FILE}")
+    return version
+
+
+def uv_version(uv_executable: str) -> str:
+    """Return the version an uv executable reports, or "" if it cannot be asked."""
+    try:
+        completed = subprocess.run(
+            [uv_executable, "--version"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+    except OSError:
+        return ""
+    if completed.returncode != 0:
+        return ""
+    # "uv 1.2.3 (abc1234 2026-01-01)" -> "1.2.3"
+    fields = (completed.stdout or "").strip().splitlines()
+    fields = fields[0].split() if fields else []
+    return fields[1] if len(fields) >= 2 else ""
+
+
+def check_uv_version(uv_executable: str) -> str:
+    """Refuse to sync with a uv other than the pinned one."""
+    required = required_uv_version()
+    found = uv_version(uv_executable)
+    if found == required:
+        return required
+    reported = found or "no version"
+    raise RuntimeError(
+        f"AMADEUS is pinned to uv {required}, but {uv_executable} reports {reported}.\n"
+        "Run the AMADEUS launcher (AMADEUS.bat, AMADEUS.command or AMADEUS.sh) instead "
+        "of calling this script directly: it installs the pinned uv into the AMADEUS "
+        "folder without touching any uv you already have."
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--uv", required=True, help="Path to the uv executable.")
@@ -508,6 +558,8 @@ def main() -> int:
     try:
         if os.name == "nt" and ENVIRONMENT_ROOT != PROJECT_ROOT / ".venv":
             raise RuntimeError("AMADEUS_VENV is supported by the macOS/Linux launcher only.")
+        uv_version_in_use = check_uv_version(args.uv)
+        print(f"[AMADEUS] Using uv {uv_version_in_use}: {args.uv}", flush=True)
         python = select_python(args.python)
         sync_environment(args.uv, profile, python)
         verify_numeric_stack()

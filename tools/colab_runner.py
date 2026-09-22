@@ -40,7 +40,7 @@ from main.colab_utils import (
 from main.path_utils import CONFIG_PATH_KEYS
 
 
-_RUNTIME_REQUIRED_FILES = ("VERSION", "uv.lock", RUNTIME_NOTEBOOK_TEMPLATE_RELATIVE_PATH)
+_RUNTIME_REQUIRED_FILES = ("VERSION", "UV_VERSION", "uv.lock", RUNTIME_NOTEBOOK_TEMPLATE_RELATIVE_PATH)
 _RUNTIME_PROVENANCE_FIELDS = (
     "source_ref",
     "source_revision",

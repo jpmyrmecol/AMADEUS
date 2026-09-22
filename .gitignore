@@ -1,0 +1,4 @@
+# Created by the launchers and by running AMADEUS; not part of the project.
+.venv/
+.uv/
+__pycache__/
