@@ -1832,20 +1832,23 @@ class PreprocessApp(ctk.CTk):
         if self.reader is None or self.export_running:
             return
         # Let the slider finish handling the click before reading its value.
-        self.after_idle(self._fit_nearest_trim_boundary_to_slider)
+        self.after_idle(self._jump_to_nearest_trim_boundary)
 
-    def _fit_nearest_trim_boundary_to_slider(self) -> None:
+    def _jump_to_nearest_trim_boundary(self) -> None:
         if self.reader is None or self.export_running:
             return
-        frame_idx = max(
+        clicked_frame = max(
             0,
             min(self._last_frame_index(), int(round(float(self.frame_slider.get())))),
         )
-        self.set_frame(frame_idx)
-        if abs(frame_idx - self.in_frame) <= abs(frame_idx - self.out_frame):
-            self.set_in_frame()
+        if abs(clicked_frame - self.in_frame) <= abs(clicked_frame - self.out_frame):
+            target_frame = self.in_frame
+            boundary_name = "In"
         else:
-            self.set_out_frame()
+            target_frame = self.out_frame
+            boundary_name = "Out"
+        self.set_frame(target_frame)
+        self.set_status(f"Moved to {boundary_name} frame {target_frame:,}.")
 
     def set_frame(self, frame_idx: int) -> None:
         if self.reader is None:
