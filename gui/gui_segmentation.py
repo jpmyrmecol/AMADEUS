@@ -509,7 +509,7 @@ def _draw_blob_union_mask(image_shape: tuple, blobs: list[BlobMetrics]) -> np.nd
 
 
 def _blob_with_contour(blob: BlobMetrics, contour: np.ndarray) -> BlobMetrics:
-    """Refresh geometry without reclassifying the already selected animal."""
+    """Refresh geometry before the caller applies any post-smoothing classification."""
     _, _, w, h = cv2.boundingRect(contour)
     cx, cy = contour_center(contour)
     return replace(
@@ -521,10 +521,11 @@ def _blob_with_contour(blob: BlobMetrics, contour: np.ndarray) -> BlobMetrics:
 def _smooth_classified_blobs(
     blobs: list[BlobMetrics], image_shape: tuple, cfg: _SegConfig,
 ) -> list[BlobMetrics]:
-    """Final output step, after area/OBB classification and Additional Outlier.
+    """Smooth single-animal contours after classification and Additional Outlier.
 
     Raw masks and sampled statistics remain untouched. Removed pixels are
     background, even where an Additional Outlier overlaps a rescued animal.
+    Callers reapply the existing area bounds to the returned geometry.
     """
     if not cfg.single_blob_smoothing_enabled:
         return blobs
@@ -1554,6 +1555,7 @@ class CrossingReviewApp(ctk.CTk):
             self.single_blob_smoothing_params_frame,
             text="Blue blobs only, after Outlier Extraction.\n"
                  "Higher levels remove thicker protrusions.\n"
+                 "Area bounds are reapplied afterward.\n"
                  "Removed pixels become background.\n"
                  "Analyze first when using IQR.",
             anchor="w", justify="left", wraplength=280,
@@ -5139,6 +5141,8 @@ class CrossingReviewApp(ctk.CTk):
             if self.single_blob_smoothing_enabled_var.get():
                 cfg = self._capture_seg_config()
                 classified = _smooth_classified_blobs(classified, mask.shape, cfg)
+                classified = self._classify_blobs(
+                    classified, self.analysis_bounds, clone=False)
                 mask = _draw_blob_union_mask(mask.shape, classified)
             return mask, classified
         # Before Analyze sampled frames, no fixed sampled-frame result exists.
@@ -6061,8 +6065,11 @@ class CrossingReviewApp(ctk.CTk):
                         blobs = future.result()
                         source[fid] = self._classify_blobs(
                             blobs, bounds, clone=False, result_match=result_match)
-                        source[fid] = _smooth_classified_blobs(
-                            source[fid], (self.reader.height, self.reader.width), cfg)
+                        if cfg.single_blob_smoothing_enabled:
+                            source[fid] = _smooth_classified_blobs(
+                                source[fid], (self.reader.height, self.reader.width), cfg)
+                            source[fid] = self._classify_blobs(
+                                source[fid], bounds, clone=False, result_match=result_match)
 
                     n = batch_fids[-1] + 1 - start_frame
                     elapsed = max(1e-9, time.perf_counter() - start_time)

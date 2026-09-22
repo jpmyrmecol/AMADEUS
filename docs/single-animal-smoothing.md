@@ -12,7 +12,9 @@ OBB Import. The remaining contour is used for preview, screenshots, labeled
 video export, and the segmentation pickle consumed by tracking and training.
 Removed pixels become background; they are not exported as new outlier blobs.
 Any overlapping outlier pixels are also removed so they cannot restore the
-discarded protrusions.
+discarded protrusions. After smoothing, the same Area bounds are applied to the
+reduced contour again; a contour that has become too small is classified as an
+outlier.
 
 ## Algorithm and processing order
 
@@ -27,8 +29,9 @@ discarded protrusions.
   more than one third of its pixels. If no positive radius is safe, keep the
   original contour. Small blobs and adjacent levels can therefore produce
   the same result, and removal of thick appendages is deliberately limited.
-- Update the output contour's area, center and bounding box while retaining
-  its single-animal classification. Do not classify its reduced area again.
+- Update the output contour's area, center and bounding box, then classify the
+  reduced area again with the same Absolute or sampled IQR bounds. Existing
+  Result OBB rescue rules are applied in the same way as the first pass.
 - Subtract removed pixels from overlapping outliers too. The pickle format
   holds filled contours without hole hierarchies, so a residual outlier with
   a hole is split into filled pieces rather than filling discarded pixels.
