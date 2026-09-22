@@ -32,6 +32,7 @@ try:
     )
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from .config_path_recovery import prepare_config_for_gui
+    from .video_input import ask_open_analysis_video
 except ImportError:  # Preserve direct execution with: python gui/gui_easy_tracking.py
     from project_paths import (
         GUI_DIR,
@@ -45,6 +46,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_easy_track
     )
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from config_path_recovery import prepare_config_for_gui
+    from video_input import ask_open_analysis_video
 
 # Matches tqdm lines: anything containing "N/TOTAL [" (works for both TTY and non-TTY output)
 _TQDM_PAT = re.compile(r'(\d+)/(\d+)\s*\[')
@@ -301,13 +303,13 @@ class EasyTrackingGUI(ctk.CTk):
         self._seg_status.pack(side="left")
 
     def _browse_video(self) -> None:
-        path = filedialog.askopenfilename(
-            filetypes=[("Video files", "*.avi *.mov *.mp4"), ("All files", "*.*")]
+        prepared = ask_open_analysis_video(
+            self, title="Select video", log=lambda message: print(f"[video] {message}", flush=True)
         )
-        if not path:
+        if prepared is None:
             return
         self._video_entry.delete(0, tk.END)
-        self._video_entry.insert(0, path)
+        self._video_entry.insert(0, prepared.path)
         self._update_session_label()
 
     def _update_session_label(self) -> None:

@@ -31,6 +31,17 @@ if (Test-Path -LiteralPath $venv) {
     Write-Host "[AMADEUS] No .venv was present."
 }
 
+# AMADEUS installs its own pinned uv here rather than touching the user's;
+# removing AMADEUS should take that copy with it.
+$uvDir = [IO.Path]::GetFullPath((Join-Path $root ".uv"))
+if ($uvDir -ne ($root.TrimEnd("\") + "\.uv")) {
+    throw "Refusing to remove an unexpected uv path."
+}
+if (Test-Path -LiteralPath $uvDir) {
+    Remove-Item -LiteralPath $uvDir -Recurse -Force
+    Write-Host "[AMADEUS] Removed the AMADEUS copy of uv (.uv)."
+}
+
 $commandDir = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "AMADEUS\bin"))
 $commandPath = Join-Path $commandDir "amadeus.cmd"
 if (Test-Path -LiteralPath $commandPath) {

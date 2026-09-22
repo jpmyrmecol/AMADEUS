@@ -34,6 +34,7 @@ try:
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from .advanced_tracking_layout import partition_category_items
     from .config_path_recovery import prepare_config_for_gui
+    from .video_input import ask_open_analysis_video
 except ImportError:  # Preserve direct execution with: python gui/gui_advanced_tracking.py
     from project_paths import (
         PROJECT_ROOT,
@@ -48,6 +49,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_advanced_t
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from advanced_tracking_layout import partition_category_items
     from config_path_recovery import prepare_config_for_gui
+    from video_input import ask_open_analysis_video
 
 ensure_import_paths(MAIN_DIR)
 from checkpoint_utils import checkpoint_spec_for_config
@@ -1372,6 +1374,16 @@ class ConfigGUI(ctk.CTk):
                     sec["btn"].configure(text=f"Show {t} >")
                     sec["visible"] = False
 
+    def _browse_analysis_video(self, start_dir: str, title: str) -> str | None:
+        """Pick a video, converting it first when AMADEUS cannot read it directly."""
+        prepared = ask_open_analysis_video(
+            self,
+            title=title,
+            initialdir=start_dir if os.path.isdir(start_dir) else None,
+            log=lambda message: print(f"[video] {message}", flush=True),
+        )
+        return prepared.path if prepared is not None else None
+
     def browse_path(self, key):
         initial = self.basic_entries[key].get() or os.getcwd()
 
@@ -1382,10 +1394,7 @@ class ConfigGUI(ctk.CTk):
                 path = filedialog.askdirectory(initialdir=os.path.dirname(initial))
         elif key == "TRAINING_VIDEO_PATH":
             start_dir = os.path.dirname(initial) if os.path.exists(initial) else initial
-            path = filedialog.askopenfilename(
-                initialdir=start_dir,
-                filetypes=[("Video files", "*.avi *.mov *.mp4"), ("All files", "*.*")],
-            )
+            path = self._browse_analysis_video(start_dir, "Select training video")
         elif key == "TRACKING_VIDEO_PATH":
             is_dir = self.path_mode["TRACKING_VIDEO_PATH_IS_DIR"].get()
             if is_dir:
@@ -1393,10 +1402,7 @@ class ConfigGUI(ctk.CTk):
                 path = filedialog.askdirectory(initialdir=start_dir)
             else:
                 start_dir = os.path.dirname(initial) if os.path.exists(initial) else initial
-                path = filedialog.askopenfilename(
-                    initialdir=start_dir,
-                    filetypes=[("Video files", "*.avi *.mov *.mp4"), ("All files", "*.*")],
-                )
+                path = self._browse_analysis_video(start_dir, "Select tracking video")
         else:
             path = None
 

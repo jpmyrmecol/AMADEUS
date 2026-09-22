@@ -47,16 +47,12 @@ call :keep_prompt_open
 exit /b 0
 
 :setup_environment
-call :find_uv
-if defined UV_EXE goto uv_ready
-
-echo [AMADEUS] Installing uv...
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-call :find_uv
-
-:uv_ready
+REM tools\uv_bootstrap.ps1 prints the pinned uv's path and nothing else on
+REM stdout; its progress and errors go to stderr and stay visible here.
+set "UV_EXE="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\uv_bootstrap.ps1" -ProjectRoot "%~dp0."`) do set "UV_EXE=%%I"
 if not defined UV_EXE (
-    echo [ERROR] uv could not be installed or found.
+    echo [ERROR] uv could not be prepared. See the message above.
     exit /b 1
 )
 
@@ -69,13 +65,6 @@ if not exist ".venv\Scripts\python.exe" exit /b 0
 if not exist ".venv\Scripts\amadeus.exe" exit /b 0
 powershell.exe -NoProfile -Command "$marker='.venv\.amadeus-ready'; $reference=if (Test-Path -LiteralPath $marker) { (Get-Item -LiteralPath $marker).LastWriteTimeUtc } else { (Get-Item -LiteralPath '.venv\Scripts\amadeus.exe').LastWriteTimeUtc }; if ($reference -lt (Get-Item -LiteralPath 'pyproject.toml').LastWriteTimeUtc -or $reference -lt (Get-Item -LiteralPath 'uv.lock').LastWriteTimeUtc -or $reference -lt (Get-Item -LiteralPath 'VERSION').LastWriteTimeUtc) { exit 1 }; if (!(Test-Path -LiteralPath $marker)) { New-Item -ItemType File -Path $marker | Out-Null }" >nul 2>&1
 if not errorlevel 1 set "AMADEUS_ENV_READY=1"
-exit /b 0
-
-:find_uv
-set "UV_EXE="
-for /f "delims=" %%I in ('where uv.exe 2^>nul') do if not defined UV_EXE set "UV_EXE=%%I"
-if not defined UV_EXE if exist "%USERPROFILE%\.local\bin\uv.exe" set "UV_EXE=%USERPROFILE%\.local\bin\uv.exe"
-if not defined UV_EXE if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "UV_EXE=%USERPROFILE%\.cargo\bin\uv.exe"
 exit /b 0
 
 :keep_prompt_open

@@ -172,7 +172,9 @@ amadeus_open_python_installer
                     self.assertIn("then run AMADEUS Setup again", result.stdout)
 
     def test_launchers_stop_normally_after_handoff(self):
-        launchers = [(ROOT / "AMADEUS.sh", "\nfind_uv() {")]
+        # AMADEUS.sh marks where the macOS Python handoff ends and uv setup
+        # begins; splitting there keeps this test off the uv logic.
+        launchers = [(ROOT / "AMADEUS.sh", '\n# --- pinned uv (tests split AMADEUS.sh at this marker) ---')]
         site = ROOT.parent / "AMADEUS-site/AMADEUS-Setup.command"
         if site.exists():
             launchers.append((site, '\nmkdir -p "$(dirname "$app")"'))

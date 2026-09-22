@@ -30,6 +30,13 @@ except ImportError:
 
 ensure_import_paths(PROJECT_ROOT)
 from gui.color import CYAN_RGB, GREEN_RGB, ORANGE_RGB, WHITE_RGB
+from gui.video_input import (
+    VIDEO_DROP_SUFFIXES,
+    ask_open_analysis_video,
+    prepare_analysis_video,
+    video_conversion_record,
+)
+from main.video_compat import ffmpeg_executable
 
 
 ctk.set_appearance_mode("dark")
@@ -41,9 +48,6 @@ WINDOW_H = 980
 WINDOW_MIN_W = 1200
 WINDOW_MIN_H = 820
 CANVAS_BG = "black"
-
-VIDEO_EXTS = [("Video files", "*.mp4 *.avi *.mov *.mkv *.m4v"), ("All files", "*.*")]
-VIDEO_DROP_SUFFIXES = frozenset({".mp4", ".avi", ".mov", ".mkv", ".m4v"})
 
 BRIGHTNESS_MIN = -1.0
 BRIGHTNESS_MAX = 1.0
@@ -130,9 +134,12 @@ def _ensure_video_modules() -> None:
 
 
 def ffmpeg_exe() -> str:
-    import imageio_ffmpeg
+    """The pinned FFmpeg build, shared with the video compatibility layer.
 
-    return imageio_ffmpeg.get_ffmpeg_exe()
+    Raises FfmpegUnavailableError, whose message explains the fix; start_export()
+    shows it instead of letting a traceback end the export.
+    """
+    return ffmpeg_executable()
 
 
 def _rgb_hex(color: tuple[int, int, int]) -> str:
@@ -578,7 +585,7 @@ class PreprocessApp(ctk.CTk):
             self,
             self.canvas,
             allowed_suffixes=VIDEO_DROP_SUFFIXES,
-            on_path=self.load_video,
+            on_path=self.select_video,
             status_callback=lambda text: self.set_status(text, auto_clear=False),
             label="video",
         )
@@ -1258,7 +1265,7 @@ class PreprocessApp(ctk.CTk):
                     "color_mode": str(region.color_mode),
                 }
             )
-        return {
+        data = {
             "tool": "AMADEUS Cropping & Trimming",
             "video_path": self.video_path_var.get().strip(),
             "source_width": int(self.reader.width),
@@ -1286,6 +1293,12 @@ class PreprocessApp(ctk.CTk):
             },
             "regions": regions,
         }
+        # Empty unless this video is an analysis copy; read back from the record
+        # FFmpeg conversion left beside it, so it traces to the original recording.
+        conversion = video_conversion_record(self.video_path_var.get().strip())
+        if conversion:
+            data["video_conversion"] = conversion
+        return data
 
     def _write_crop_trimming_config(self, *, log_success: bool = False) -> str | None:
         if self.reader is None:
@@ -1359,9 +1372,19 @@ class PreprocessApp(ctk.CTk):
         return "color"
 
     def browse_video(self) -> None:
-        path = filedialog.askopenfilename(parent=self, title="Select video", filetypes=VIDEO_EXTS)
-        if path:
-            self.load_video(path)
+        prepared = ask_open_analysis_video(self, title="Select video", log=self._log)
+        if prepared is not None:
+            self.load_video(prepared.path)
+
+    def select_video(self, path: str) -> None:
+        """Handle a video the user chose: check it, then load what we can read.
+
+        Only the browse and drop paths run the compatibility check; load_video
+        itself stays free of it so restoring a session never re-asks.
+        """
+        prepared = prepare_analysis_video(self, path, log=self._log)
+        if prepared is not None:
+            self.load_video(prepared.path)
 
     def load_video(self, path: str) -> None:
         path = str(Path(path).expanduser())
