@@ -2,3 +2,4 @@
 .venv/
 .uv/
 __pycache__/
+.ffmpeg-hardware/
