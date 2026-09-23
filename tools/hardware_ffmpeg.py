@@ -141,13 +141,18 @@ def _linux_gpu_present() -> bool:
     # Intel chipset, network, or storage devices as a GPU.
     pci_devices = Path("/sys/bus/pci/devices")
     try:
-        for device in pci_devices.iterdir():
+        devices = tuple(pci_devices.iterdir())
+    except OSError:
+        devices = ()
+
+    for device in devices:
+        try:
             vendor = (device / "vendor").read_text(encoding="ascii").strip().lower()
             device_class = (device / "class").read_text(encoding="ascii").strip().lower()
-            if vendor in {"0x10de", "0x1002", "0x8086"} and device_class.startswith("0x03"):
-                return True
-    except OSError:
-        pass
+        except OSError:
+            continue
+        if vendor in {"0x10de", "0x1002", "0x8086"} and device_class.startswith("0x03"):
+            return True
     return False
 
 
