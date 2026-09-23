@@ -238,7 +238,7 @@ def prepare_hardware_ffmpeg() -> None:
             "[AMADEUS] Preparing the GPU-capable FFmpeg build (one-time download)...",
             flush=True,
         )
-        executable = ensure_hardware_ffmpeg()
+        executable = ensure_hardware_ffmpeg(PROJECT_ROOT / ".ffmpeg-hardware")
         if executable:
             print(f"[AMADEUS] GPU-capable FFmpeg ready: {executable}", flush=True)
     except Exception as exc:
