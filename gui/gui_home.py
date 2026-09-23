@@ -30,6 +30,20 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")
 
 APP_TITLE = "AMADEUS"
+
+
+def home_window_title() -> str:
+    """Return the Home window title with the installed AMADEUS version."""
+    try:
+        version = (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        version = ""
+    if not version:
+        return APP_TITLE
+    version_label = version if version.lower().startswith("v") else f"v{version}"
+    return f"{APP_TITLE} {version_label}"
+
+
 ONLINE_MANUAL_BASE_URL = "https://amadeus.jpmyrmecol.com"
 DEFAULT_BG = "#000000"
 PANEL_BORDER = "#171717"
@@ -406,7 +420,7 @@ def main() -> None:
     root = ctk.CTk()
     configure_dpi_scaling(root)
     root.withdraw()
-    root.title(APP_TITLE)
+    root.title(home_window_title())
     install_window_icon(root)
 
     splash: tk.Toplevel | None = None
