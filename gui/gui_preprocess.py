@@ -189,7 +189,6 @@ def _video_encoder_args(encoder: str) -> list[str]:
 
 def _probe_hardware_video_encoder(executables: tuple[str, ...]) -> tuple[str, str] | None:
     for encoder in _hardware_encoder_candidates():
-        pixel_format = "nv12" if encoder == "h264_qsv" else "yuv420p"
         for executable in executables:
             cmd = [
                 executable,
@@ -198,12 +197,10 @@ def _probe_hardware_video_encoder(executables: tuple[str, ...]) -> tuple[str, st
                 "-f", "lavfi",
                 "-i", "color=s=128x128:r=30:d=0.2",
                 "-frames:v", "2",
-                "-c:v", encoder,
-                "-pix_fmt", pixel_format,
+                *_video_encoder_args(encoder),
+                "-f", "null",
+                "-",
             ]
-            if encoder == "h264_videotoolbox":
-                cmd.extend(["-allow_sw", "0"])
-            cmd.extend(["-f", "null", "-"])
             try:
                 completed = subprocess.run(
                     cmd,
