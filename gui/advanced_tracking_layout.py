@@ -14,7 +14,7 @@ from collections.abc import Iterable
 CATEGORY_COLUMN_LAYOUT: dict[tuple[str, str], tuple[tuple[str, ...], ...]] = {
     ("Initial Tracking", "Initial Tracking"): (
         ("AUTO_PARAMS", "LOCALIZED_RATIO"),
-        ("INIT_MAX_GAP",),
+        ("INIT_MAX_GAP", "OBB_FIT_MODE"),
         ("SKIP_INIT_PREVIEW",),
     ),
     ("Create single animal images", "Trajectory / Direction Filtering"): (

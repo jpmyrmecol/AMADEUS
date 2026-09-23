@@ -1408,31 +1408,35 @@ def _generated_frame_count(src_dir: str, img_ext: str) -> int:
     return _count_labeled_images(os.path.join(src_dir, "images"), os.path.join(src_dir, "labels"), img_ext)
 
 
-def _estimate_next_frame_target(
+def _estimate_additional_frame_target(
     *,
     required_samples: int,
     observed_samples: int,
     observed_frames: int,
     optimistic_images_per_frame: int,
 ) -> int:
-    required_samples = max(1, int(required_samples))
+    """Estimate only the missing frame sets to append, with a small safety margin."""
+    deficit = max(1, int(required_samples) - int(observed_samples))
     observed_frames = max(0, int(observed_frames))
     optimistic = max(1, int(optimistic_images_per_frame))
     if observed_samples > 0 and observed_frames > 0:
         observed_per_frame = max(0.25, float(observed_samples) / float(observed_frames))
-        estimated = math.ceil(float(required_samples) / observed_per_frame)
+        estimated = math.ceil(float(deficit) / observed_per_frame)
     else:
-        estimated = math.ceil(float(required_samples) / float(optimistic))
-    estimated = max(1, int(math.ceil(estimated * 1.15)))
-    if observed_frames > 0 and estimated <= observed_frames:
-        deficit = max(1, required_samples - observed_samples)
-        estimated = observed_frames + math.ceil(float(deficit) / float(optimistic))
-    return max(1, estimated)
+        estimated = math.ceil(float(deficit) / float(optimistic))
+    return max(1, int(math.ceil(estimated * 1.15)))
 
 
-def _rerun_crop_if_needed(cfg: dict, needs_crops: bool) -> None:
+def _rerun_crop_if_needed(
+    cfg: dict,
+    needs_crops: bool,
+    *,
+    append: bool = False,
+) -> None:
     if needs_crops and not cfg_bool(cfg, "skip_cropping", False):
-        _run_python_stage("crop_images.py", cfg, {}, "crop")
+        overrides = {"CROP_APPEND": True} if append else {}
+        suffix = "crop_append" if append else "crop"
+        _run_python_stage("crop_images.py", cfg, overrides, suffix)
 
 
 def ensure_generation_targets(
@@ -1491,7 +1495,7 @@ def ensure_generation_targets(
                 break
             clustered_dir = os.path.join(session_path, "paste_blobs_clustered")
             observed_frames = _generated_frame_count(clustered_dir, img_ext)
-            next_frames = _estimate_next_frame_target(
+            next_frames = _estimate_additional_frame_target(
                 required_samples=c_target,
                 observed_samples=c_count,
                 observed_frames=observed_frames,
@@ -1499,15 +1503,24 @@ def ensure_generation_targets(
             )
             print(
                 f"Clustered shortfall loop {loop_index + 1}/{max_loops}: "
-                f"{c_count}/{c_target} samples, requesting {next_frames} clustered frames."
+                f"{c_count}/{c_target} samples, requesting {next_frames} additional clustered frames."
             )
             _run_python_stage(
                 "interaction_image_synthesis_clustered.py",
                 cfg,
-                {"CLUSTER_FRAMES": int(next_frames)},
+                {
+                    "CLUSTER_FRAMES": int(next_frames),
+                    "CLUSTER_APPEND": True,
+                    "RANDOM_SEED": derive_seed(
+                        normalize_seed(cfg.get("RANDOM_SEED", 0)),
+                        "create_dataset",
+                        "clustered_supplement",
+                        loop_index + 1,
+                    ),
+                },
                 "paste_blobs_clustered",
             )
-            _rerun_crop_if_needed(cfg, needs_crops)
+            _rerun_crop_if_needed(cfg, needs_crops, append=True)
 
     _, final_c_count = _count_pairs_by_group_fast(
         session_path,
@@ -1540,7 +1553,7 @@ def ensure_generation_targets(
                 )
             paste_dir = os.path.join(session_path, "paste_blobs")
             observed_frames = _generated_frame_count(paste_dir, img_ext)
-            next_frames = _estimate_next_frame_target(
+            next_frames = _estimate_additional_frame_target(
                 required_samples=required_nc,
                 observed_samples=nc_count,
                 observed_frames=observed_frames,
@@ -1548,15 +1561,24 @@ def ensure_generation_targets(
             )
             print(
                 f"paste_blobs shortfall loop {loop_index + 1}/{max_loops}: "
-                f"{nc_count}/{required_nc} samples, requesting {next_frames} non-clustered frames."
+                f"{nc_count}/{required_nc} samples, requesting {next_frames} additional non-clustered frames."
             )
             _run_python_stage(
                 "interaction_image_synthesis.py",
                 cfg,
-                {"PASTE_BLOBS_NUM_FRAMES": int(next_frames)},
+                {
+                    "PASTE_BLOBS_NUM_FRAMES": int(next_frames),
+                    "PASTE_BLOBS_APPEND": True,
+                    "RANDOM_SEED": derive_seed(
+                        normalize_seed(cfg.get("RANDOM_SEED", 0)),
+                        "create_dataset",
+                        "mixed_supplement",
+                        loop_index + 1,
+                    ),
+                },
                 "paste_blobs",
             )
-            _rerun_crop_if_needed(cfg, needs_crops)
+            _rerun_crop_if_needed(cfg, needs_crops, append=True)
 
     nc_count, c_count = _count_pairs_by_group_fast(
         session_path,

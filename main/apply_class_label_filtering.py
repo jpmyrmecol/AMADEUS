@@ -290,6 +290,30 @@ def backup_without_crossing_to_refine_original(
         shutil.move(os.path.join(without_crossing_dir, name), os.path.join(original_dir, name))
     return True
 
+def restore_pre_refinement_single_animal_images(
+    original_dir: str,
+    without_crossing_dir: str,
+    progress: Progress,
+) -> None:
+    """Restore the untouched snapshot when refinement removes every image."""
+    if not os.path.isdir(original_dir):
+        raise FileNotFoundError(original_dir)
+
+    reset_without_crossing_output_dir(without_crossing_dir, progress)
+    ensure_dir(without_crossing_dir)
+    names = sorted(
+        name for name in os.listdir(original_dir)
+        if not is_refine_workspace_name(name)
+    )
+    for name in progress.bar(names, desc="Restore pre-refinement single_animal_images"):
+        src = os.path.join(original_dir, name)
+        dst = os.path.join(without_crossing_dir, name)
+        if os.path.isdir(src):
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+
+
 def parse_frame_id_from_name(name: str) -> int:
     m = re.match(r"frame_(\d+)\.png$", name)
     if not m:
@@ -1710,9 +1734,15 @@ def main() -> None:
     original_manifest_by_frame = group_manifest_rows(original_manifest_rows)
     filtered_manifest_rows = filter_manifest_rows(original_manifest_rows, delete_map, progress)
 
+    original_images_dir = os.path.join(original_dir, "images")
+    original_image_count = (
+        sum(1 for name in os.listdir(original_images_dir) if name.lower().endswith(".png"))
+        if os.path.isdir(original_images_dir)
+        else 0
+    )
+
     reset_without_crossing_output_dir(without_crossing_dir, progress)
     ensure_dir(without_crossing_dir)
-    copy_static_files(original_dir, without_crossing_dir, progress)
     saved_images, saved_previews, empty_frame_stats = rewrite_frame_assets(
         original_dir=original_dir,
         without_crossing_dir=without_crossing_dir,
@@ -1722,6 +1752,22 @@ def main() -> None:
         cfg=cfg,
         progress=progress,
     )
+    if original_image_count > 0 and saved_images == 0:
+        print(
+            "[WARNING] Label refinement removed every single-animal image "
+            f"(0 of {original_image_count} original frames remain). "
+            "Restoring the pre-refinement image set and continuing."
+        )
+        restore_pre_refinement_single_animal_images(
+            original_dir, without_crossing_dir, progress,
+        )
+        print(
+            "[WARNING] Pre-refinement single_animal_images restored; "
+            "continuing with the original image set."
+        )
+        return
+
+    copy_static_files(original_dir, without_crossing_dir, progress)
     write_filtered_object_pool(original_dir, without_crossing_dir, filtered_manifest_rows, progress)
     filter_blob_classification(original_dir, without_crossing_dir, delete_map, preview_marks, progress)
     write_bbox_stats(without_crossing_dir, filtered_manifest_rows, cfg, len(delete_map), saved_images, saved_previews, empty_frame_stats, progress)

@@ -508,6 +508,7 @@ class ConfigGUI(ctk.CTk):
         initial_tracking_fields = {
             "Initial Tracking": [
                 ("AUTO_PARAMS", "Auto Parameters", True),
+                ("OBB_FIT_MODE", "Mask OBB Fit", "min_area"),
                 ("LOCALIZED_RATIO", "Localized Ratio", 0.9),
                 ("INIT_MAX_GAP", "Max Gap", 1),
                 ("SKIP_INIT_PREVIEW", "Skip Preview", False),
@@ -1295,6 +1296,13 @@ class ConfigGUI(ctk.CTk):
 
                         if key == "CROSSING_MODE":
                             combo = ctk.CTkComboBox(cell, values=["pickle", "area", "hybrid"], state="readonly", width=130,
+                                                    command=lambda _, k=key: self._on_combo_selected(k))
+                            combo.set(str(default))
+                            combo.grid(row=0, column=1, sticky="w")
+                            widgets[key] = combo
+                            _created_widget = combo
+                        elif key == "OBB_FIT_MODE":
+                            combo = ctk.CTkComboBox(cell, values=["min_area", "pca"], state="readonly", width=130,
                                                     command=lambda _, k=key: self._on_combo_selected(k))
                             combo.set(str(default))
                             combo.grid(row=0, column=1, sticky="w")
