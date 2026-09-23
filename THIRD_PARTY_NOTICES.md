@@ -79,7 +79,8 @@ and its `LICENSE.txt` are installed. The source FFmpeg build is
 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), GPL static variant,
 build `N-126342` from 2026-08-31. Its build configuration includes NVIDIA NVENC, Intel Quick Sync where
 supported, AMD AMF, and VAAPI on Linux x86_64. The upstream Linux ARM64 build does not
-include Intel QSV or VAAPI.
+include Intel QSV or VAAPI. BtbN's static binaries target Windows 10 22H2 or
+newer and Linux glibc 2.28 / kernel 4.18 or newer.
 
 The downloaded build is licensed under GPL version 3 or later because the GPL
 variant enables GPL-licensed FFmpeg components. AMADEUS invokes it as an
