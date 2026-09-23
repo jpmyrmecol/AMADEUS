@@ -200,9 +200,10 @@ def _probe_hardware_video_encoder(executables: tuple[str, ...]) -> tuple[str, st
                 "-frames:v", "2",
                 "-c:v", encoder,
                 "-pix_fmt", pixel_format,
-                "-f", "null",
-                "-",
             ]
+            if encoder == "h264_videotoolbox":
+                cmd.extend(["-allow_sw", "0"])
+            cmd.extend(["-f", "null", "-"])
             try:
                 completed = subprocess.run(
                     cmd,
