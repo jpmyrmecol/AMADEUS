@@ -228,6 +228,8 @@ finally:
 def prepare_hardware_ffmpeg() -> None:
     """Prepare the optional GPU encoder build without blocking CPU-only installs."""
     try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
         from tools.hardware_ffmpeg import ensure_hardware_ffmpeg, gpu_hardware_present
 
         if not gpu_hardware_present():
