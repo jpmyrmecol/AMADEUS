@@ -29,38 +29,39 @@ SOFTWARE.
 
 ## FFmpeg
 
-AMADEUS inspects and, when the user agrees, converts input videos with FFmpeg.
-The FFmpeg build is **pinned**, not discovered on the host: it is the binary
-shipped inside the `imageio-ffmpeg` wheel that `pyproject.toml` fixes at
-`imageio-ffmpeg==0.6.0` and that `uv.lock` pins by SHA-256 per platform. AMADEUS
-deliberately ignores any `ffmpeg` found on `PATH`, so an analysis video produced
-on one machine is produced by the same encoder on every other machine. The
-version actually used is recorded in each conversion's metadata file.
+AMADEUS uses one fixed FFmpeg executable per operating system for video
+inspection, analysis conversion, Cropping & Trimming, and Create Video. It does
+not select FFmpeg from `PATH` or keep a second GPU-only binary.
 
-`imageio-ffmpeg` 0.6.0 contains one FFmpeg binary per platform wheel:
+On Windows and Linux, the launcher downloads one checksum-pinned BtbN static
+build into `.ffmpeg-hardware/` during setup. The same binary and its `LICENSE.txt`
+are used by all video features. The pinned assets, archive sizes, and SHA-256
+checks are in `tools/ffmpeg_runtime.py`; the source is
+[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), GPL static variant,
+build `N-126342` from 2026-08-31. Separate archives cover Windows and Linux on
+x86_64 and ARM64. The builds include NVIDIA NVENC, Intel Quick Sync, AMD AMF,
+and Linux VAAPI where supported. BtbN's static binaries target Windows 10 22H2
+or newer and Linux glibc 2.28 / kernel 4.18 or newer.
 
-| Platform wheel | Bundled binary |
-| --- | --- |
-| `manylinux2014_x86_64` | `ffmpeg-linux-x86_64-v7.0.2` |
-| `manylinux2014_aarch64` | `ffmpeg-linux-aarch64-v7.0.2` |
-| `macosx_11_0_arm64` | `ffmpeg-macos-aarch64-v7.1` |
-| `macosx_10_9_x86_64` | `ffmpeg-macos-x86_64-v7.1` |
-| `win_amd64` | `ffmpeg-win-x86_64-v7.1.exe` |
-| `win32` | `ffmpeg-win32-v4.2.2.exe` (not used; AMADEUS requires 64-bit Python) |
-
-`imageio-ffmpeg` is licensed under the BSD 2-Clause License.
+On macOS, AMADEUS uses the platform-specific `imageio-ffmpeg==0.6.0` binary,
+which includes Apple VideoToolbox support. This dependency is installed only on
+macOS; Windows and Linux do not install an additional `imageio-ffmpeg` binary.
+The macOS binary is licensed under the BSD 2-Clause License.
 
 Copyright (c) 2018-2025, imageio contributors. All rights reserved.
 
-FFmpeg itself is a separate program. It is licensed under the GNU Lesser General
-Public License version 2.1 or later; the builds distributed with
-`imageio-ffmpeg` are configured with `--enable-gpl --enable-version3` and
-GPL-licensed components (including libx264 and libx265), which places those
-binaries under the GNU General Public License version 3 or later. AMADEUS
-invokes FFmpeg as an external executable and does not link against it. See
-<https://ffmpeg.org/legal.html> for the FFmpeg licensing terms and
-<https://github.com/imageio/imageio-ffmpeg> for the binary distribution.
+The BtbN FFmpeg build is licensed under GPL version 3 or later because the GPL
+variant enables GPL-licensed FFmpeg components. AMADEUS invokes it as an
+external executable and does not link against it. The upstream build repository
+contains corresponding build scripts and dependency notices. FFmpeg source and
+license information are at <https://ffmpeg.org/legal.html>; the downloaded
+archive's `LICENSE.txt` is kept beside the installed binary. The macOS
+`imageio-ffmpeg` package is licensed under the BSD 2-Clause License.
 
-Setting the `AMADEUS_FFMPEG` environment variable makes AMADEUS use the FFmpeg
-binary it names instead of the pinned one. That is an explicit, per-site choice;
-the substituted version is still written into every conversion's metadata.
+Compilation support does not guarantee that a particular encoder will work with
+every GPU or driver. AMADEUS tests NVIDIA NVENC, Intel Quick Sync, AMD AMF,
+Linux VAAPI, or Apple VideoToolbox by encoding a short sample before enabling
+hardware encoding. Hardware encoding applies to the final H.264 encoding step;
+cropping, rotation, and image adjustments are still performed on the CPU. The
+same selected FFmpeg binary also handles Create Video exports, including CPU
+encoding when no compatible hardware encoder is available.

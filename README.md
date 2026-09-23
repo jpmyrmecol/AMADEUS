@@ -40,7 +40,7 @@ A video that already passes -- an 8-bit H.264 MP4/MOV/AVI with a constant frame 
 
 The analysis copy keeps the original resolution and is normalised to H.264 MP4, 8-bit SDR, constant frame rate, CRF 12 with short keyframe intervals so frame seeking stays exact. HDR is tone mapped to SDR, and rotation metadata is applied to the pixels. A frame range can be chosen; it defaults to the whole video. Each copy is written with a `.amadeus_conversion.json` record naming the source, the frame range, the frame rate, the codec, the FFmpeg version and how a converted frame number maps back onto the source, so a result stays reproducible.
 
-FFmpeg is not installed separately: AMADEUS uses the build pinned by `imageio-ffmpeg` in `uv.lock`, so the same encoder runs on every machine. See [third-party notices](THIRD_PARTY_NOTICES.md).
+AMADEUS prepares one fixed FFmpeg build for the operating system and uses it throughout video inspection, analysis conversion, Cropping & Trimming, and Create Video. Windows and Linux setup installs a checksum-verified build with NVIDIA NVENC, Intel Quick Sync, AMD AMF, and Linux VAAPI support. macOS uses its VideoToolbox-capable packaged build. A real short encode must succeed before a hardware encoder is offered; crop, rotation, and image adjustments still run on the CPU, with CPU encoding used when no hardware encoder works. See [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Outputs and recording conditions
 

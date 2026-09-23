@@ -9,9 +9,9 @@ arbitrary frame. Container and codec alone do not decide that, so this module
 inspects the file itself:
 
 * :func:`probe_source` reads container/codec/pixel-format/rotation/HDR metadata
-  from FFmpeg's own stream dump. FFmpeg ships with AMADEUS (``imageio-ffmpeg``),
+  from FFmpeg's own stream dump. AMADEUS prepares one pinned FFmpeg build per OS,
   so this works on Windows, macOS and Linux without a separate install, and
-  without depending on ``ffprobe``, which that wheel does not contain.
+  without depending on a separate ``ffprobe`` executable.
 * :func:`probe_opencv` measures what actually matters downstream: does frame 0
   decode, does a random seek land, how many frames can be addressed, and are the
   frame intervals constant.
@@ -107,27 +107,15 @@ FRAME_INTERVAL_TOLERANCE = 0.25
 # Share of irregular intervals above which the video is treated as VFR.
 VFR_IRREGULAR_FRACTION = 0.05
 
-# The FFmpeg AMADEUS uses is pinned, not discovered: the analysis copies this
-# module produces must be reproducible, so the encoder version has to be fixed
-# by the lockfile rather than by whatever happens to be installed on the host.
-PINNED_FFMPEG_REQUIREMENT = "imageio-ffmpeg==0.6.0"
-FFMPEG_OVERRIDE_ENV_VAR = "AMADEUS_FFMPEG"
-
 FFMPEG_NOT_FOUND_MESSAGE = (
-    "The FFmpeg build AMADEUS depends on was not found.\n\n"
-    f"AMADEUS uses the FFmpeg binary pinned by {PINNED_FFMPEG_REQUIREMENT}, which "
-    "the installer places inside the AMADEUS environment. It is not on your PATH "
-    "and is not meant to be: pinning the build keeps every converted analysis "
-    "video reproducible.\n\n"
-    "Without it, videos cannot be inspected in detail or converted.\n\n"
-    "How to fix it:\n"
-    "  1. Re-run the AMADEUS launcher (AMADEUS.bat on Windows, AMADEUS.command on "
-    "macOS, AMADEUS.sh on Linux/WSL2) so the environment is reinstalled, or\n"
-    "  2. Reinstall the dependency directly:  pip install "
-    f"{PINNED_FFMPEG_REQUIREMENT}\n\n"
-    f"To point AMADEUS at a specific FFmpeg build instead, set the "
-    f"{FFMPEG_OVERRIDE_ENV_VAR} environment variable to its full path. The version "
-    "actually used is recorded in every conversion's metadata file.\n\n"
+    "The fixed FFmpeg build AMADEUS uses is not available.\n\n"
+    "Re-run the AMADEUS launcher to prepare its pinned FFmpeg build. On Windows "
+    "and Linux, setup downloads the matching archive once and verifies its SHA-256 "
+    "before installation. On macOS, AMADEUS uses the platform-specific packaged "
+    "build.\n\n"
+    "The same FFmpeg executable is used for video inspection, conversion, "
+    "Cropping & Trimming, and Create Video. The version and path used are recorded "
+    "in conversion metadata.\n\n"
     "Videos already in a format AMADEUS reads directly (8-bit H.264 MP4/MOV/AVI) "
     "can still be used without FFmpeg."
 )
@@ -159,55 +147,23 @@ def _subprocess_kwargs() -> dict:
     return kwargs
 
 
-def _pinned_ffmpeg_binary() -> str:
-    """Locate the FFmpeg binary shipped inside the pinned imageio-ffmpeg wheel.
-
-    ``imageio_ffmpeg.get_ffmpeg_exe()`` is deliberately not used: it falls back
-    to a conda or PATH FFmpeg when the bundled binary is missing, which would
-    silently swap the encoder for an unknown version. Each platform wheel of
-    ``imageio-ffmpeg`` contains exactly one ``ffmpeg-<platform>-v<version>``
-    binary, and that is the build AMADEUS is pinned to.
-    """
-    import importlib.resources
-
-    try:
-        binaries = importlib.resources.files("imageio_ffmpeg.binaries")
-    except (ImportError, ModuleNotFoundError) as exc:
-        raise FfmpegUnavailableError(str(exc)) from exc
-
-    candidates = []
-    for entry in binaries.iterdir():
-        name = entry.name
-        if name.startswith("ffmpeg-") and not name.endswith(".md"):
-            candidates.append(str(entry))
-    if not candidates:
-        raise FfmpegUnavailableError(
-            f"The imageio-ffmpeg installation at {binaries} contains no FFmpeg binary."
-        )
-    return sorted(candidates)[-1]
-
-
 def ffmpeg_executable() -> str:
-    """Return the pinned FFmpeg binary AMADEUS must use.
+    """Return the single pinned FFmpeg executable shared by all video features."""
+    try:
+        from tools.ffmpeg_runtime import ensure_ffmpeg
 
-    ``AMADEUS_FFMPEG`` overrides it for sites that have to supply their own
-    build; the version in use is written into every conversion's metadata either
-    way, so the analysis stays reproducible.
-    """
-    override = os.environ.get(FFMPEG_OVERRIDE_ENV_VAR, "").strip()
-    if override:
-        if not os.path.isfile(override):
-            raise FfmpegUnavailableError(
-                f"{FFMPEG_OVERRIDE_ENV_VAR} points at {override!r}, which is not a file."
-            )
-        return override
-
-    path = _pinned_ffmpeg_binary()
-    if not os.path.isfile(path):
-        raise FfmpegUnavailableError(f"The pinned FFmpeg binary is missing: {path}")
-    if not os.access(path, os.X_OK):
-        raise FfmpegUnavailableError(f"The pinned FFmpeg binary is not executable: {path}")
+        path = ensure_ffmpeg()
+    except Exception as exc:
+        raise FfmpegUnavailableError(str(exc)) from exc
+    if not os.path.isfile(path) or not os.access(path, os.X_OK):
+        raise FfmpegUnavailableError(f"The pinned FFmpeg executable is unavailable: {path}")
     return path
+
+
+def ffmpeg_build_identity() -> str:
+    from tools.ffmpeg_runtime import ffmpeg_build_identity as identify_build
+
+    return identify_build()
 
 
 def ffmpeg_is_available() -> bool:
@@ -1158,7 +1114,7 @@ def conversion_metadata(
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "ffmpeg_version": ffmpeg_version(),
         "ffmpeg_binary": ffmpeg_executable(),
-        "ffmpeg_pinned_requirement": PINNED_FFMPEG_REQUIREMENT,
+        "ffmpeg_build": ffmpeg_build_identity(),
         "source_video": {
             **source.as_dict(),
             "path": plan.source_path,

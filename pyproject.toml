@@ -14,7 +14,7 @@ dependencies = [
     "customtkinter==5.2.2",
     "filterpy==1.4.5",
     "h5py==3.16.0",
-    "imageio-ffmpeg==0.6.0",
+    "imageio-ffmpeg==0.6.0; sys_platform == 'darwin'",
     "matplotlib==3.10.6",
     "motmetrics==1.4.0",
     "numpy==1.26.4",
@@ -91,4 +91,3 @@ explicit = true
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
-
