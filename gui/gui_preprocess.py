@@ -154,13 +154,16 @@ HARDWARE_ENCODER_LABELS = {
     "h264_nvenc": "NVIDIA NVENC",
     "h264_qsv": "Intel Quick Sync",
     "h264_amf": "AMD AMF",
+    "h264_vaapi": "VAAPI (AMD/Intel)",
 }
 
 
 def _hardware_encoder_candidates() -> tuple[str, ...]:
     if sys.platform == "darwin":
         return ("h264_videotoolbox",)
-    return ("h264_nvenc", "h264_qsv", "h264_amf")
+    if os.name == "nt":
+        return ("h264_nvenc", "h264_qsv", "h264_amf")
+    return ("h264_nvenc", "h264_qsv", "h264_amf", "h264_vaapi")
 
 
 def _video_encoder_args(encoder: str) -> list[str]:
@@ -179,6 +182,8 @@ def _video_encoder_args(encoder: str) -> list[str]:
             "-c:v", "h264_amf", "-quality", "quality", "-rc:v", "cqp",
             "-qp_i", "12", "-qp_p", "12", "-qp_b", "12", "-pix_fmt", "yuv420p",
         ]
+    if encoder == "h264_vaapi":
+        return ["-c:v", "h264_vaapi", "-qp", "12"]
     if encoder == "h264_videotoolbox":
         return [
             "-c:v", "h264_videotoolbox", "-q:v", "85",
@@ -187,33 +192,45 @@ def _video_encoder_args(encoder: str) -> list[str]:
     return ["-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p"]
 
 
-def _probe_hardware_video_encoder(executables: tuple[str, ...]) -> tuple[str, str] | None:
+def _vaapi_device_candidates() -> tuple[str, ...]:
+    if not sys.platform.startswith("linux"):
+        return ()
+    return tuple(
+        sorted(str(path) for path in Path("/dev/dri").glob("renderD*") if path.is_char_device())
+    )
+
+
+def _probe_hardware_video_encoder(
+    executables: tuple[str, ...],
+) -> tuple[str, str, str | None] | None:
     for encoder in _hardware_encoder_candidates():
+        devices = _vaapi_device_candidates() if encoder == "h264_vaapi" else (None,)
         for executable in executables:
-            cmd = [
-                executable,
-                "-hide_banner",
-                "-loglevel", "error",
-                "-f", "lavfi",
-                "-i", "color=s=128x128:r=30:d=0.2",
-                "-frames:v", "2",
-                *_video_encoder_args(encoder),
-                "-f", "null",
-                "-",
-            ]
-            try:
-                completed = subprocess.run(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=20,
-                    check=False,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
-            except (OSError, subprocess.SubprocessError):
-                continue
-            if completed.returncode == 0:
-                return executable, encoder
+            for device in devices:
+                cmd = [executable, "-hide_banner", "-loglevel", "error"]
+                if device is not None:
+                    cmd.extend(["-vaapi_device", device])
+                cmd.extend([
+                    "-f", "lavfi",
+                    "-i", "color=s=128x128:r=30:d=0.2",
+                    "-frames:v", "2",
+                ])
+                if encoder == "h264_vaapi":
+                    cmd.extend(["-vf", "format=nv12,hwupload"])
+                cmd.extend([*_video_encoder_args(encoder), "-f", "null", "-"])
+                try:
+                    completed = subprocess.run(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=20,
+                        check=False,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                if completed.returncode == 0:
+                    return executable, encoder, device
     return None
 
 
@@ -223,7 +240,7 @@ def _normalized_executable(executable: str) -> str:
 
 def _detect_hardware_video_encoder(
     status_callback: Callable[[str], None] | None = None,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, str | None] | None:
     pinned_ffmpeg = None
     try:
         pinned_ffmpeg = ffmpeg_exe()
@@ -593,6 +610,7 @@ class ExportJob:
     in_frame: int
     out_frame: int
     regions: tuple[ExportRegion, ...]
+    video_encoder_device: str | None = None
 
 
 class ExportCancelled(RuntimeError):
@@ -670,6 +688,7 @@ class PreprocessApp(ctk.CTk):
         self.hardware_encoder_queue: queue.Queue = queue.Queue()
         self.hardware_video_encoder: str | None = None
         self.hardware_video_ffmpeg: str | None = None
+        self.hardware_video_encoder_device: str | None = None
         self.export_thread: threading.Thread | None = None
         self.export_cancel = threading.Event()
         self.export_proc: subprocess.Popen | None = None
@@ -1217,6 +1236,7 @@ class PreprocessApp(ctk.CTk):
         if detected is None:
             self.hardware_video_encoder = None
             self.hardware_video_ffmpeg = None
+            self.hardware_video_encoder_device = None
             self.gpu_acceleration_var.set(False)
             self.gpu_acceleration_check.configure(
                 text="Hardware video encoding unavailable",
@@ -1224,9 +1244,10 @@ class PreprocessApp(ctk.CTk):
             )
             return
 
-        executable, encoder = detected
+        executable, encoder, device = detected
         self.hardware_video_encoder = encoder
         self.hardware_video_ffmpeg = executable
+        self.hardware_video_encoder_device = device
         label = HARDWARE_ENCODER_LABELS.get(encoder, encoder)
         self.gpu_acceleration_check.configure(
             text=f"Use hardware encoding ({label})",
@@ -1583,6 +1604,11 @@ class PreprocessApp(ctk.CTk):
             },
             "output": {
                 "folder": self.output_folder_var.get().strip(),
+                "video_encoder_device": (
+                    self.hardware_video_encoder_device
+                    if self.gpu_acceleration_var.get()
+                    else None
+                ),
                 "template": self.template_var.get().strip() or "{stem}_{region}",
                 "speed": float(self.output_speed_var.get()),
                 "fps": float(self.output_fps_var.get()),
@@ -2522,10 +2548,14 @@ class PreprocessApp(ctk.CTk):
         if not (1.0 <= output_fps <= 240.0):
             raise RuntimeError("Output fps must be between 1.0 and 240.0.")
         video_encoder = "libx264"
+        video_encoder_device = None
         if self.gpu_acceleration_var.get():
             if self.hardware_video_encoder is None or self.hardware_video_ffmpeg is None:
                 raise RuntimeError("GPU acceleration is selected, but no supported GPU encoder is available.")
             video_encoder = self.hardware_video_encoder
+            video_encoder_device = self.hardware_video_encoder_device
+            if video_encoder == "h264_vaapi" and not video_encoder_device:
+                raise RuntimeError("VAAPI was detected without a usable render device.")
             export_ffmpeg = self.hardware_video_ffmpeg
         else:
             export_ffmpeg = ffmpeg_exe()
@@ -2583,6 +2613,7 @@ class PreprocessApp(ctk.CTk):
             output_fps=output_fps,
             output_speed=output_speed,
             video_encoder=video_encoder,
+            video_encoder_device=video_encoder_device,
             frame_count=int(self.reader.frame_count),
             source_width=int(self.reader.width),
             source_height=int(self.reader.height),
@@ -2789,6 +2820,8 @@ class PreprocessApp(ctk.CTk):
             filters.append("transpose=cclock")
         filters.append("pad=ceil(iw/2)*2:ceil(ih/2)*2")
         filters.append(f"fps=fps={job.output_fps:.6f}")
+        if job.video_encoder == "h264_vaapi":
+            filters.append("format=nv12,hwupload")
 
         cmd = [
             job.ffmpeg,
@@ -2796,6 +2829,12 @@ class PreprocessApp(ctk.CTk):
             "-hide_banner",
             "-loglevel",
             "error",
+        ]
+        if job.video_encoder == "h264_vaapi":
+            if not job.video_encoder_device:
+                raise RuntimeError("VAAPI requires a detected render device.")
+            cmd.extend(["-vaapi_device", job.video_encoder_device])
+        cmd.extend([
             "-i",
             job.video_path,
             "-map",
