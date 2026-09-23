@@ -21,8 +21,6 @@ Use the [installers on the website](https://amadeus.jpmyrmecol.com/#install), or
 
 macOS and Linux have not yet been extensively tested. For platform requirements, installation details, and troubleshooting, see the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html).
 
-The launcher prepares a locked Python environment with [uv](https://docs.astral.sh/uv/). Because uv resolves `uv.lock`, the uv executable is pinned separately by `[tool.uv].required-version` in `pyproject.toml`. The pinned version is checked at startup, and if it is not already present AMADEUS installs that exact version into the AMADEUS folder (`.uv/`), leaving any uv you installed yourself untouched.
-
 ## Run tracking
 
 1. Open **Easy Tracking** and select the video and session folder.
