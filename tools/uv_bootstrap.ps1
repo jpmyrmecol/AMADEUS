@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Resolve the pinned uv for AMADEUS.bat, installing it if it is not there yet.
 #
-# uv resolves uv.lock, so its version is pinned like any other dependency.
-# tools/UV_VERSION is the single source of truth, shared with AMADEUS.sh,
-# Colab and tools/setup_environment.py. A uv already installed on
-# this machine is used only when it matches; otherwise AMADEUS installs its own
-# copy under .uv and leaves the existing installation alone.
+# uv resolves uv.lock, so AMADEUS pins the uv executable separately in
+# [tool.uv].required-version. pyproject.toml is the single source of truth shared
+# with AMADEUS.sh, Colab, and tools/setup_environment.py. A uv already installed
+# on this machine is used only when it matches; otherwise AMADEUS installs its
+# own copy under .uv and leaves the existing installation alone.
 #
 # Only the resolved path is written to stdout, so the caller can capture it with
 # "for /f"; everything else goes to stderr.
@@ -23,16 +23,32 @@ function Write-Status([string]$Message) {
 }
 
 $root = [IO.Path]::GetFullPath($ProjectRoot.Trim().Trim('"'))
-$versionFile = Join-Path $root "tools\UV_VERSION"
-if (-not (Test-Path -LiteralPath $versionFile)) {
-    Write-Status "[ERROR] tools/UV_VERSION is missing from $root; the AMADEUS folder is incomplete."
+$pyprojectFile = Join-Path $root "pyproject.toml"
+if (-not (Test-Path -LiteralPath $pyprojectFile)) {
+    Write-Status "[ERROR] pyproject.toml is missing from $root; the AMADEUS folder is incomplete."
     exit 1
 }
-$required = (Get-Content -LiteralPath $versionFile -Raw).Trim()
-if (-not $required) {
-    Write-Status "[ERROR] UV_VERSION is empty: $versionFile"
+$requiredSpec = $null
+$inToolUv = $false
+foreach ($line in Get-Content -LiteralPath $pyprojectFile) {
+    if ($line -match '^\s*\[tool\.uv\]\s*$') {
+        $inToolUv = $true
+        continue
+    }
+    if ($line -match '^\s*\[') {
+        $inToolUv = $false
+        continue
+    }
+    if ($inToolUv -and $line -match '^\s*required-version\s*=\s*"(==[^"]+)"\s*$') {
+        $requiredSpec = $Matches[1]
+        break
+    }
+}
+if (-not $requiredSpec -or $requiredSpec.Length -le 2) {
+    Write-Status "[ERROR] [tool.uv].required-version in pyproject.toml must be an exact == version pin."
     exit 1
 }
+$required = $requiredSpec.Substring(2)
 $uvDir = Join-Path $root ".uv"
 
 function Get-UvVersion([string]$Path) {

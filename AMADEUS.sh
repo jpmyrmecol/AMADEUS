@@ -41,16 +41,34 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 
 # --- pinned uv (tests split AMADEUS.sh at this marker) ---------------------
-# uv resolves uv.lock, so its version is pinned like any other dependency:
-# tools/UV_VERSION is the single source of truth, shared with AMADEUS.bat,
-# Colab and tools/setup_environment.py. A uv already installed on this machine is used
-# only when it matches; otherwise AMADEUS installs its own copy under .uv and
-# leaves the existing installation alone.
-if [ ! -f "$SCRIPT_DIR/tools/UV_VERSION" ]; then
-    echo "[ERROR] tools/UV_VERSION is missing from $SCRIPT_DIR; the AMADEUS folder is incomplete." >&2
+# uv resolves uv.lock, so AMADEUS pins the uv executable separately in
+# [tool.uv].required-version. pyproject.toml is the single source of truth shared
+# by all launchers, setup, and Colab. An installed uv is used only when it matches;
+# otherwise AMADEUS installs its own copy under .uv and leaves other installs alone.
+if [ ! -f "$SCRIPT_DIR/pyproject.toml" ]; then
+    echo "[ERROR] pyproject.toml is missing from $SCRIPT_DIR; the AMADEUS folder is incomplete." >&2
     exit 1
 fi
-UV_VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/tools/UV_VERSION")"
+UV_REQUIREMENT="$(
+    awk '
+        /^\[tool\.uv\][[:space:]]*$/ { in_uv = 1; next }
+        /^\[/ { in_uv = 0 }
+        in_uv && /^[[:space:]]*required-version[[:space:]]*=/ {
+            value = $0
+            sub(/^[^=]*=[[:space:]]*"/, "", value)
+            sub(/"[[:space:]]*$/, "", value)
+            print value
+            exit
+        }
+    ' "$SCRIPT_DIR/pyproject.toml"
+)"
+case "$UV_REQUIREMENT" in
+    ==?*) UV_VERSION="${UV_REQUIREMENT#==}" ;;
+    *)
+        echo "[ERROR] [tool.uv].required-version in pyproject.toml must be an exact == version pin." >&2
+        exit 1
+        ;;
+esac
 AMADEUS_UV_DIR="$SCRIPT_DIR/.uv"
 
 uv_version_of() {

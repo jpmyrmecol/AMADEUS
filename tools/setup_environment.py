@@ -24,10 +24,10 @@ PYTORCH_CU128_INDEX = "https://download.pytorch.org/whl/cu128"
 PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 ENVIRONMENT_ROOT = Path(os.environ.get("AMADEUS_VENV", PROJECT_ROOT / ".venv")).expanduser().absolute()
 READY_MARKER = ENVIRONMENT_ROOT / ".amadeus-ready"
-# uv resolves uv.lock, so its version is pinned like the packages it installs.
-# The launchers read the same file and hand over a matching uv; this check keeps
-# a hand-run setup honest too.
-UV_VERSION_FILE = PROJECT_ROOT / "tools" / "UV_VERSION"
+# uv resolves uv.lock, so the executable version is pinned separately in
+# [tool.uv].required-version. The launchers read the same setting and hand over
+# a matching uv; this check keeps a hand-run setup honest too.
+PYPROJECT_FILE = PROJECT_ROOT / "pyproject.toml"
 
 
 def nvidia_smi_candidates() -> list[str]:
@@ -506,14 +506,34 @@ def install_amadeus_command() -> Path:
 
 
 def required_uv_version() -> str:
-    """Return the uv version AMADEUS is pinned to."""
+    """Return the exact uv version pinned in pyproject.toml."""
     try:
-        version = UV_VERSION_FILE.read_text(encoding="utf-8").strip()
+        lines = PYPROJECT_FILE.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
-        raise RuntimeError(f"Could not read {UV_VERSION_FILE}: {exc}") from exc
-    if not version:
-        raise RuntimeError(f"UV_VERSION is empty: {UV_VERSION_FILE}")
-    return version
+        raise RuntimeError(f"Could not read {PYPROJECT_FILE}: {exc}") from exc
+
+    in_tool_uv = False
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_tool_uv = line == "[tool.uv]"
+            continue
+        if not in_tool_uv:
+            continue
+        key, separator, value = line.partition("=")
+        if key.strip() != "required-version" or not separator:
+            continue
+        specifier = value.strip()
+        if not (specifier.startswith('"==') and specifier.endswith('"')):
+            break
+        version = specifier[3:-1].strip()
+        if version:
+            return version
+        break
+
+    raise RuntimeError(
+        "[tool.uv].required-version in pyproject.toml must be an exact == version pin."
+    )
 
 
 def uv_version(uv_executable: str) -> str:

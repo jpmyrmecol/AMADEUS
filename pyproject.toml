@@ -64,6 +64,7 @@ assets = ["*.json", "*.jpg", "*.png"]
 version = { file = "VERSION" }
 
 [tool.uv]
+required-version = "==0.12.17"
 conflicts = [
     [
         { extra = "cpu" },
