@@ -25,6 +25,7 @@ from batch_utils import resolve_num_workers as _resolve_num_workers_bt
 from gui.color import OBB_COLOR
 from path_utils import resolve_config_paths
 from random_utils import derive_seed, normalize_seed
+from obb_fitting import fit_obb_points, normalize_obb_fit_mode
 
 # Utilities
 
@@ -241,7 +242,10 @@ def load_bboxes_yolo(lbl_path: str, w: int, h: int) -> List[dict]:
     return boxes
 
 
-def mask_to_obb_points(mask_u8_255: np.ndarray, x0: int = 0, y0: int = 0) -> Optional[np.ndarray]:
+def mask_to_obb_points(
+    mask_u8_255: np.ndarray, x0: int = 0, y0: int = 0,
+    obb_fit_mode: str = "min_area",
+) -> Optional[np.ndarray]:
     cnts, _ = cv2.findContours(mask_u8_255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     pts_list = []
     for cnt in cnts:
@@ -253,8 +257,7 @@ def mask_to_obb_points(mask_u8_255: np.ndarray, x0: int = 0, y0: int = 0) -> Opt
     if not pts_list:
         return None
     pts = np.concatenate(pts_list, axis=0).reshape(-1, 2)
-    rect = cv2.minAreaRect(pts)
-    box = cv2.boxPoints(rect).astype(np.float32)
+    box = fit_obb_points(pts, obb_fit_mode)
     box[:, 0] += float(x0)
     box[:, 1] += float(y0)
     return box
@@ -703,7 +706,7 @@ def try_random_crops(
             if isinstance(obj_mask, dict) and isinstance(obj_mask.get("mask"), np.ndarray) and obj_mask["mask"].size > 0:
                 local_mask = np.zeros((crop_size, crop_size), np.uint8)
                 fill_localmask_on_crop_mask(local_mask, obj_mask, crop_x=x, crop_y=y)
-                local_obb_pts = mask_to_obb_points(local_mask)
+                local_obb_pts = mask_to_obb_points(local_mask, obb_fit_mode=task["obb_fit_mode"])
             if local_obb_pts is None:
                 local_obb_pts = np.asarray(bboxes[int(bbox_idx)]["obb_pts"], dtype=np.float32).reshape(4, 2).copy()
                 local_obb_pts[:, 0] -= float(x)
@@ -840,6 +843,7 @@ def main(
     num_workers: int = 1,
     random_seed: int = 0,
     append: bool = False,
+    OBB_FIT_MODE: str = "min_area",
 ):
     """Run random cropping across base directories with blob-aware background replacement for removed (partial) objects."""
 
@@ -847,6 +851,7 @@ def main(
         raise FileNotFoundError(f"BACKGROUND_PATH not found: {BACKGROUND_PATH}")
 
     random_seed = normalize_seed(random_seed)
+    obb_fit_mode = normalize_obb_fit_mode(OBB_FIT_MODE)
 
     for BASE_DIR in BASE_DIR_LIST:
         base_key = os.path.basename(os.path.normpath(BASE_DIR))
@@ -920,6 +925,7 @@ def main(
                 "EDGE_BLUR_KSIZE": EDGE_BLUR_KSIZE,
                 "EDGE_BLUR_SIGMA": EDGE_BLUR_SIGMA,
                 "LOCALIZED": LOCALIZED,
+                "obb_fit_mode": obb_fit_mode,
                 "preview_budget": effective_crops_per_img if (fid is not None and fid in preview_fids) else 0,
             })
 
@@ -1026,6 +1032,7 @@ def cli() -> None:
         num_workers=num_workers,
         random_seed=RANDOM_SEED,
         append=bool(cfg.get("CROP_APPEND", False)),
+        OBB_FIT_MODE=cfg.get("OBB_FIT_MODE", "min_area"),
     )
 
 

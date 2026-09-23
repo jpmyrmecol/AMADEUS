@@ -39,6 +39,7 @@ from without_direction_estimation.direction_class_assignment import (
 from gui.color import OBB_COLOR
 from path_utils import resolve_config_paths
 from random_utils import make_python_rng, normalize_seed
+from obb_fitting import fit_obb, fit_obb_points, normalize_obb_fit_mode
 
 
 DIR_NAMES = ['animal']
@@ -184,13 +185,15 @@ def donor_image_and_mask(
     return crop, mask
 
 
-def mask_to_obb_points(mask_u8_255: np.ndarray, x0: int = 0, y0: int = 0) -> np.ndarray:
+def mask_to_obb_points(
+    mask_u8_255: np.ndarray, x0: int = 0, y0: int = 0,
+    obb_fit_mode: str = "min_area",
+) -> np.ndarray:
     cnts = mask_to_polygons(mask_u8_255)
     if not cnts:
         raise ValueError("Mask does not contain a valid polygon for OBB conversion.")
     pts = np.concatenate([cnt.astype(np.float32) for cnt in cnts], axis=0).reshape(-1, 2)
-    rect = cv2.minAreaRect(pts)
-    box = cv2.boxPoints(rect).astype(np.float32)
+    box = fit_obb_points(pts, obb_fit_mode)
     box[:, 0] += float(x0)
     box[:, 1] += float(y0)
     return box
@@ -353,44 +356,61 @@ def rotate_crop_with_mask(part_bgr: np.ndarray, mask_u8_255: np.ndarray, angle_d
     return rot_img, rot_mask, M.astype(np.float32)
 
 
-def _mask_obb_frame(mask_u8_255: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]]:
+def _mask_obb_frame(
+    mask_u8_255: np.ndarray,
+    obb_fit_mode: str = "min_area",
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]]:
     cnts = mask_to_polygons(mask_u8_255)
     if not cnts:
         return None
     pts_all = np.concatenate([cnt.astype(np.float32) for cnt in cnts], axis=0).reshape(-1, 2)
-    rect = cv2.minAreaRect(pts_all)
+    fit_mode = normalize_obb_fit_mode(obb_fit_mode)
+    rect, fitted_axis = fit_obb(pts_all, fit_mode)
     box = ensure_clockwise(cv2.boxPoints(rect).astype(np.float32))
     center = obb_center(box).astype(np.float32)
 
-    edge_vecs = []
-    edge_lengths = []
-    for i in range(4):
-        vec = (box[(i + 1) % 4] - box[i]).astype(np.float32)
-        length = float(np.linalg.norm(vec))
-        edge_vecs.append(vec)
-        edge_lengths.append(length)
-    long_idx = int(np.argmax(edge_lengths))
-    long_len = float(edge_lengths[long_idx])
-    short_len = float(min(edge_lengths))
+    if fit_mode == "pca":
+        long_axis = np.asarray(fitted_axis, dtype=np.float32)
+        long_axis /= max(float(np.linalg.norm(long_axis)), 1e-12)
+        short_axis = np.asarray([-float(long_axis[1]), float(long_axis[0])], dtype=np.float32)
+        long_len = float(rect[1][0])
+        short_len = float(rect[1][1])
+    else:
+        edge_vecs = []
+        edge_lengths = []
+        for i in range(4):
+            vec = (box[(i + 1) % 4] - box[i]).astype(np.float32)
+            length = float(np.linalg.norm(vec))
+            edge_vecs.append(vec)
+            edge_lengths.append(length)
+        long_idx = int(np.argmax(edge_lengths))
+        long_len = float(edge_lengths[long_idx])
+        short_len = float(min(edge_lengths))
+        if long_len <= 1e-6 or short_len <= 1e-6:
+            return None
+        long_axis = (edge_vecs[long_idx] / long_len).astype(np.float32)
+        short_axis = np.asarray([-float(long_axis[1]), float(long_axis[0])], dtype=np.float32)
+
     if long_len <= 1e-6 or short_len <= 1e-6:
         return None
-    long_axis = (edge_vecs[long_idx] / long_len).astype(np.float32)
-    short_axis = np.asarray([-float(long_axis[1]), float(long_axis[0])], dtype=np.float32)
     return center, long_axis, short_axis, long_len, short_len
 
 
-def obb_aspect_ratio_from_mask(mask_u8_255: np.ndarray) -> Optional[float]:
-    frame = _mask_obb_frame(mask_u8_255)
+def obb_aspect_ratio_from_mask(
+    mask_u8_255: np.ndarray,
+    obb_fit_mode: str = "min_area",
+) -> Optional[float]:
+    frame = _mask_obb_frame(mask_u8_255, obb_fit_mode)
     if frame is None:
         return None
-    _, _, _, long_len, short_len = frame
-    if short_len <= 1e-6:
+    _, _, _, first_axis_len, second_axis_len = frame
+    if min(first_axis_len, second_axis_len) <= 1e-6:
         return None
-    return float(long_len) / float(short_len)
+    return float(max(first_axis_len, second_axis_len)) / float(min(first_axis_len, second_axis_len))
 
 
-def valid_obb_aspect_ratio(mask, minimum):
-    return _mask_obb_frame(mask) is not None
+def valid_obb_aspect_ratio(mask, minimum, obb_fit_mode="min_area"):
+    return _mask_obb_frame(mask, obb_fit_mode) is not None
 
 
 def sample_paste_width_scales(
@@ -425,8 +445,9 @@ def rotate_crop_with_mask_and_obb_scaling(
     width_scale: float,
     height_scale: float,
     min_aspect_ratio: float = 1.1,
+    obb_fit_mode: str = "min_area",
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    frame = _mask_obb_frame(mask_u8_255)
+    frame = _mask_obb_frame(mask_u8_255, obb_fit_mode)
     if frame is None:
         return None
     center, long_axis, short_axis, long_len, short_len = frame
@@ -471,7 +492,7 @@ def rotate_crop_with_mask_and_obb_scaling(
         mask_u8_255, M, (new_w, new_h),
         flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
     )
-    if cv2.countNonZero(out_mask) <= 0 or _mask_obb_frame(out_mask) is None:
+    if cv2.countNonZero(out_mask) <= 0 or _mask_obb_frame(out_mask, obb_fit_mode) is None:
         return None
     return out_img, out_mask, M
 
@@ -836,7 +857,8 @@ def paste_one_donor(*, rng: random.Random, out_img_bgr: np.ndarray, placed_mask_
                     external_object_masks: Optional[List[Tuple[int, int, np.ndarray]]] = None,
                     paste_brightness_min: float = 1.0, paste_brightness_max: float = 1.0,
                     paste_contrast_min: float = 1.0, paste_contrast_max: float = 1.0,
-                    edge_feather_min_px: Optional[int] = None, edge_feather_max_px: Optional[int] = None) -> Optional[dict]:
+                    edge_feather_min_px: Optional[int] = None, edge_feather_max_px: Optional[int] = None,
+                    obb_fit_mode: str = "min_area") -> Optional[dict]:
     lo = float(paste_scale_min)
     hi = float(paste_scale_max)
     if lo > hi:
@@ -858,6 +880,7 @@ def paste_one_donor(*, rng: random.Random, out_img_bgr: np.ndarray, placed_mask_
         width_scale,
         height_scale,
         paste_min_obb_aspect_ratio,
+        obb_fit_mode,
     )
     if transformed is None:
         return None
@@ -923,7 +946,7 @@ def paste_one_donor(*, rng: random.Random, out_img_bgr: np.ndarray, placed_mask_
 
     if cv2.countNonZero(visible_mask) == 0:
         return None
-    if not valid_obb_aspect_ratio(visible_mask, paste_min_obb_aspect_ratio):
+    if not valid_obb_aspect_ratio(visible_mask, paste_min_obb_aspect_ratio, obb_fit_mode):
         return None
 
     alpha = build_feather_alpha(
@@ -1053,7 +1076,10 @@ def union_bbox_from_ref_items(ref_items: List[dict]) -> Optional[Tuple[float, fl
     )
 
 
-def build_frame_items(frame_objects: List[dict], cache: ImageMaskCache, W: int, H: int) -> Tuple[List[dict], List[str], List[str]]:
+def build_frame_items(
+    frame_objects: List[dict], cache: ImageMaskCache, W: int, H: int,
+    obb_fit_mode: str = "min_area",
+) -> Tuple[List[dict], List[str], List[str]]:
     ref_items: List[dict] = []
     base_label_lines: List[str] = []
 
@@ -1062,7 +1088,7 @@ def build_frame_items(frame_objects: List[dict], cache: ImageMaskCache, W: int, 
         mask = cache.mask(obj["crop_mask"])
         if mask is None or mask.shape[:2] != (h, w):
             continue
-        obb_pts = mask_to_obb_points(mask, x, y)
+        obb_pts = mask_to_obb_points(mask, x, y, obb_fit_mode)
         if obb_pts is None:
             continue
         ref_item = {**obj, "mask": mask, "rect": (x, y, w, h)}
@@ -1301,6 +1327,7 @@ def build_free_group_patch(
     paste_width_scale_max: float = 1.05,
     paste_min_obb_aspect_ratio: float = 1.1,
     mask_expansion_ratio: float = 1.0,
+    obb_fit_mode: str = "min_area",
 ) -> Optional[Tuple[np.ndarray, np.ndarray, List[dict]]]:
     """Build a canvas patch with blobs arranged in contact as a chain.
 
@@ -1333,6 +1360,7 @@ def build_free_group_patch(
             width_scale,
             height_scale,
             paste_min_obb_aspect_ratio,
+            obb_fit_mode,
         )
         if transformed is None:
             return None
@@ -1458,6 +1486,7 @@ def paste_free_group_into_frame(
     paste_contrast_min: float = 1.0, paste_contrast_max: float = 1.0,
     edge_feather_min_px: Optional[int] = None, edge_feather_max_px: Optional[int] = None,
     placement_region: Optional[Tuple[int, int, int, int]] = None,
+    obb_fit_mode: str = "min_area",
 ) -> List[Tuple[int, int, np.ndarray]]:
     """Rotate a free group patch and paste it into a free area of the frame.
 
@@ -1509,7 +1538,7 @@ def paste_free_group_into_frame(
             continue
         bx, by, bw, bh = cv2.boundingRect(nz)
         crop = rot_obj_mask[by:by + bh, bx:bx + bw].copy()
-        if not valid_obb_aspect_ratio(crop, paste_min_obb_aspect_ratio):
+        if not valid_obb_aspect_ratio(crop, paste_min_obb_aspect_ratio, obb_fit_mode):
             return []
         d_area = max(1, cv2.countNonZero(crop))
         donor_rot_crops.append((bx, by, crop, d_area))
@@ -1604,18 +1633,21 @@ def paste_free_group_into_frame(
             "overlap_pixels": 0,
             "overlap_ratio": 0.0,
         }
-        append_annotation(group_obj, label_lines, mask_lines, W, H)
+        append_annotation(group_obj, label_lines, mask_lines, W, H, obb_fit_mode)
         placed_donors.append((xo + bx, yo + by, obj_crop))
 
     return placed_donors
 
 
-def append_annotation(obj: dict, label_lines: List[str], mask_lines: List[str], W: int, H: int) -> None:
+def append_annotation(
+    obj: dict, label_lines: List[str], mask_lines: List[str], W: int, H: int,
+    obb_fit_mode: str = "min_area",
+) -> None:
     class_id = obj.get("class_id")
     class_name = obj.get("class_name")
     if class_id is None or class_name is None:
         raise ValueError("Cannot append annotation: class_id/class_name is missing.")
-    obb_pts = mask_to_obb_points(obj["mask"], int(obj["x"]), int(obj["y"]))
+    obb_pts = mask_to_obb_points(obj["mask"], int(obj["x"]), int(obj["y"]), obb_fit_mode)
     label_lines.append(yolo_line_from_obb_points(int(class_id), obb_pts, W, H))
     mask_lines.append(
         polygon_line_from_shifted_mask(
@@ -1785,7 +1817,10 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
     if base_img is None:
         return 0, 0, False
     H, W = base_img.shape[:2]
-    ref_items, base_label_lines, base_mask_lines = build_frame_items(frame_objects, cache, W, H)
+    obb_fit_mode = normalize_obb_fit_mode(cfg.get("OBB_FIT_MODE", "min_area"))
+    ref_items, base_label_lines, base_mask_lines = build_frame_items(
+        frame_objects, cache, W, H, obb_fit_mode,
+    )
     if not ref_items:
         return 0, 0, False
 
@@ -1930,6 +1965,7 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
                 paste_contrast_max=paste_contrast_max,
                 edge_feather_min_px=edge_feather_min_px,
                 edge_feather_max_px=edge_feather_max_px,
+                obb_fit_mode=obb_fit_mode,
             )
             if res is None:
                 _cnt_contact_failed += 1
@@ -1942,7 +1978,7 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
             pasted_donor_masks.append((int(obj["x"]), int(obj["y"]), obj["mask"]))
             # Update ext_objs so subsequent donors in this group see the newly placed one.
             ext_objs = ext_objs + [(int(obj["x"]), int(obj["y"]), obj["mask"])]
-            append_annotation(obj, label_lines, mask_lines, W, H)
+            append_annotation(obj, label_lines, mask_lines, W, H, obb_fit_mode)
             _cnt_contact_placed += 1
         if len(group_objs) != group_size:
             return None
@@ -1995,9 +2031,10 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
             edge_feather_min_px=edge_feather_min_px,
             edge_feather_max_px=edge_feather_max_px,
             placement_region=localized_crop_region,
+            obb_fit_mode=obb_fit_mode,
         )
         for _ in range(n_free_single):
-            _result = build_free_group_patch(rng, [rng.choice(frame_donor_candidates)], cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio)
+            _result = build_free_group_patch(rng, [rng.choice(frame_donor_candidates)], cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode)
             if _result is not None:
                 _placed = paste_free_group_into_frame(**_free_kwargs, patch=_result[0], union_mask=_result[1], local_objects=_result[2])
                 if _placed:
@@ -2009,7 +2046,7 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
                 _cnt_free_failed += 1
         for _ in range(n_free_p2):
             _d2 = sample_donors_from_candidates(rng, frame_donor_candidates, 2)
-            _result = build_free_group_patch(rng, _d2, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio)
+            _result = build_free_group_patch(rng, _d2, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode)
             if _result is not None:
                 _placed = paste_free_group_into_frame(**_free_kwargs, patch=_result[0], union_mask=_result[1], local_objects=_result[2])
                 if _placed:
@@ -2021,7 +2058,7 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
                 _cnt_free_failed += 1
         for _ in range(n_free_p3):
             _d3 = sample_donors_from_candidates(rng, frame_donor_candidates, 3)
-            _result = build_free_group_patch(rng, _d3, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio)
+            _result = build_free_group_patch(rng, _d3, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode)
             if _result is not None:
                 _placed = paste_free_group_into_frame(**_free_kwargs, patch=_result[0], union_mask=_result[1], local_objects=_result[2])
                 if _placed:
@@ -2061,6 +2098,7 @@ def main() -> None:
 
     config_path = sys.argv[1]
     cfg = load_config(config_path)
+    cfg["OBB_FIT_MODE"] = normalize_obb_fit_mode(cfg.get("OBB_FIT_MODE", "min_area"))
     print(f"[SEED] paste_blobs master={normalize_seed(cfg.get('RANDOM_SEED', 0))}")
     session_path = str(cfg["SESSION_PATH"])
     without_crossing_dir = os.path.join(session_path, "single_animal_images")

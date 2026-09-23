@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 from animal_noise import apply_animal_noise, load_noise_background
 from batch_utils import tqdm
+from obb_fitting import fit_obb_points, normalize_obb_fit_mode
 
 from without_direction_estimation.interaction_image_synthesis import (
     ImageMaskCache,
@@ -175,13 +176,14 @@ def polygon_mask_from_points(points: np.ndarray, H: int, W: int) -> np.ndarray:
     return mask
 
 
-def obb_points_from_mask_local(mask_u8_255: np.ndarray) -> Optional[np.ndarray]:
+def obb_points_from_mask_local(
+    mask_u8_255: np.ndarray, obb_fit_mode: str = "min_area",
+) -> Optional[np.ndarray]:
     cnts = mask_to_polygons(mask_u8_255)
     if not cnts:
         return None
     pts_all = np.concatenate([cnt.astype(np.float32) for cnt in cnts], axis=0).reshape(-1, 2)
-    rect = cv2.minAreaRect(pts_all)
-    return ensure_clockwise(cv2.boxPoints(rect).astype(np.float32))
+    return ensure_clockwise(fit_obb_points(pts_all, obb_fit_mode))
 
 
 def scale_obb_points_about_center(obb_pts: np.ndarray, scale: float) -> np.ndarray:
@@ -304,7 +306,10 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
         return 0, 0, 0
 
     H, W = base_img.shape[:2]
-    ref_items, base_label_lines, base_mask_lines = build_frame_items(frame_objects, cache, W, H)
+    obb_fit_mode = normalize_obb_fit_mode(cfg.get("OBB_FIT_MODE", "min_area"))
+    ref_items, base_label_lines, base_mask_lines = build_frame_items(
+        frame_objects, cache, W, H, obb_fit_mode,
+    )
     if not ref_items:
         return 0, 0, 0
 
@@ -502,7 +507,7 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
                 dh, dw = rot_mask.shape[:2]
                 if dh <= 0 or dw <= 0 or dh > H or dw > W or cv2.countNonZero(rot_mask) <= 0:
                     return None
-                donor_obb_local = obb_points_from_mask_local(rot_mask)
+                donor_obb_local = obb_points_from_mask_local(rot_mask, obb_fit_mode)
                 if donor_obb_local is None:
                     return None
                 donor_obb_local = ensure_clockwise(donor_obb_local)
@@ -1351,7 +1356,7 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
                 _pasted_cluster_masks.append((int(xo), int(yo), rot_mask.copy()))
                 obj = donor_result_to_group_obj(res)
                 group_objs.append(obj)
-                append_annotation(obj, trial_label_lines, trial_mask_lines, W, H)
+                append_annotation(obj, trial_label_lines, trial_mask_lines, W, H, obb_fit_mode)
 
             return {
                 "group_objs": group_objs,
@@ -1460,6 +1465,7 @@ def main() -> None:
 
     config_path = sys.argv[1]
     cfg = load_config(config_path)
+    cfg["OBB_FIT_MODE"] = normalize_obb_fit_mode(cfg.get("OBB_FIT_MODE", "min_area"))
     print(f"[SEED] paste_blobs_clustered master={normalize_seed(cfg.get('RANDOM_SEED', 0))}")
     _validate_config_values(cfg)
 

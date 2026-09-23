@@ -27,6 +27,7 @@ import numpy as np
 import yaml
 from batch_utils import tqdm
 from path_utils import relativize_config_paths, resolve_config_paths
+from obb_fitting import fit_obb, normalize_obb_fit_mode
 from scipy.optimize import linear_sum_assignment
 from segmentation_metadata import segmentation_metadata_from_object
 from tracking_constants import FIXED_INTERACT_IOU, MATCH_IOU_CANDIDATES
@@ -131,12 +132,13 @@ def contour_area(cnt: np.ndarray) -> float:
     return float(abs(cv2.contourArea(cnt)))
 
 
-def obb_rect_from_contour(cnt: np.ndarray) -> OBBRect:
+def obb_rect_from_contour(cnt: np.ndarray, obb_fit_mode: str = "min_area") -> OBBRect:
     pts = np.asarray(cnt, dtype=np.float32).reshape(-1, 2)
     if pts.shape[0] < 3:
         cx, cy = contour_center(cnt)
         return ((float(cx), float(cy)), (0.0, 0.0), 0.0)
-    (cx, cy), (w, h), angle = cv2.minAreaRect(pts)
+    rect, _ = fit_obb(pts, obb_fit_mode)
+    (cx, cy), (w, h), angle = rect
     return ((float(cx), float(cy)), (float(w), float(h)), float(angle))
 
 
@@ -253,11 +255,11 @@ def blob_contour(blob) -> np.ndarray:
     return cnt
 
 
-def _blob_info_from_blob(fid: int, bi: int, bl) -> BlobInfo | None:
+def _blob_info_from_blob(fid: int, bi: int, bl, obb_fit_mode: str = "min_area") -> BlobInfo | None:
     cnt = blob_contour(bl)
     if cnt.size == 0:
         return None
-    obb_rect = obb_rect_from_contour(cnt)
+    obb_rect = obb_rect_from_contour(cnt, obb_fit_mode)
     aabb = aabb_from_contour(cnt)
     return BlobInfo(
         frame=int(fid),
@@ -272,12 +274,12 @@ def _blob_info_from_blob(fid: int, bi: int, bl) -> BlobInfo | None:
 
 
 def _process_frame_blobs(args) -> Tuple[int, List[BlobInfo], List[str]]:
-    fid, frame_blobs = args
+    fid, frame_blobs, obb_fit_mode = args
     items: List[BlobInfo] = []
     errors: List[str] = []
     for bi, bl in enumerate(frame_blobs):
         try:
-            info = _blob_info_from_blob(int(fid), int(bi), bl)
+            info = _blob_info_from_blob(int(fid), int(bi), bl, obb_fit_mode)
         except Exception as e:
             errors.append(f"[initial_tracking] skipped frame={fid} blob_index={bi}: {e}")
             continue
@@ -286,9 +288,13 @@ def _process_frame_blobs(args) -> Tuple[int, List[BlobInfo], List[str]]:
     return int(fid), items, errors
 
 
-def build_blob_index(blob_seq, frame_indices: Sequence[int], num_workers: int = 1) -> Dict[int, List[BlobInfo]]:
+def build_blob_index(
+    blob_seq, frame_indices: Sequence[int], num_workers: int = 1,
+    obb_fit_mode: str = "min_area",
+) -> Dict[int, List[BlobInfo]]:
+    obb_fit_mode = normalize_obb_fit_mode(obb_fit_mode)
     out: Dict[int, List[BlobInfo]] = {}
-    tasks = [(int(fid), list(get_frame_blobs(blob_seq, int(fid)))) for fid in frame_indices]
+    tasks = [(int(fid), list(get_frame_blobs(blob_seq, int(fid))), obb_fit_mode) for fid in frame_indices]
     errors: List[str] = []
 
     if int(num_workers) <= 1:
@@ -919,7 +925,10 @@ def _prepare_context(cfg_path: str, cfg: dict) -> dict:
         )
 
     num_workers = resolve_num_workers(cfg)
-    blob_records = build_blob_index(blob_seq, frame_indices, num_workers=num_workers)
+    blob_records = build_blob_index(
+        blob_seq, frame_indices, num_workers=num_workers,
+        obb_fit_mode=cfg.get("OBB_FIT_MODE", "min_area"),
+    )
 
     auto_params = compute_auto_params(
         blob_records,

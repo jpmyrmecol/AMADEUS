@@ -28,6 +28,7 @@ import cv2
 import numpy as np
 import yaml
 from batch_utils import tqdm
+from obb_fitting import fit_obb, normalize_obb_fit_mode
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
@@ -296,11 +297,14 @@ def angle_to_class(dx: float, dy: float) -> int:
     return int(((angle + 22.5) % 360.0) // 45.0)
 
 
-def _obb_geometry_from_contour(cnt: np.ndarray) -> Tuple[Optional[np.ndarray], float, Optional[float], Optional[np.ndarray]]:
+def _obb_geometry_from_contour(
+    cnt: np.ndarray, obb_fit_mode: str = "min_area",
+) -> Tuple[Optional[np.ndarray], float, Optional[float], Optional[np.ndarray]]:
     pts = np.asarray(cnt, dtype=np.float32).reshape(-1, 2)
     if pts.shape[0] < 3:
         return None, 0.0, None, None
-    rect = cv2.minAreaRect(pts)
+    fit_mode = normalize_obb_fit_mode(obb_fit_mode)
+    rect, fitted_axis = fit_obb(pts, fit_mode)
     (_, _), (w, h), angle = rect
     w = float(w)
     h = float(h)
@@ -310,9 +314,12 @@ def _obb_geometry_from_contour(cnt: np.ndarray) -> Tuple[Optional[np.ndarray], f
 
     axis = None
     if major_axis_len > 1e-8 and math.isfinite(float(angle)):
-        axis_angle = float(angle) if w >= h else float(angle) + 90.0
-        theta = math.radians(axis_angle)
-        axis = unit_vec(math.cos(theta), math.sin(theta))
+        if fit_mode == "pca":
+            axis = unit_vec(float(fitted_axis[0]), float(fitted_axis[1]))
+        else:
+            axis_angle = float(angle) if w >= h else float(angle) + 90.0
+            theta = math.radians(axis_angle)
+            axis = unit_vec(math.cos(theta), math.sin(theta))
 
     aspect_ratio = None
     if long_side > 1e-6:
@@ -321,13 +328,17 @@ def _obb_geometry_from_contour(cnt: np.ndarray) -> Tuple[Optional[np.ndarray], f
     return axis, major_axis_len, aspect_ratio, cv2.boxPoints(rect).astype(np.float32)
 
 
-def obb_axis_from_contour(cnt: np.ndarray) -> Optional[np.ndarray]:
-    axis, _, _, _ = _obb_geometry_from_contour(cnt)
+def obb_axis_from_contour(
+    cnt: np.ndarray, obb_fit_mode: str = "min_area",
+) -> Optional[np.ndarray]:
+    axis, _, _, _ = _obb_geometry_from_contour(cnt, obb_fit_mode)
     return axis
 
 
-def contour_to_obb_points(cnt: np.ndarray) -> np.ndarray:
-    _, _, _, box_points = _obb_geometry_from_contour(cnt)
+def contour_to_obb_points(
+    cnt: np.ndarray, obb_fit_mode: str = "min_area",
+) -> np.ndarray:
+    _, _, _, box_points = _obb_geometry_from_contour(cnt, obb_fit_mode)
     if box_points is None:
         raise ValueError("Contour must contain at least 3 points for OBB conversion.")
     return box_points
@@ -468,7 +479,10 @@ def get_required_tracking_stat(stats: Dict[str, str], key: str, cast):
     return cast(stats[key])
 
 
-def build_blob_records(blob_seq, frame_indices: Sequence[int]) -> Dict[int, List[BlobRecord]]:
+def build_blob_records(
+    blob_seq, frame_indices: Sequence[int], obb_fit_mode: str = "min_area",
+) -> Dict[int, List[BlobRecord]]:
+    obb_fit_mode = normalize_obb_fit_mode(obb_fit_mode)
     out: Dict[int, List[BlobRecord]] = {}
     for fid in tqdm(frame_indices, desc="Preparing blobs"):
         records: List[BlobRecord] = []
@@ -478,7 +492,7 @@ def build_blob_records(blob_seq, frame_indices: Sequence[int]) -> Dict[int, List
                 continue
             x, y, w, h = cv2.boundingRect(cnt)
             cx, cy = contour_center(cnt)
-            _, obb_major_axis_len, obb_aspect_ratio, _ = _obb_geometry_from_contour(cnt)
+            _, obb_major_axis_len, obb_aspect_ratio, _ = _obb_geometry_from_contour(cnt, obb_fit_mode)
             records.append(
                 BlobRecord(
                     contour=cnt,
@@ -707,16 +721,24 @@ def estimate_directions(blob_records, cfg, individual_distance_px):
             blob.erase_reasons_final = list(blob.erase_reasons_pre_direction)
             if blob.erase_final:
                 continue
-            pts = contour_to_obb_points(blob.contour)
+            fit_mode = normalize_obb_fit_mode(cfg.get("OBB_FIT_MODE", "min_area"))
+            pts = contour_to_obb_points(blob.contour, fit_mode)
             edges = np.roll(pts, -1, axis=0) - pts
             lengths = np.linalg.norm(edges, axis=1)
-            index = int(np.argmax(lengths))
             if not np.isfinite(lengths).all() or min(lengths) <= 0:
                 raise ValueError(f'Degenerate OBB: frame={blob.frame}, blob={blob.blob_index}')
-            axis = edges[index] / lengths[index]
+            if fit_mode == "pca":
+                axis = obb_axis_from_contour(blob.contour, fit_mode)
+                if axis is None:
+                    raise ValueError(f'Degenerate PCA axis: frame={blob.frame}, blob={blob.blob_index}')
+                axis_length = _obb_geometry_from_contour(blob.contour, fit_mode)[1]
+            else:
+                index = int(np.argmax(lengths))
+                axis = edges[index] / lengths[index]
+                axis_length = float(lengths[index])
             blob.class_id = 0
             blob.direction_vec = tuple(map(float, axis))
-            blob.axis_length = float(lengths[index])
+            blob.axis_length = float(axis_length)
             blob.direction_failure_reasons.clear()
             kept += 1
     return {'direction_input_blobs': kept, 'valid_segments': 0,
@@ -1076,6 +1098,7 @@ def _init_without_crossing_writer_worker(
         "edge_blur_ksize": int(edge_blur_ksize),
         "edge_blur_sigma": float(edge_blur_sigma),
         "mask_expansion_ratio": get_mask_expansion_ratio(cfg),
+        "obb_fit_mode": normalize_obb_fit_mode(cfg.get("OBB_FIT_MODE", "min_area")),
         "use_gpu": bool(use_gpu),
         "png_write_params": [cv2.IMWRITE_PNG_COMPRESSION, png_compression],
         "img_dir": os.path.join(out_dir, "images"),
@@ -1210,7 +1233,7 @@ def _process_without_crossing_frame(
 
     for out_idx, b in enumerate(valid_blobs):
         class_name = DIRECTION_CLASS_NAMES[b.class_id]
-        obb_pts = contour_to_obb_points(b.contour)
+        obb_pts = contour_to_obb_points(b.contour, obb_fit_mode=ctx["obb_fit_mode"])
         label_lines.append(yolo_line_from_obb_points(b.class_id, obb_pts, W, H))
         mask_lines.append(
             polygon_line_from_contour(
@@ -1283,7 +1306,7 @@ def _process_without_crossing_frame(
     if fid in ctx["preview_ids"]:
         preview = canvas.copy()
         for b in valid_blobs:
-            obb_pts = contour_to_obb_points(b.contour)
+            obb_pts = contour_to_obb_points(b.contour, obb_fit_mode=ctx["obb_fit_mode"])
             draw_obb(preview, obb_pts, OBB_COLOR, 2)
             if b.direction_vec is not None:
                 draw_heading_triangle_for_obb(
@@ -1296,7 +1319,7 @@ def _process_without_crossing_frame(
                     scale=1.2,
                 )
         for b in remove_blobs:
-            draw_obb(preview, contour_to_obb_points(b.contour), OUTLIER_COLOR, 2)
+            draw_obb(preview, contour_to_obb_points(b.contour, obb_fit_mode=ctx["obb_fit_mode"]), OUTLIER_COLOR, 2)
         cv2.imwrite(os.path.join(ctx["prev_dir"], img_name), preview, ctx["png_write_params"])
         saved_preview_count = 1
 
@@ -1748,7 +1771,10 @@ def main() -> None:
     individual_distance_source_total_non_crossing = int(get_required_tracking_stat(initial_tracking_stats, "individual_distance_source_total_non_crossing", int))
     init_max_dist_px = float(get_required_tracking_stat(initial_tracking_stats, "init_max_dist_px", float))
 
-    blob_records = build_blob_records(blob_seq, direction_frame_indices)
+    blob_records = build_blob_records(
+        blob_seq, direction_frame_indices,
+        obb_fit_mode=cfg.get("OBB_FIT_MODE", "min_area"),
+    )
     min_valid_frames, min_valid_ratio, source_fps = resolve_direction_min_valid_frames(cfg)
     cfg["_derived_source_fps"] = float(source_fps)
     cfg["_derived_direction_min_valid_frames"] = int(min_valid_frames)

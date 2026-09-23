@@ -508,6 +508,7 @@ def build_training_dataset(
     skip_cropping: bool = False,
     localize_crop_on_base_blob: bool = False,
     rotation_angles: Sequence[int] | None = None,
+    obb_fit_mode: str = "min_area",
 ) -> str:
     """Build the refine dataset with the regular crop/create-dataset pipeline."""
     image_size = int(image_size)
@@ -586,6 +587,7 @@ def build_training_dataset(
             MASK_DIR=source_masks_dir,
             BLOBS_IN_VIDEO=blobs_in_video,
             LOCALIZED=bool(localize_crop_on_base_blob),
+            OBB_FIT_MODE=obb_fit_mode,
             num_workers=num_dataset_workers,
             random_seed=derive_seed(random_seed, "refine_blobs", "crop_images"),
         )
@@ -1154,6 +1156,7 @@ def main() -> None:
             skip_cropping=skip_cropping,
             localize_crop_on_base_blob=localize_crop_on_base_blob,
             rotation_angles=rotation_angles,
+            obb_fit_mode=cfg.get("OBB_FIT_MODE", "min_area"),
         )
     else:
         print(f"Found existing last.pt before dataset build: {existing_last}")
