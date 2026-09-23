@@ -27,7 +27,7 @@ READY_MARKER = ENVIRONMENT_ROOT / ".amadeus-ready"
 # uv resolves uv.lock, so its version is pinned like the packages it installs.
 # The launchers read the same file and hand over a matching uv; this check keeps
 # a hand-run setup honest too.
-UV_VERSION_FILE = PROJECT_ROOT / "UV_VERSION"
+UV_VERSION_FILE = PROJECT_ROOT / "tools" / "UV_VERSION"
 
 
 def nvidia_smi_candidates() -> list[str]:

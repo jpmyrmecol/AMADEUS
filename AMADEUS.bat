@@ -63,7 +63,8 @@ exit /b %errorlevel%
 set "AMADEUS_ENV_READY="
 if not exist ".venv\Scripts\python.exe" exit /b 0
 if not exist ".venv\Scripts\amadeus.exe" exit /b 0
-powershell.exe -NoProfile -Command "$marker='.venv\.amadeus-ready'; $reference=if (Test-Path -LiteralPath $marker) { (Get-Item -LiteralPath $marker).LastWriteTimeUtc } else { (Get-Item -LiteralPath '.venv\Scripts\amadeus.exe').LastWriteTimeUtc }; if ($reference -lt (Get-Item -LiteralPath 'pyproject.toml').LastWriteTimeUtc -or $reference -lt (Get-Item -LiteralPath 'uv.lock').LastWriteTimeUtc -or $reference -lt (Get-Item -LiteralPath 'VERSION').LastWriteTimeUtc) { exit 1 }; if (!(Test-Path -LiteralPath $marker)) { New-Item -ItemType File -Path $marker | Out-Null }" >nul 2>&1
+if not exist "tools\UV_VERSION" exit /b 0
+powershell.exe -NoProfile -Command "$marker='.venv\.amadeus-ready'; $reference=if (Test-Path -LiteralPath $marker) { (Get-Item -LiteralPath $marker).LastWriteTimeUtc } else { (Get-Item -LiteralPath '.venv\Scripts\amadeus.exe').LastWriteTimeUtc }; if ($reference -lt (Get-Item -LiteralPath 'pyproject.toml').LastWriteTimeUtc -or $reference -lt (Get-Item -LiteralPath 'uv.lock').LastWriteTimeUtc -or $reference -lt (Get-Item -LiteralPath 'VERSION').LastWriteTimeUtc -or $reference -lt (Get-Item -LiteralPath 'tools\UV_VERSION').LastWriteTimeUtc) { exit 1 }; if (!(Test-Path -LiteralPath $marker)) { New-Item -ItemType File -Path $marker | Out-Null }" >nul 2>&1
 if not errorlevel 1 set "AMADEUS_ENV_READY=1"
 exit /b 0
 

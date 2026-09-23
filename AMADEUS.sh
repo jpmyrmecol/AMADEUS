@@ -42,15 +42,15 @@ fi
 
 # --- pinned uv (tests split AMADEUS.sh at this marker) ---------------------
 # uv resolves uv.lock, so its version is pinned like any other dependency:
-# UV_VERSION is the single source of truth, shared with AMADEUS.bat, Colab and
-# tools/setup_environment.py. A uv already installed on this machine is used
+# tools/UV_VERSION is the single source of truth, shared with AMADEUS.bat,
+# Colab and tools/setup_environment.py. A uv already installed on this machine is used
 # only when it matches; otherwise AMADEUS installs its own copy under .uv and
 # leaves the existing installation alone.
-if [ ! -f "$SCRIPT_DIR/UV_VERSION" ]; then
-    echo "[ERROR] UV_VERSION is missing from $SCRIPT_DIR; the AMADEUS folder is incomplete." >&2
+if [ ! -f "$SCRIPT_DIR/tools/UV_VERSION" ]; then
+    echo "[ERROR] tools/UV_VERSION is missing from $SCRIPT_DIR; the AMADEUS folder is incomplete." >&2
     exit 1
 fi
-UV_VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/UV_VERSION")"
+UV_VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/tools/UV_VERSION")"
 AMADEUS_UV_DIR="$SCRIPT_DIR/.uv"
 
 uv_version_of() {

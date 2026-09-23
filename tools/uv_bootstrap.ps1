@@ -3,8 +3,8 @@
 # Resolve the pinned uv for AMADEUS.bat, installing it if it is not there yet.
 #
 # uv resolves uv.lock, so its version is pinned like any other dependency.
-# UV_VERSION in the project root is the single source of truth, shared with
-# AMADEUS.sh, Colab and tools/setup_environment.py. A uv already installed on
+# tools/UV_VERSION is the single source of truth, shared with AMADEUS.sh,
+# Colab and tools/setup_environment.py. A uv already installed on
 # this machine is used only when it matches; otherwise AMADEUS installs its own
 # copy under .uv and leaves the existing installation alone.
 #
@@ -23,9 +23,9 @@ function Write-Status([string]$Message) {
 }
 
 $root = [IO.Path]::GetFullPath($ProjectRoot.Trim().Trim('"'))
-$versionFile = Join-Path $root "UV_VERSION"
+$versionFile = Join-Path $root "tools\UV_VERSION"
 if (-not (Test-Path -LiteralPath $versionFile)) {
-    Write-Status "[ERROR] UV_VERSION is missing from $root; the AMADEUS folder is incomplete."
+    Write-Status "[ERROR] tools/UV_VERSION is missing from $root; the AMADEUS folder is incomplete."
     exit 1
 }
 $required = (Get-Content -LiteralPath $versionFile -Raw).Trim()
