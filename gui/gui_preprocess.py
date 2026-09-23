@@ -246,7 +246,7 @@ def _detect_hardware_video_encoder(
         if status_callback is not None:
             status_callback("Preparing GPU-capable FFmpeg (one-time download)…")
         try:
-            hardware_ffmpeg = ensure_hardware_ffmpeg()
+            hardware_ffmpeg = ensure_hardware_ffmpeg(PROJECT_ROOT / ".ffmpeg-hardware")
         except Exception as exc:
             print(f"[AMADEUS] GPU FFmpeg setup failed: {exc}", file=sys.stderr)
             hardware_ffmpeg = None
