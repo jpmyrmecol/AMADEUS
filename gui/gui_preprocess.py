@@ -8,6 +8,7 @@ import math
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -186,36 +187,55 @@ def _video_encoder_args(encoder: str) -> list[str]:
     return ["-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p"]
 
 
-def _detect_hardware_video_encoder() -> str | None:
+def _hardware_ffmpeg_candidates() -> tuple[str, ...]:
+    candidates: list[str] = []
     try:
-        executable = ffmpeg_exe()
+        candidates.append(ffmpeg_exe())
     except Exception:
-        return None
+        pass
+
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        candidates.append(system_ffmpeg)
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for executable in candidates:
+        key = os.path.normcase(os.path.realpath(os.path.abspath(executable)))
+        if key not in seen:
+            seen.add(key)
+            unique.append(executable)
+    return tuple(unique)
+
+
+def _detect_hardware_video_encoder() -> tuple[str, str] | None:
+    executables = _hardware_ffmpeg_candidates()
     for encoder in _hardware_encoder_candidates():
-        cmd = [
-            executable,
-            "-hide_banner",
-            "-loglevel", "error",
-            "-f", "lavfi",
-            "-i", "color=s=128x128:r=1:d=0.1",
-            "-frames:v", "1",
-            *_video_encoder_args(encoder),
-            "-f", "null",
-            "-",
-        ]
-        try:
-            completed = subprocess.run(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=8,
-                check=False,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if completed.returncode == 0:
-            return encoder
+        for executable in executables:
+            cmd = [
+                executable,
+                "-hide_banner",
+                "-loglevel", "error",
+                "-f", "lavfi",
+                "-i", "color=s=128x128:r=30:d=0.2",
+                "-frames:v", "2",
+                *_video_encoder_args(encoder),
+                "-f", "null",
+                "-",
+            ]
+            try:
+                completed = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=20,
+                    check=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if completed.returncode == 0:
+                return executable, encoder
     return None
 
 
@@ -624,6 +644,7 @@ class PreprocessApp(ctk.CTk):
         self.export_queue: queue.Queue = queue.Queue()
         self.hardware_encoder_queue: queue.Queue = queue.Queue()
         self.hardware_video_encoder: str | None = None
+        self.hardware_video_ffmpeg: str | None = None
         self.export_thread: threading.Thread | None = None
         self.export_cancel = threading.Event()
         self.export_proc: subprocess.Popen | None = None
@@ -1149,13 +1170,14 @@ class PreprocessApp(ctk.CTk):
 
     def _poll_hardware_encoder_detection(self) -> None:
         try:
-            encoder = self.hardware_encoder_queue.get_nowait()
+            detected = self.hardware_encoder_queue.get_nowait()
         except queue.Empty:
             self.after(100, self._poll_hardware_encoder_detection)
             return
 
-        self.hardware_video_encoder = encoder
-        if encoder is None:
+        if detected is None:
+            self.hardware_video_encoder = None
+            self.hardware_video_ffmpeg = None
             self.gpu_acceleration_var.set(False)
             self.gpu_acceleration_check.configure(
                 text="GPU acceleration unavailable",
@@ -1163,6 +1185,9 @@ class PreprocessApp(ctk.CTk):
             )
             return
 
+        executable, encoder = detected
+        self.hardware_video_encoder = encoder
+        self.hardware_video_ffmpeg = executable
         label = HARDWARE_ENCODER_LABELS.get(encoder, encoder)
         self.gpu_acceleration_check.configure(
             text=f"Use GPU acceleration ({label})",
@@ -2459,9 +2484,12 @@ class PreprocessApp(ctk.CTk):
             raise RuntimeError("Output fps must be between 1.0 and 240.0.")
         video_encoder = "libx264"
         if self.gpu_acceleration_var.get():
-            if self.hardware_video_encoder is None:
+            if self.hardware_video_encoder is None or self.hardware_video_ffmpeg is None:
                 raise RuntimeError("GPU acceleration is selected, but no supported GPU encoder is available.")
             video_encoder = self.hardware_video_encoder
+            export_ffmpeg = self.hardware_video_ffmpeg
+        else:
+            export_ffmpeg = ffmpeg_exe()
 
         stem = Path(video_path).stem
         reserved: set[str] = set()
@@ -2509,7 +2537,7 @@ class PreprocessApp(ctk.CTk):
             )
 
         return ExportJob(
-            ffmpeg=ffmpeg_exe(),
+            ffmpeg=export_ffmpeg,
             video_path=video_path,
             output_folder=output_folder,
             fps=float(self.reader.fps),
