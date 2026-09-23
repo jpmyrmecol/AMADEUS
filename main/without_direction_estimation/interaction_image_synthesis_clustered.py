@@ -29,6 +29,8 @@ from without_direction_estimation.interaction_image_synthesis import (
     base_object_to_group_obj,
     build_feather_alpha,
     build_even_frame_jobs,
+    build_additional_frame_jobs,
+    preview_additional_frame_jobs,
     preview_frame_set_ids_by_interval,
     build_frame_items,
     choose_under,
@@ -1485,8 +1487,10 @@ def main() -> None:
             "Re-run single-animal image extraction and refinement before clustered paste."
         )
 
+    append_mode = bool(cfg.get("CLUSTER_APPEND", False))
     out_dir = os.path.join(session_path, "paste_blobs_clustered")
-    reset_output_dir(out_dir)
+    if not append_mode:
+        reset_output_dir(out_dir)
     dirs = {k: os.path.join(out_dir, k) for k in ("images", "labels", "masks", "preview")}
     ensure_dirs(dirs.values())
 
@@ -1509,9 +1513,25 @@ def main() -> None:
         images_per_frame = num_crops + (1 if include_full else 0)
         cluster_num_frames = max(1, math.ceil(clustered_target / images_per_frame)) if clustered_target > 0 and images_per_frame > 0 else -1
 
-    paste_jobs = build_even_frame_jobs(frame_ids, cluster_num_frames, normalize_seed(cfg.get("RANDOM_SEED", 0)))
-    preview_interval = max(0, int(cfg.get("PREVIEW_INTERVAL", 0)))
-    preview_ids = preview_frame_set_ids_by_interval(paste_jobs, preview_interval)
+    if append_mode:
+        additional_jobs = build_additional_frame_jobs(
+            frame_ids,
+            dirs["images"],
+            cluster_num_frames,
+            normalize_seed(cfg.get("RANDOM_SEED", 0)),
+        )
+        paste_jobs = [(fid, 1, repeat_index) for fid, repeat_index in additional_jobs]
+        preview_ids = preview_additional_frame_jobs(
+            additional_jobs, max(0, int(cfg.get("PREVIEW_INTERVAL", 0))),
+        )
+        attempted_jobs = set(additional_jobs)
+    else:
+        paste_jobs = build_even_frame_jobs(
+            frame_ids, cluster_num_frames, normalize_seed(cfg.get("RANDOM_SEED", 0)),
+        )
+        preview_interval = max(0, int(cfg.get("PREVIEW_INTERVAL", 0)))
+        preview_ids = preview_frame_set_ids_by_interval(paste_jobs, preview_interval)
+        attempted_jobs = set()
 
     from batch_utils import auto_num_workers as _auto_num_workers
     workers_cfg = resolve_num_workers(cfg, "paste_blobs_clustered", default=None)
@@ -1537,28 +1557,53 @@ def main() -> None:
                 total_boxes += tb
                 preview_written += pv
 
-    # Retry any shortfall caused by frames where cluster building produced no new blobs.
-    # Uses rep_offset >= cluster_num_frames so each retry gets a fresh RNG seed.
-    if cluster_num_frames > 0 and frames_written < cluster_num_frames:
+
+    # Add fresh candidate-frame sets until the requested supplement is satisfied.
+    if cluster_num_frames > 0 and frames_written < cluster_num_frames and frame_ids:
         needed = cluster_num_frames - frames_written
         if workers > 1:
-            _init_worker(config_path, preview_ids)
+            _init_worker(config_path, [])
         max_retries = needed * max(10, len(frame_ids))
         retry_idx = 0
-        with tqdm(total=needed, desc="Retrying clustered blobs") as retry_progress:
+        with tqdm(total=needed, desc="Adding clustered blobs") as retry_progress:
             while frames_written < cluster_num_frames and retry_idx < max_retries:
-                fid = frame_ids[retry_idx % len(frame_ids)]
-                rep_offset = cluster_num_frames + retry_idx
-                fw, tb, pv = _process_frame((fid, 1, rep_offset))
-                frames_written += fw
-                total_boxes += tb
-                preview_written += pv
-                retry_idx += 1
-                retry_progress.update(fw)
+                if append_mode:
+                    retry_target = min(
+                        cluster_num_frames - frames_written,
+                        max_retries - retry_idx,
+                    )
+                    retry_jobs = build_additional_frame_jobs(
+                        frame_ids,
+                        dirs["images"],
+                        retry_target,
+                        normalize_seed(cfg.get("RANDOM_SEED", 0)),
+                        attempted_jobs=attempted_jobs,
+                    )
+                    if not retry_jobs:
+                        break
+                    for fid, repeat_index in retry_jobs:
+                        fw, tb, pv = _process_frame((fid, 1, repeat_index))
+                        frames_written += fw
+                        total_boxes += tb
+                        preview_written += pv
+                        attempted_jobs.add((fid, repeat_index))
+                        retry_idx += 1
+                        retry_progress.update(fw)
+                        if frames_written >= cluster_num_frames or retry_idx >= max_retries:
+                            break
+                else:
+                    fid = frame_ids[retry_idx % len(frame_ids)]
+                    rep_offset = cluster_num_frames + retry_idx
+                    fw, tb, pv = _process_frame((fid, 1, rep_offset))
+                    frames_written += fw
+                    total_boxes += tb
+                    preview_written += pv
+                    retry_idx += 1
+                    retry_progress.update(fw)
         if frames_written < cluster_num_frames:
             print(
-                f"paste_blobs_clustered: WARNING - only {frames_written}/{cluster_num_frames} frames written "
-                f"after {retry_idx} retries; dataset will be smaller than NUM_IMAGES."
+                f"paste_blobs_clustered: WARNING - only {frames_written}/{cluster_num_frames} frame sets written "
+                f"after {retry_idx} retries; dataset may be smaller than NUM_IMAGES."
             )
 
 if __name__ == "__main__":

@@ -805,6 +805,7 @@ def main(
     LOCALIZED: bool = False,
     num_workers: int = 1,
     random_seed: int = 0,
+    append: bool = False,
 ):
     """Run random cropping across base directories with blob-aware background replacement for removed (partial) objects."""
 
@@ -821,11 +822,24 @@ def main(
         OUT_IMG_DIR = os.path.join(OUT_DIR, "images")
         OUT_LBL_DIR = os.path.join(OUT_DIR, "labels")
         PREV_DIR = os.path.join(OUT_DIR, "preview")
-        # Re-running paste generation can change the set of frame IDs.  Remove
-        # stale crops so create_dataset.py never counts crops from an earlier pass.
-        if os.path.isdir(OUT_DIR):
+        # Full runs rebuild crops; shortfall recovery keeps existing crops and
+        # processes only newly appended source frame sets.
+        if os.path.isdir(OUT_DIR) and not append:
             shutil.rmtree(OUT_DIR)
         ensure_dirs((OUT_DIR, OUT_IMG_DIR, OUT_LBL_DIR, PREV_DIR))
+        cropped_source_stems = set()
+        if append:
+            for crop_path in glob.glob(os.path.join(OUT_IMG_DIR, f"*{IMG_EXT}")):
+                crop_stem = os.path.splitext(os.path.basename(crop_path))[0]
+                parts = crop_stem.rsplit("_", 2)
+                if len(parts) != 3:
+                    continue
+                try:
+                    int(parts[-2])
+                    int(parts[-1])
+                except ValueError:
+                    continue
+                cropped_source_stems.add(parts[0])
 
         img_paths = sorted(glob.glob(os.path.join(IMG_DIR, f"frame_*{IMG_EXT}")))
 
@@ -838,6 +852,8 @@ def main(
             stem = fname[:-len(IMG_EXT)]
             lbl_path = os.path.join(LBL_DIR, stem + ".txt")
             if not (os.path.exists(img_path) and os.path.exists(lbl_path)):
+                continue
+            if append and stem in cropped_source_stems:
                 continue
             valid_entries.append((img_path, stem, lbl_path, parse_frame_id_from_stem(stem)))
 
@@ -975,6 +991,7 @@ def cli() -> None:
         LOCALIZED=LOCALIZED,
         num_workers=num_workers,
         random_seed=RANDOM_SEED,
+        append=bool(cfg.get("CROP_APPEND", False)),
     )
 
 

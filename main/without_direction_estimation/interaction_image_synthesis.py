@@ -1165,6 +1165,88 @@ def output_stem_for_frame_set(frame_id: int, repeat_index: int) -> str:
     return stem
 
 
+
+def build_additional_frame_jobs(
+    frame_ids: List[int],
+    image_dir: str,
+    requested_num_sets: int,
+    seed: int,
+    *,
+    attempted_jobs: Iterable[Tuple[int, int]] = (),
+) -> List[Tuple[int, int]]:
+    """Randomly add sets from unused candidate frames before reusing a frame."""
+    ids = sorted({int(fid) for fid in frame_ids})
+    target = int(requested_num_sets)
+    if target == -1:
+        target = len(ids)
+    if target <= 0 or not ids:
+        return []
+
+    used: Dict[int, set[int]] = defaultdict(set)
+    if os.path.isdir(image_dir):
+        for name in os.listdir(image_dir):
+            stem, ext = os.path.splitext(name)
+            if ext.lower() not in {".png", ".jpg", ".jpeg", ".tif", ".tiff"}:
+                continue
+            if not stem.startswith("frame_"):
+                continue
+            frame_part, separator, repeat_part = stem.partition("_set_")
+            try:
+                fid = int(frame_part[len("frame_"):])
+                repeat_index = int(repeat_part) if separator else 0
+            except ValueError:
+                continue
+            used[fid].add(repeat_index)
+
+    for fid, repeat_index in attempted_jobs:
+        used[int(fid)].add(int(repeat_index))
+
+    used_count = sum(len(used.get(fid, ())) for fid in ids)
+    rng = make_python_rng(
+        normalize_seed(seed), "paste_blobs", "additional_frame_jobs", target, used_count,
+    )
+    fresh_ids = [fid for fid in ids if not used.get(fid)]
+    rng.shuffle(fresh_ids)
+
+    jobs: List[Tuple[int, int]] = []
+    for fid in fresh_ids[:target]:
+        used[fid].add(0)
+        jobs.append((fid, 0))
+
+    remaining = target - len(jobs)
+    repeat_order = list(ids)
+    rng.shuffle(repeat_order)
+    while remaining > 0:
+        for fid in repeat_order:
+            repeat_index = 0
+            while repeat_index in used[fid]:
+                repeat_index += 1
+            used[fid].add(repeat_index)
+            jobs.append((fid, repeat_index))
+            remaining -= 1
+            if remaining <= 0:
+                break
+    return jobs
+
+
+def preview_additional_frame_jobs(
+    jobs: List[Tuple[int, int]],
+    interval: int,
+) -> List[Tuple[int, int]]:
+    """Select previews from supplemental jobs using source-frame spacing."""
+    step = max(0, int(interval))
+    if step <= 0:
+        return []
+    selected: List[Tuple[int, int]] = []
+    last_frame_id = None
+    for fid, repeat_index in sorted(jobs):
+        fid = int(fid)
+        if last_frame_id is None or fid - last_frame_id >= step:
+            selected.append((fid, int(repeat_index)))
+            last_frame_id = fid
+    return selected
+
+
 def paste_mask_into_full(full: np.ndarray, mask: np.ndarray, x: int, y: int) -> None:
     """Paste mask into full with boundary clipping.
 
@@ -2031,8 +2113,10 @@ def main() -> None:
     if float(cfg.get("PASTE_MIN_ASPECT", 1.1)) <= 1.0:
         raise ValueError("PASTE_MIN_ASPECT must be greater than 1.0.")
 
+    append_mode = bool(cfg.get("PASTE_BLOBS_APPEND", False))
     out_dir = os.path.join(session_path, "paste_blobs")
-    reset_output_dir(out_dir)
+    if not append_mode:
+        reset_output_dir(out_dir)
     dirs = {k: os.path.join(out_dir, k) for k in ("images", "labels", "masks", "preview")}
     ensure_dirs(dirs.values())
 
@@ -2041,14 +2125,8 @@ def main() -> None:
     # when it needs additional non-clustered candidates.
     explicit_frames = cfg.get("PASTE_BLOBS_NUM_FRAMES")
     num_total_images = int(cfg.get("NUM_IMAGES", 0))
-    reserve_step = 0
-    if num_total_images > 0 and not bool(cfg.get("skip_creating_direction_dataset", False)):
-        reserve_ratio = float(cfg.get("DATASET_SPLIT_RESERVE_RATIO", 0.02))
-        reserve_min = int(cfg.get("DATASET_SPLIT_RESERVE_MIN", 100))
-        reserve_step = max(reserve_min, math.ceil(num_total_images * reserve_ratio))
-    candidate_total = num_total_images + reserve_step
     _nc_ratio = 1.0 - float(cfg.get("CLUSTERED_RATIO", 0.05))
-    _nc_target = math.ceil(candidate_total * _nc_ratio) if candidate_total > 0 else 0
+    _nc_target = math.ceil(num_total_images * _nc_ratio) if num_total_images > 0 else 0
     _skip_crop = bool(cfg.get("skip_cropping", False))
     _include_crop = bool(cfg.get("USE_CROP", True))
     _num_crops = 0 if (_skip_crop or not _include_crop) else int(cfg.get("NUM_CROPS", 2))
@@ -2063,10 +2141,20 @@ def main() -> None:
     else:
         requested_num_sets = -1  # all frames once
 
+
     preview_interval = int(cfg.get("PREVIEW_INTERVAL", 0))
     frame_ids = sorted(objects_by_frame.keys())
-    paste_jobs = build_even_frame_jobs(frame_ids, requested_num_sets, normalize_seed(cfg.get("RANDOM_SEED", 0)))
-    preview_jobs = preview_frame_set_ids_by_interval(paste_jobs, preview_interval)
+    seed = normalize_seed(cfg.get("RANDOM_SEED", 0))
+    if append_mode:
+        all_jobs = build_additional_frame_jobs(
+            frame_ids, dirs["images"], requested_num_sets, seed,
+        )
+        preview_jobs = preview_additional_frame_jobs(all_jobs, preview_interval)
+        print(f"paste_blobs: adding {requested_num_sets} randomly selected frame sets")
+    else:
+        paste_jobs = build_even_frame_jobs(frame_ids, requested_num_sets, seed)
+        preview_jobs = preview_frame_set_ids_by_interval(paste_jobs, preview_interval)
+        all_jobs = [(fid, rep) for fid, set_count in paste_jobs for rep in range(set_count)]
 
     workers_cfg = resolve_num_workers(cfg, "paste_blobs", default=None)
     workers = _auto_num_workers("process") if workers_cfg is None else max(1, int(workers_cfg))
@@ -2076,8 +2164,7 @@ def main() -> None:
     frames_written = 0
     total_boxes = 0
     preview_written = 0
-
-    all_jobs = [(fid, rep) for fid, set_count in paste_jobs for rep in range(set_count)]
+    attempted_jobs = set(all_jobs) if append_mode else set()
 
     if workers <= 1:
         _init_paste_worker(config_path, preview_jobs)
@@ -2101,28 +2188,47 @@ def main() -> None:
                 if pv:
                     preview_written += 1
 
-    # Retry any shortfall caused by frames where paste produced no new blobs.
-    # Each retry job uses a repeat_index >= requested_num_sets, guaranteeing a
-    # fresh RNG seed that differs from all jobs in the main pass.
-    if requested_num_sets > 0 and frames_written < requested_num_sets:
-        needed = requested_num_sets - frames_written
-        print(f"paste_blobs: {needed} frame(s) produced no new blobs; retrying with fresh seeds...")
+    # Recover failed sets with new repeat indices while keeping all prior output.
+    if requested_num_sets > 0 and frames_written < requested_num_sets and frame_ids:
+        print(f"paste_blobs: {requested_num_sets - frames_written} frame set(s) still needed; adding fresh attempts...")
         if workers > 1:
-            # Re-initialise globals in the main process for single-threaded retry.
-            _init_paste_worker(config_path, preview_jobs)
-        max_retries = needed * max(10, len(frame_ids))
+            _init_paste_worker(config_path, [])
+        max_retries = (requested_num_sets - frames_written) * max(10, len(frame_ids))
         retry_idx = 0
         while frames_written < requested_num_sets and retry_idx < max_retries:
-            fid = frame_ids[retry_idx % len(frame_ids)]
-            rep = requested_num_sets + retry_idx
-            fw, tb, _ = _process_paste_frame((fid, rep))
-            frames_written += fw
-            total_boxes += tb
-            retry_idx += 1
+            if append_mode:
+                retry_target = min(
+                    requested_num_sets - frames_written,
+                    max_retries - retry_idx,
+                )
+                retry_jobs = build_additional_frame_jobs(
+                    frame_ids,
+                    dirs["images"],
+                    retry_target,
+                    seed,
+                    attempted_jobs=attempted_jobs,
+                )
+                if not retry_jobs:
+                    break
+                for job in retry_jobs:
+                    fw, tb, _ = _process_paste_frame(job)
+                    frames_written += fw
+                    total_boxes += tb
+                    attempted_jobs.add(job)
+                    retry_idx += 1
+                    if frames_written >= requested_num_sets or retry_idx >= max_retries:
+                        break
+            else:
+                fid = frame_ids[retry_idx % len(frame_ids)]
+                repeat_index = requested_num_sets + retry_idx
+                fw, tb, _ = _process_paste_frame((fid, repeat_index))
+                frames_written += fw
+                total_boxes += tb
+                retry_idx += 1
         if frames_written < requested_num_sets:
             print(
-                f"paste_blobs: WARNING - only {frames_written}/{requested_num_sets} frames written "
-                f"after {retry_idx} retries; dataset will be smaller than NUM_IMAGES."
+                f"paste_blobs: WARNING - only {frames_written}/{requested_num_sets} frame sets written "
+                f"after {retry_idx} retries; dataset may be smaller than NUM_IMAGES."
             )
 
     print("Done.")
