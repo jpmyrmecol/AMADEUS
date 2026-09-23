@@ -2088,10 +2088,17 @@ def main() -> None:
     # when it needs additional non-clustered candidates.
     explicit_frames = cfg.get("PASTE_BLOBS_NUM_FRAMES")
     num_total_images = int(cfg.get("NUM_IMAGES", 0))
+    reserve_step = 0
+    if num_total_images > 0 and not bool(cfg.get("skip_creating_direction_dataset", False)):
+        reserve_ratio = float(cfg.get("DATASET_SPLIT_RESERVE_RATIO", 0.02))
+        reserve_min = int(cfg.get("DATASET_SPLIT_RESERVE_MIN", 100))
+        reserve_step = max(reserve_min, math.ceil(num_total_images * reserve_ratio))
+    candidate_total = num_total_images + reserve_step
     _nc_ratio = 1.0 - float(cfg.get("CLUSTERED_RATIO", 0.05))
-    _nc_target = math.ceil(num_total_images * _nc_ratio) if num_total_images > 0 else 0
+    _nc_target = math.ceil(candidate_total * _nc_ratio) if candidate_total > 0 else 0
     _skip_crop = bool(cfg.get("skip_cropping", False))
-    _num_crops = 0 if _skip_crop else int(cfg.get("NUM_CROPS", 2))
+    _include_crop = bool(cfg.get("USE_CROP", True))
+    _num_crops = 0 if (_skip_crop or not _include_crop) else int(cfg.get("NUM_CROPS", 2))
     _include_full = bool(cfg.get("USE_FULL", True))
     _images_per_frame = _num_crops + (1 if _include_full else 0)
     if explicit_frames is not None:
