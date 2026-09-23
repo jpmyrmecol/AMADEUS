@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Yusuke Notomi
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Provision the checksum-pinned FFmpeg build used for hardware video encoding."""
+"""Provide the single pinned FFmpeg executable used by AMADEUS."""
 
 from __future__ import annotations
 
@@ -45,6 +45,18 @@ _ASSETS = {
         archive_name="ffmpeg-N-126342-gf88b741dbf-win64-gpl.zip",
         archive_sha256="b4da332540eaebc6939181b59e267f163dd57407ef6596f7f3452845921d1d91",
         archive_size=170_732_198,
+        binary_name="ffmpeg.exe",
+    ),
+    ("Windows", "aarch64"): FFmpegAsset(
+        build="btbn-2026-08-31-N-126342-winarm64",
+        url=(
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/"
+            "autobuild-2026-08-31-13-27/"
+            "ffmpeg-N-126342-gf88b741dbf-winarm64-gpl.zip"
+        ),
+        archive_name="ffmpeg-N-126342-gf88b741dbf-winarm64-gpl.zip",
+        archive_sha256="7ba67fd79d1b858cd1cf7058f1303813e2817171da987bdf49b4d94bdafc15cc",
+        archive_size=116_376_495,
         binary_name="ffmpeg.exe",
     ),
     ("Linux", "x86_64"): FFmpegAsset(
@@ -97,74 +109,6 @@ def _asset_for_current_platform() -> FFmpegAsset | None:
     return None
 
 
-def _windows_gpu_present() -> bool:
-    """Look for NVIDIA, AMD, or Intel display adapters without requiring admin."""
-    powershell = shutil.which("powershell") or shutil.which("pwsh")
-    if powershell:
-        try:
-            completed = subprocess.run(
-                [
-                    powershell,
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    "Get-CimInstance Win32_VideoController | ForEach-Object { $_.PNPDeviceID }",
-                ],
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=8,
-                check=False,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if completed.returncode == 0 and re.search(
-                r"\bVEN_(?:10DE|1002|8086)\b",
-                completed.stdout,
-                re.IGNORECASE,
-            ):
-                return True
-        except (OSError, subprocess.SubprocessError):
-            pass
-
-    return shutil.which("nvidia-smi") is not None
-
-
-def _linux_gpu_present() -> bool:
-    if shutil.which("nvidia-smi") or Path("/proc/driver/nvidia/version").is_file():
-        return True
-    if any(Path("/dev").glob("nvidia*")):
-        return True
-    if any(Path("/dev/dri").glob("renderD*")):
-        return True
-
-    # PCI vendor IDs plus the display-controller class avoid treating ordinary
-    # Intel chipset, network, or storage devices as a GPU.
-    pci_devices = Path("/sys/bus/pci/devices")
-    try:
-        devices = tuple(pci_devices.iterdir())
-    except OSError:
-        devices = ()
-
-    for device in devices:
-        try:
-            vendor = (device / "vendor").read_text(encoding="ascii").strip().lower()
-            device_class = (device / "class").read_text(encoding="ascii").strip().lower()
-        except OSError:
-            continue
-        if vendor in {"0x10de", "0x1002", "0x8086"} and device_class.startswith("0x03"):
-            return True
-    return False
-
-
-def gpu_hardware_present() -> bool:
-    """Return whether the host exposes a GPU for which the pinned build is meant."""
-    if platform.system() == "Windows":
-        return _windows_gpu_present()
-    if platform.system() == "Linux":
-        return _linux_gpu_present()
-    return False
-
-
 def _binary_path(install_root: Path, asset: FFmpegAsset) -> Path:
     return install_root / asset.build / asset.binary_name
 
@@ -192,7 +136,7 @@ def _run_encoder_inventory(executable: Path) -> str:
 def _download_verified(asset: FFmpegAsset, destination: Path) -> None:
     request = urllib.request.Request(
         asset.url,
-        headers={"User-Agent": "AMADEUS hardware FFmpeg installer"},
+        headers={"User-Agent": "AMADEUS FFmpeg installer"},
     )
     digest = hashlib.sha256()
     byte_count = 0
@@ -214,7 +158,7 @@ def _download_verified(asset: FFmpegAsset, destination: Path) -> None:
                 out.write(chunk)
     except (OSError, ValueError) as exc:
         destination.unlink(missing_ok=True)
-        raise RuntimeError(f"Could not download the hardware FFmpeg build: {exc}") from exc
+        raise RuntimeError(f"Could not download the pinned FFmpeg build: {exc}") from exc
 
     if byte_count != asset.archive_size:
         destination.unlink(missing_ok=True)
@@ -288,11 +232,48 @@ def _extract_ffmpeg_and_license(archive_path: Path, asset: FFmpegAsset, destinat
     return binary_path
 
 
-def ensure_hardware_ffmpeg(install_root: Path | None = None) -> str | None:
-    """Download and cache the pinned GPU-enabled FFmpeg for this platform."""
+def _macos_ffmpeg_binary() -> str:
+    """Use the platform-specific imageio-ffmpeg wheel (VideoToolbox build)."""
+    import importlib.resources
+
+    binaries = importlib.resources.files("imageio_ffmpeg.binaries")
+    candidates = sorted(
+        str(entry)
+        for entry in binaries.iterdir()
+        if entry.name.startswith("ffmpeg-") and not entry.name.endswith(".md")
+    )
+    if not candidates:
+        raise RuntimeError("The pinned macOS imageio-ffmpeg wheel contains no FFmpeg binary.")
+    executable = candidates[-1]
+    if not Path(executable).is_file() or not os.access(executable, os.X_OK):
+        raise RuntimeError(f"The pinned macOS FFmpeg binary is unavailable: {executable}")
+    return executable
+
+
+def ffmpeg_build_identity() -> str:
+    """Identify the fixed FFmpeg build selected for this operating system."""
+    if platform.system() == "Darwin":
+        return "imageio-ffmpeg==0.6.0 (VideoToolbox-capable macOS build)"
     asset = _asset_for_current_platform()
     if asset is None:
-        return None
+        raise RuntimeError(
+            f"No pinned FFmpeg build is available for {platform.system()} "
+            f"{_normalized_machine()}."
+        )
+    return asset.build
+
+
+def ensure_ffmpeg(install_root: Path | None = None) -> str:
+    """Return AMADEUS's single fixed FFmpeg build, installing it when required."""
+    if platform.system() == "Darwin":
+        return _macos_ffmpeg_binary()
+
+    asset = _asset_for_current_platform()
+    if asset is None:
+        raise RuntimeError(
+            f"No pinned FFmpeg build is available for {platform.system()} "
+            f"{_normalized_machine()}."
+        )
 
     root = Path(install_root) if install_root is not None else DEFAULT_INSTALL_ROOT
     root.mkdir(parents=True, exist_ok=True)
@@ -312,7 +293,7 @@ def ensure_hardware_ffmpeg(install_root: Path | None = None) -> str | None:
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             pass
 
-    with tempfile.TemporaryDirectory(prefix=".ffmpeg-hardware-", dir=root) as temp_name:
+    with tempfile.TemporaryDirectory(prefix=".ffmpeg-download-", dir=root) as temp_name:
         temp_dir = Path(temp_name)
         archive_path = temp_dir / asset.archive_name
         extracted_dir = temp_dir / "install"

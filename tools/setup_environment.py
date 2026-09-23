@@ -225,29 +225,18 @@ finally:
     subprocess.run([str(venv_python()), "-c", code], cwd=PROJECT_ROOT, check=True)
 
 
-def prepare_hardware_ffmpeg() -> None:
-    """Prepare the optional GPU encoder build without blocking CPU-only installs."""
-    try:
-        if str(PROJECT_ROOT) not in sys.path:
-            sys.path.insert(0, str(PROJECT_ROOT))
-        from tools.hardware_ffmpeg import ensure_hardware_ffmpeg, gpu_hardware_present
-
-        if not gpu_hardware_present():
-            return
-        print(
-            "[AMADEUS] Preparing the GPU-capable FFmpeg build (one-time download)...",
-            flush=True,
-        )
-        executable = ensure_hardware_ffmpeg(PROJECT_ROOT / ".ffmpeg-hardware")
-        if executable:
-            print(f"[AMADEUS] GPU-capable FFmpeg ready: {executable}", flush=True)
-    except Exception as exc:
-        print(
-            "[AMADEUS] GPU FFmpeg could not be prepared; Cropping & Trimming will retry: "
-            f"{exc}",
-            file=sys.stderr,
-            flush=True,
-        )
+def prepare_ffmpeg() -> None:
+    """Install and verify the one pinned FFmpeg used by every video feature."""
+    print("[AMADEUS] Preparing the pinned FFmpeg build (one-time setup)...", flush=True)
+    code = """
+from tools.ffmpeg_runtime import ensure_ffmpeg, ffmpeg_build_identity
+try:
+    executable = ensure_ffmpeg()
+except Exception as exc:
+    raise SystemExit(f"[ERROR] Could not prepare AMADEUS FFmpeg: {exc}") from exc
+print(f"[AMADEUS] FFmpeg ready ({ffmpeg_build_identity()}): {executable}", flush=True)
+"""
+    subprocess.run([str(venv_python()), "-c", code], cwd=PROJECT_ROOT, check=True)
 
 
 def verify_numeric_stack() -> None:
@@ -592,7 +581,7 @@ def main() -> int:
         # Re-check after any PyTorch repair to ensure no unrelated package changed.
         verify_numeric_stack()
         verify_gui_environment()
-        prepare_hardware_ffmpeg()
+        prepare_ffmpeg()
         command_path = install_amadeus_command()
         READY_MARKER.touch()
     except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:

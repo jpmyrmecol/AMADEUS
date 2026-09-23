@@ -14,7 +14,6 @@ for _path in (str(_MAIN_DIR), str(_MAIN_DIR.parent)):
 import os
 import re
 import sys
-import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Iterable
@@ -47,6 +46,8 @@ from experiment_utils import (
 from weight_utils import deduplicate_best_epoch_weights
 from video_frame_count import read_video_frame_info, warn_if_frame_count_adjusted
 from gui.color import make_id_palette, resolve_color_seed
+from main.video_compat import ffmpeg_executable
+from main.video_encoders import detect_hardware_video_encoder, hardware_encoder_args
 
 
 DIRECTION_CLASS_NAMES = ['animal']
@@ -315,7 +316,7 @@ def choose_frame_range(analysis: dict, total_frames: int) -> tuple[int, int, str
     return first_frame, last_frame, start_src, end_src
 
 
-_GPU_VIDEO_ENCODER_AVAILABLE: bool | None = None
+_GPU_VIDEO_ENCODER: tuple[str, str | None] | None | bool = False
 
 
 def resolve_video_acceleration(value) -> str:
@@ -326,84 +327,53 @@ def resolve_video_acceleration(value) -> str:
 
 
 def _ffmpeg_path() -> str | None:
-    """Resolve an ffmpeg executable: prefer PATH (preserves whatever ffmpeg
-    build/version Windows installs already use, NVENC included), falling
-    back to the bundled imageio-ffmpeg binary only when no system ffmpeg is
-    found -- e.g. on macOS, where Homebrew ffmpeg shouldn't be required."""
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
+    """Return the one FFmpeg executable selected for this AMADEUS install."""
     try:
-        import imageio_ffmpeg
-
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        return ffmpeg_executable()
     except Exception:
         return None
 
 
-def _gpu_video_encoder_available() -> bool:
-    """Return True when ffmpeg can actually initialize NVIDIA NVENC."""
-    global _GPU_VIDEO_ENCODER_AVAILABLE
-    if _GPU_VIDEO_ENCODER_AVAILABLE is not None:
-        return _GPU_VIDEO_ENCODER_AVAILABLE
-
+def _gpu_video_encoder() -> tuple[str, str | None] | None:
+    global _GPU_VIDEO_ENCODER
+    if _GPU_VIDEO_ENCODER is not False:
+        return _GPU_VIDEO_ENCODER
     ffmpeg = _ffmpeg_path()
     if not ffmpeg:
-        _GPU_VIDEO_ENCODER_AVAILABLE = False
-        return False
-
-    cmd = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel", "error",
-        "-f", "lavfi",
-        "-i", "color=s=16x16:r=1:d=0.1",
-        *_gpu_ffmpeg_encode_args(),
-        "-f", "null",
-        "-",
-    ]
-    try:
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=8,
-        )
-        _GPU_VIDEO_ENCODER_AVAILABLE = proc.returncode == 0
-    except Exception:
-        _GPU_VIDEO_ENCODER_AVAILABLE = False
-    return bool(_GPU_VIDEO_ENCODER_AVAILABLE)
+        _GPU_VIDEO_ENCODER = None
+    else:
+        _GPU_VIDEO_ENCODER = detect_hardware_video_encoder(ffmpeg)
+    return _GPU_VIDEO_ENCODER
 
 
 def _should_use_gpu_video_encoder(video_acceleration: str, video_codec: str = "auto") -> bool:
     mode = resolve_video_acceleration(video_acceleration)
     codec = str(video_codec or "auto").strip().lower()
+    if codec not in {"auto", "h264", "mp4v"}:
+        raise RuntimeError(f"Unsupported VIDEO_CODEC: {video_codec}. Use 'auto', 'h264', or 'mp4v'.")
     if mode == "cpu":
         return False
     if codec == "mp4v":
         if mode == "gpu":
-            print("[WARN] ACCELERATION=gpu requires H.264/NVENC; VIDEO_CODEC=mp4v requested, using CPU mp4v.")
+            print("[WARN] ACCELERATION=gpu requires H.264; VIDEO_CODEC=mp4v requested, using CPU MPEG-4 encoding.")
         return False
-    available = _gpu_video_encoder_available()
-    if not available:
+    available = _gpu_video_encoder()
+    if available is None:
         if mode == "gpu":
-            print("[WARN] ACCELERATION=gpu requested, but ffmpeg h264_nvenc is unavailable; using CPU video encoding.")
+            print("[WARN] ACCELERATION=gpu requested, but no supported hardware H.264 encoder is available; using CPU video encoding.")
         return False
     return True
 
 
-def _gpu_ffmpeg_encode_args() -> list[str]:
-    return [
-        "-c:v", "h264_nvenc",
-        "-preset", "fast",
-        "-rc:v", "vbr",
-        "-cq:v", "23",
-        "-b:v", "0",
-        "-pix_fmt", "yuv420p",
-    ]
+def _selected_video_encoder(video_acceleration: str, video_codec: str) -> tuple[str, str | None]:
+    codec = str(video_codec or "auto").strip().lower()
+    if codec not in {"auto", "h264", "mp4v"}:
+        raise RuntimeError(f"Unsupported VIDEO_CODEC: {video_codec}. Use 'auto', 'h264', or 'mp4v'.")
+    if _should_use_gpu_video_encoder(video_acceleration, video_codec):
+        selected = _gpu_video_encoder()
+        assert selected is not None
+        return selected
+    return ("mpeg4" if codec == "mp4v" else "libx264", None)
 
 
 def make_video_from_image_sequence(
@@ -418,81 +388,72 @@ def make_video_from_image_sequence(
     if ext not in {"png", "jpg", "jpeg"}:
         raise RuntimeError(f"Unsupported image sequence extension: {extension}")
 
-    use_gpu_encoder = _should_use_gpu_video_encoder(video_acceleration, "h264")
-    encoder_args = _gpu_ffmpeg_encode_args() if use_gpu_encoder else ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
-    encoder_label = "h264_nvenc" if use_gpu_encoder else "libx264"
-
+    encoder, device = _selected_video_encoder(video_acceleration, "h264")
     ffmpeg = _ffmpeg_path()
     if not ffmpeg:
-        raise RuntimeError("ffmpeg was not found (checked PATH and the bundled imageio-ffmpeg install).")
-
-    cmd = [
-        ffmpeg, "-y",
+        raise RuntimeError("The pinned AMADEUS FFmpeg is unavailable.")
+    filters = ["pad=ceil(iw/2)*2:ceil(ih/2)*2"]
+    if encoder == "h264_vaapi":
+        filters.append("format=nv12,hwupload")
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
+    if device:
+        cmd.extend(["-vaapi_device", device])
+    cmd.extend([
         "-start_number", str(int(first_frame)),
         "-framerate", str(float(fps)),
         "-i", os.path.join(image_dir, f"%06d.{ext}"),
-        "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-        *encoder_args,
+        "-vf", ",".join(filters),
+        *(hardware_encoder_args(encoder, profile="create_video") if encoder.startswith("h264_") else _cpu_encoder_args(encoder)),
         out_path,
-    ]
-    print(f"[INFO] ffmpeg image-sequence encoder for {os.path.basename(out_path)}: {encoder_label}")
+    ])
+    print(f"[INFO] AMADEUS FFmpeg image-sequence encoder for {os.path.basename(out_path)}: {encoder}")
     subprocess.run(cmd, check=True)
 
 
-def open_video_writer(path: str, fps: float, frame_shape: tuple[int, int, int], video_codec: str) -> tuple[cv2.VideoWriter, str]:
-    h, w = frame_shape[:2]
-    codec = str(video_codec).strip().lower()
-    is_windows = os.name == "nt"
-
-    if codec == "auto":
-        fourcc_candidates = ["mp4v", "avc1", "H264"] if is_windows else ["avc1", "H264", "mp4v"]
-    elif codec == "h264":
-        fourcc_candidates = ["avc1", "H264", "mp4v"]
-    elif codec == "mp4v":
-        fourcc_candidates = ["mp4v"]
-    else:
-        raise RuntimeError(f"Unsupported VIDEO_CODEC: {video_codec}. Use 'auto', 'h264', or 'mp4v'.")
-
-    last_error = None
-    for fourcc_name in fourcc_candidates:
-        try:
-            writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*fourcc_name), fps, (w, h))
-            if writer.isOpened():
-                return writer, fourcc_name
-            writer.release()
-        except Exception as e:
-            last_error = e
-
-    if last_error is not None:
-        raise RuntimeError(f"Failed to open VideoWriter: {path} ({last_error})")
-    raise RuntimeError(f"Failed to open VideoWriter: {path}")
+def _cpu_encoder_args(encoder: str) -> list[str]:
+    if encoder == "mpeg4":
+        return ["-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
 
 
 class FfmpegRawVideoWriter:
-    """Write rendered BGR frames to ffmpeg's NVENC encoder."""
+    """Write rendered BGR frames through AMADEUS's fixed FFmpeg build."""
 
-    def __init__(self, path: str, fps: float, frame_shape: tuple[int, int, int]) -> None:
+    def __init__(
+        self,
+        path: str,
+        fps: float,
+        frame_shape: tuple[int, int, int],
+        encoder: str,
+        device: str | None = None,
+    ) -> None:
         h, w = frame_shape[:2]
         ffmpeg = _ffmpeg_path()
         if not ffmpeg:
-            raise RuntimeError("ffmpeg was not found in PATH.")
+            raise RuntimeError("The pinned AMADEUS FFmpeg is unavailable.")
         self.path = path
         self.width = int(w)
         self.height = int(h)
+        filters = ["pad=ceil(iw/2)*2:ceil(ih/2)*2"]
+        if encoder == "h264_vaapi":
+            if not device:
+                raise RuntimeError("VAAPI requires a detected render device.")
+            filters.append("format=nv12,hwupload")
+        command = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
+        if device:
+            command.extend(["-vaapi_device", device])
+        command.extend([
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-s", f"{self.width}x{self.height}",
+            "-r", str(float(fps)),
+            "-i", "pipe:0",
+            "-vf", ",".join(filters),
+            *(hardware_encoder_args(encoder, profile="create_video") if encoder.startswith("h264_") else _cpu_encoder_args(encoder)),
+            path,
+        ])
         self.proc = subprocess.Popen(
-            [
-                ffmpeg, "-y",
-                "-hide_banner",
-                "-loglevel", "error",
-                "-f", "rawvideo",
-                "-pix_fmt", "bgr24",
-                "-s", f"{self.width}x{self.height}",
-                "-r", str(float(fps)),
-                "-i", "pipe:0",
-                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-                *_gpu_ffmpeg_encode_args(),
-                path,
-            ],
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -736,12 +697,11 @@ def render_video_for_weight(
                 for (fid, _), fut in zip(batch, futures):
                     rendered, box_count, boxes = fut.result()
                     if writer is None and not export_images_enabled:
-                        if _should_use_gpu_video_encoder(video_acceleration, video_codec):
-                            writer = FfmpegRawVideoWriter(video_path_out, output_fps, rendered.shape)
-                            print(f"[INFO] VideoWriter codec for {os.path.basename(video_path_out)}: h264_nvenc")
-                        else:
-                            writer, selected_fourcc = open_video_writer(video_path_out, output_fps, rendered.shape, video_codec)
-                            print(f"[INFO] VideoWriter codec for {os.path.basename(video_path_out)}: {selected_fourcc}")
+                        encoder, device = _selected_video_encoder(video_acceleration, video_codec)
+                        writer = FfmpegRawVideoWriter(
+                            video_path_out, output_fps, rendered.shape, encoder, device
+                        )
+                        print(f"[INFO] AMADEUS FFmpeg encoder for {os.path.basename(video_path_out)}: {encoder}")
                     if writer is not None:
                         writer.write(rendered)
                     if save_png_frames:
@@ -1065,4 +1025,3 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         sys.argv[1] = prepare_config(sys.argv[1])
     main()
-

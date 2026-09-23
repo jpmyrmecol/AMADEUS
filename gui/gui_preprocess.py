@@ -8,7 +8,6 @@ import math
 import os
 import queue
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -18,7 +17,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import Callable
 
 import customtkinter as ctk
 
@@ -40,8 +38,12 @@ from gui.video_input import (
     video_conversion_record,
 )
 from main.video_compat import ffmpeg_executable
+from main.video_encoders import (
+    HARDWARE_ENCODER_LABELS,
+    detect_hardware_video_encoder,
+    hardware_encoder_args,
+)
 from main.video_frame_count import detect_seekable_frame_count
-from tools.hardware_ffmpeg import ensure_hardware_ffmpeg, gpu_hardware_present
 
 
 ctk.set_appearance_mode("dark")
@@ -149,136 +151,18 @@ def ffmpeg_exe() -> str:
     return ffmpeg_executable()
 
 
-HARDWARE_ENCODER_LABELS = {
-    "h264_videotoolbox": "Apple VideoToolbox",
-    "h264_nvenc": "NVIDIA NVENC",
-    "h264_qsv": "Intel Quick Sync",
-    "h264_amf": "AMD AMF",
-    "h264_vaapi": "VAAPI (AMD/Intel)",
-}
-
-
-def _hardware_encoder_candidates() -> tuple[str, ...]:
-    if sys.platform == "darwin":
-        return ("h264_videotoolbox",)
-    if os.name == "nt":
-        return ("h264_nvenc", "h264_qsv", "h264_amf")
-    return ("h264_nvenc", "h264_qsv", "h264_amf", "h264_vaapi")
-
-
 def _video_encoder_args(encoder: str) -> list[str]:
-    if encoder == "h264_nvenc":
-        return [
-            "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq",
-            "-rc:v", "vbr", "-cq:v", "12", "-b:v", "0", "-pix_fmt", "yuv420p",
-        ]
-    if encoder == "h264_qsv":
-        return [
-            "-c:v", "h264_qsv", "-preset", "medium",
-            "-global_quality:v", "12", "-pix_fmt", "nv12",
-        ]
-    if encoder == "h264_amf":
-        return [
-            "-c:v", "h264_amf", "-quality", "quality", "-rc:v", "cqp",
-            "-qp_i", "12", "-qp_p", "12", "-qp_b", "12", "-pix_fmt", "yuv420p",
-        ]
-    if encoder == "h264_vaapi":
-        return ["-c:v", "h264_vaapi", "-qp", "12"]
-    if encoder == "h264_videotoolbox":
-        return [
-            "-c:v", "h264_videotoolbox", "-q:v", "85",
-            "-allow_sw", "0", "-pix_fmt", "yuv420p",
-        ]
-    return ["-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p"]
+    return hardware_encoder_args(encoder)
 
 
-def _vaapi_device_candidates() -> tuple[str, ...]:
-    if not sys.platform.startswith("linux"):
-        return ()
-    return tuple(
-        sorted(str(path) for path in Path("/dev/dri").glob("renderD*") if path.is_char_device())
-    )
-
-
-def _probe_hardware_video_encoder(
-    executables: tuple[str, ...],
-) -> tuple[str, str, str | None] | None:
-    for encoder in _hardware_encoder_candidates():
-        devices = _vaapi_device_candidates() if encoder == "h264_vaapi" else (None,)
-        for executable in executables:
-            for device in devices:
-                cmd = [executable, "-hide_banner", "-loglevel", "error"]
-                if device is not None:
-                    cmd.extend(["-vaapi_device", device])
-                cmd.extend([
-                    "-f", "lavfi",
-                    "-i", "color=s=128x128:r=30:d=0.2",
-                    "-frames:v", "2",
-                ])
-                if encoder == "h264_vaapi":
-                    cmd.extend(["-vf", "format=nv12,hwupload"])
-                cmd.extend([*_video_encoder_args(encoder), "-f", "null", "-"])
-                try:
-                    completed = subprocess.run(
-                        cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=20,
-                        check=False,
-                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                    )
-                except (OSError, subprocess.SubprocessError):
-                    continue
-                if completed.returncode == 0:
-                    return executable, encoder, device
-    return None
-
-
-def _normalized_executable(executable: str) -> str:
-    return os.path.normcase(os.path.realpath(os.path.abspath(executable)))
-
-
-def _detect_hardware_video_encoder(
-    status_callback: Callable[[str], None] | None = None,
-) -> tuple[str, str, str | None] | None:
-    pinned_ffmpeg = None
+def _detect_hardware_video_encoder() -> tuple[str, str | None] | None:
     try:
-        pinned_ffmpeg = ffmpeg_exe()
-    except Exception:
-        pass
-
-    # Keep using the bundled analysis FFmpeg when it already provides a working
-    # hardware encoder. Otherwise provision the GPU-capable build on GPU hosts.
-    if pinned_ffmpeg:
-        detected = _probe_hardware_video_encoder((pinned_ffmpeg,))
-        if detected is not None:
-            return detected
-
-    try:
-        has_gpu = gpu_hardware_present()
-    except Exception:
-        has_gpu = False
-
-    if has_gpu:
-        if status_callback is not None:
-            status_callback("Preparing GPU-capable FFmpeg (one-time download)…")
-        try:
-            hardware_ffmpeg = ensure_hardware_ffmpeg(PROJECT_ROOT / ".ffmpeg-hardware")
-        except Exception as exc:
-            print(f"[AMADEUS] GPU FFmpeg setup failed: {exc}", file=sys.stderr)
-            hardware_ffmpeg = None
-        if hardware_ffmpeg:
-            detected = _probe_hardware_video_encoder((hardware_ffmpeg,))
-            if detected is not None:
-                return detected
-
-    system_ffmpeg = shutil.which("ffmpeg")
-    if system_ffmpeg and (
-        pinned_ffmpeg is None
-        or _normalized_executable(system_ffmpeg) != _normalized_executable(pinned_ffmpeg)
-    ):
-        return _probe_hardware_video_encoder((system_ffmpeg,))
-    return None
+        ffmpeg = ffmpeg_exe()
+    except Exception as exc:
+        print(f"[AMADEUS] Pinned FFmpeg is unavailable: {exc}", file=sys.stderr)
+        return None
+    result = detect_hardware_video_encoder(ffmpeg)
+    return result
 
 
 def _rgb_hex(color: tuple[int, int, int]) -> str:
@@ -687,7 +571,6 @@ class PreprocessApp(ctk.CTk):
         self.export_queue: queue.Queue = queue.Queue()
         self.hardware_encoder_queue: queue.Queue = queue.Queue()
         self.hardware_video_encoder: str | None = None
-        self.hardware_video_ffmpeg: str | None = None
         self.hardware_video_encoder_device: str | None = None
         self.export_thread: threading.Thread | None = None
         self.export_cancel = threading.Event()
@@ -1207,11 +1090,8 @@ class PreprocessApp(ctk.CTk):
 
     def _start_hardware_encoder_detection(self) -> None:
         def worker() -> None:
-            def report_status(text: str) -> None:
-                self.hardware_encoder_queue.put(("status", text))
-
             try:
-                detected = _detect_hardware_video_encoder(report_status)
+                detected = _detect_hardware_video_encoder()
             except Exception as exc:
                 print(f"[AMADEUS] Hardware video encoder detection failed: {exc}", file=sys.stderr)
                 detected = None
@@ -1227,15 +1107,9 @@ class PreprocessApp(ctk.CTk):
             self.after(100, self._poll_hardware_encoder_detection)
             return
 
-        if event_type == "status":
-            self.gpu_acceleration_check.configure(text=payload, state="disabled")
-            self.after(100, self._poll_hardware_encoder_detection)
-            return
-
         detected = payload
         if detected is None:
             self.hardware_video_encoder = None
-            self.hardware_video_ffmpeg = None
             self.hardware_video_encoder_device = None
             self.gpu_acceleration_var.set(False)
             self.gpu_acceleration_check.configure(
@@ -1244,9 +1118,8 @@ class PreprocessApp(ctk.CTk):
             )
             return
 
-        executable, encoder, device = detected
+        encoder, device = detected
         self.hardware_video_encoder = encoder
-        self.hardware_video_ffmpeg = executable
         self.hardware_video_encoder_device = device
         label = HARDWARE_ENCODER_LABELS.get(encoder, encoder)
         self.gpu_acceleration_check.configure(
@@ -2549,16 +2422,14 @@ class PreprocessApp(ctk.CTk):
             raise RuntimeError("Output fps must be between 1.0 and 240.0.")
         video_encoder = "libx264"
         video_encoder_device = None
+        export_ffmpeg = ffmpeg_exe()
         if self.gpu_acceleration_var.get():
-            if self.hardware_video_encoder is None or self.hardware_video_ffmpeg is None:
+            if self.hardware_video_encoder is None:
                 raise RuntimeError("GPU acceleration is selected, but no supported GPU encoder is available.")
             video_encoder = self.hardware_video_encoder
             video_encoder_device = self.hardware_video_encoder_device
             if video_encoder == "h264_vaapi" and not video_encoder_device:
                 raise RuntimeError("VAAPI was detected without a usable render device.")
-            export_ffmpeg = self.hardware_video_ffmpeg
-        else:
-            export_ffmpeg = ffmpeg_exe()
 
         stem = Path(video_path).stem
         reserved: set[str] = set()
