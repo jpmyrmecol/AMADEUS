@@ -2840,7 +2840,7 @@ class PreprocessApp(ctk.CTk):
             "-map",
             "0:v:0",
             "-an",
-        ]
+        ])
         cmd.extend(["-vf", ",".join(filters), *_video_encoder_args(job.video_encoder)])
         cmd.extend(["-progress", "pipe:1", region.output_path])
         return cmd
