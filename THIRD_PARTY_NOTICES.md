@@ -29,13 +29,16 @@ SOFTWARE.
 
 ## FFmpeg
 
-AMADEUS inspects and, when the user agrees, converts input videos with FFmpeg.
-The FFmpeg build is **pinned**, not discovered on the host: it is the binary
-shipped inside the `imageio-ffmpeg` wheel that `pyproject.toml` fixes at
-`imageio-ffmpeg==0.6.0` and that `uv.lock` pins by SHA-256 per platform. AMADEUS
-deliberately ignores any `ffmpeg` found on `PATH`, so an analysis video produced
-on one machine is produced by the same encoder on every other machine. The
-version actually used is recorded in each conversion's metadata file.
+AMADEUS uses two FFmpeg builds for different tasks.
+
+### Inspecting and converting analysis videos
+
+The FFmpeg build is pinned, not discovered on the host: it is the binary shipped
+inside the `imageio-ffmpeg` wheel fixed at `imageio-ffmpeg==0.6.0` in
+`pyproject.toml` and pinned by SHA-256 per platform in `uv.lock`. AMADEUS
+ignores `ffmpeg` on `PATH` for analysis-video inspection and conversion, so
+those operations use the same FFmpeg build across machines. The version used
+for each conversion is recorded in its metadata file.
 
 `imageio-ffmpeg` 0.6.0 contains one FFmpeg binary per platform wheel:
 
@@ -58,9 +61,36 @@ Public License version 2.1 or later; the builds distributed with
 GPL-licensed components (including libx264 and libx265), which places those
 binaries under the GNU General Public License version 3 or later. AMADEUS
 invokes FFmpeg as an external executable and does not link against it. See
-<https://ffmpeg.org/legal.html> for the FFmpeg licensing terms and
+<https://ffmpeg.org/legal.html> for FFmpeg licensing terms and
 <https://github.com/imageio/imageio-ffmpeg> for the binary distribution.
 
 Setting the `AMADEUS_FFMPEG` environment variable makes AMADEUS use the FFmpeg
 binary it names instead of the pinned one. That is an explicit, per-site choice;
 the substituted version is still written into every conversion's metadata.
+
+### Cropping & Trimming hardware encoding
+
+Cropping & Trimming probes the pinned FFmpeg for a usable hardware encoder. If
+the host exposes a GPU and that FFmpeg cannot encode with it, AMADEUS downloads
+a separate FFmpeg build into `.ffmpeg-hardware/` on supported Windows and Linux
+systems. The archive URL, size, and SHA-256 are pinned in
+`tools/hardware_ffmpeg.py`; the archive is verified before the FFmpeg binary
+and its `LICENSE.txt` are installed. The source FFmpeg build is
+[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), GPL static variant,
+build `N-126342` from 2026-08-31. Its build configuration includes NVIDIA
+NVENC, Intel Quick Sync where supported, and AMD AMF. Linux ARM64 does not
+include Intel QSV in this upstream build.
+
+The downloaded build is licensed under GPL version 3 or later because the GPL
+variant enables GPL-licensed FFmpeg components. AMADEUS invokes it as an
+external executable and does not link against it. The upstream build repository
+contains the corresponding build scripts and dependency notices; FFmpeg source
+and license information are at <https://ffmpeg.org/legal.html>. The archive's
+`LICENSE.txt` is kept beside the installed binary.
+
+Compilation support does not guarantee that a particular encoder will work with
+every GPU or driver. AMADEUS enables the hardware-encoding option only after a
+short encode succeeds with the detected FFmpeg and driver. On macOS, it tests
+the pinned build for Apple VideoToolbox; the downloaded BtbN builds currently
+cover Windows and Linux. Hardware encoding applies to the final H.264 encoding
+step; cropping, rotation, and image adjustments are still performed on the CPU.
