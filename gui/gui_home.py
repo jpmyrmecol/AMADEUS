@@ -16,11 +16,13 @@ from PIL import Image, ImageTk
 import customtkinter as ctk
 
 try:
+    from .app_update import start_update_check
     from .project_paths import PROJECT_ROOT, gui_asset, gui_script
     from .splash_ipc import TOKEN_ENV_VAR, external_started_at, signal_stop
     from .splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
 except ImportError:  # Preserve direct execution with: python gui/gui_home.py
+    from app_update import start_update_check
     from project_paths import PROJECT_ROOT, gui_asset, gui_script
     from splash_ipc import TOKEN_ENV_VAR, external_started_at, signal_stop
     from splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
@@ -329,75 +331,97 @@ def build_home(root: ctk.CTk) -> None:
     )
     easy_panel.grid(row=0, column=0, columnspan=6, sticky="nsew")
 
-    help_state = {"hover": False, "shape_id": None, "text_id": None}
+    corner_buttons = {
+        "help": {"text": "Help", "hover": False, "shape_id": None, "text_id": None},
+        "update": {"text": "Update", "hover": False, "shape_id": None, "text_id": None},
+    }
 
-    def help_bounds() -> tuple[int, int, int, int]:
-        x1, y0 = easy_panel.winfo_width() - 24, 24
-        x0, y1 = x1 - 96, 54
+    def corner_bounds(name: str) -> tuple[int, int, int, int]:
+        index = 0 if name == "help" else 1
+        x1, y0 = easy_panel.winfo_width() - 24, 24 + index * 38
+        x0, y1 = x1 - 96, y0 + 30
         return x0, y0, x1, y1
 
-    def draw_help(_event=None) -> None:
-        x0, y0, x1, y1 = help_bounds()
+    def draw_corner_buttons(_event=None) -> None:
         radius = 8
-        points = [
-            x0 + radius, y0, x1 - radius, y0, x1, y0, x1, y0 + radius,
-            x1, y1 - radius, x1, y1, x1 - radius, y1, x0 + radius, y1,
-            x0, y1, x0, y1 - radius, x0, y0 + radius, x0, y0,
-        ]
-        fill = ACCENT_RED_ORANGE if help_state["hover"] else "#181818"
+        for name, state in corner_buttons.items():
+            x0, y0, x1, y1 = corner_bounds(name)
+            points = [
+                x0 + radius, y0, x1 - radius, y0, x1, y0, x1, y0 + radius,
+                x1, y1 - radius, x1, y1, x1 - radius, y1, x0 + radius, y1,
+                x0, y1, x0, y1 - radius, x0, y0 + radius, x0, y0,
+            ]
+            fill = ACCENT_RED_ORANGE if state["hover"] else "#181818"
 
-        if help_state["shape_id"] is None:
-            help_state["shape_id"] = easy_panel.create_polygon(
-                points,
-                smooth=True,
-                splinesteps=24,
-                fill=fill,
-                outline="#333333",
-                tags="help",
-            )
-            help_state["text_id"] = easy_panel.create_text(
-                (x0 + x1) / 2,
-                (y0 + y1) / 2,
-                text="Help",
-                fill=TEXT_COLOR,
-                font=("Arial", 13),
-                tags="help",
-            )
+            if state["shape_id"] is None:
+                state["shape_id"] = easy_panel.create_polygon(
+                    points,
+                    smooth=True,
+                    splinesteps=24,
+                    fill=fill,
+                    outline="#333333",
+                    tags=("corner_button", name),
+                )
+                state["text_id"] = easy_panel.create_text(
+                    (x0 + x1) / 2,
+                    (y0 + y1) / 2,
+                    text=state["text"],
+                    fill=TEXT_COLOR,
+                    font=("Arial", 13),
+                    tags=("corner_button", name),
+                )
+                continue
+
+            easy_panel.coords(state["shape_id"], *points)
+            easy_panel.itemconfigure(state["shape_id"], fill=fill)
+            easy_panel.coords(state["text_id"], (x0 + x1) / 2, (y0 + y1) / 2)
+
+    def set_corner_hover(name: str, value: bool) -> None:
+        state = corner_buttons[name]
+        if state["hover"] == value:
             return
-
-        easy_panel.coords(help_state["shape_id"], *points)
-        easy_panel.itemconfigure(help_state["shape_id"], fill=fill)
-        easy_panel.coords(help_state["text_id"], (x0 + x1) / 2, (y0 + y1) / 2)
-
-    def set_help_hover(value: bool) -> None:
-        if help_state["hover"] == value:
-            return
-        help_state["hover"] = value
-        if help_state["shape_id"] is not None:
+        state["hover"] = value
+        if state["shape_id"] is not None:
             easy_panel.itemconfigure(
-                help_state["shape_id"],
+                state["shape_id"],
                 fill=ACCENT_RED_ORANGE if value else "#181818",
             )
 
-    def help_motion(event) -> None:
-        x0, y0, x1, y1 = help_bounds()
-        set_help_hover(x0 <= event.x <= x1 and y0 <= event.y <= y1)
+    def set_update_caption(text: str) -> None:
+        state = corner_buttons["update"]
+        state["text"] = text
+        if state["text_id"] is not None:
+            easy_panel.itemconfigure(state["text_id"], text=text)
 
-    def help_leave(_event=None) -> None:
-        set_help_hover(False)
+    def corner_motion(event) -> None:
+        for name in corner_buttons:
+            x0, y0, x1, y1 = corner_bounds(name)
+            set_corner_hover(name, x0 <= event.x <= x1 and y0 <= event.y <= y1)
 
-    def help_click(event):
-        x0, y0, x1, y1 = help_bounds()
-        if x0 <= event.x <= x1 and y0 <= event.y <= y1:
-            open_manual("EN")
-            return "break"
+    def corner_leave(_event=None) -> None:
+        for name in corner_buttons:
+            set_corner_hover(name, False)
+
+    def corner_click(event):
+        for name in corner_buttons:
+            x0, y0, x1, y1 = corner_bounds(name)
+            if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+                if name == "help":
+                    open_manual("EN")
+                else:
+                    start_update_check(
+                        root,
+                        on_status=set_update_caption,
+                        on_update_start=root.destroy,
+                    )
+                return "break"
         launch_easy_tracking()
 
-    easy_panel.bind("<Motion>", help_motion, add="+")
-    easy_panel.bind("<Leave>", help_leave, add="+")
-    easy_panel.bind("<Button-1>", help_click)
-    easy_panel.bind("<Configure>", draw_help, add="+")
-    easy_panel.after_idle(draw_help)
+    easy_panel.bind("<Motion>", corner_motion, add="+")
+    easy_panel.bind("<Leave>", corner_leave, add="+")
+    easy_panel.bind("<Button-1>", corner_click)
+    easy_panel.bind("<Configure>", draw_corner_buttons, add="+")
+    easy_panel.after_idle(draw_corner_buttons)
     root.bind("<F1>", lambda e: open_manual("EN"))
 
     lower_panels = (
