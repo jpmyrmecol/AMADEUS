@@ -230,7 +230,7 @@ STEPS = [
     ("Training",             "skip_training",                       "obb_detector_training"),
     ("Detection",            "skip_detection",                      "obb_detection"),
     ("ID\nTracking",         "skip_id_tracking",                    "multi_staged_association"),
-    ("ID\nCorrection",       "skip_id_correction",                  "refinement"),
+    ("Refinement",             "skip_refinement",                  "refinement"),
     ("Create\nVideo",        "skip_creating_video",                 "create_video"),
 ]
 SCRIPT_TO_IDX: dict[str, int] = {s[2]: i for i, s in enumerate(STEPS)}
@@ -1470,7 +1470,7 @@ class EasyTrackingGUI(ctk.CTk):
             "skip_training": False,
             "skip_detection": False,
             "skip_id_tracking": False,
-            "skip_id_correction": False,
+            "skip_refinement": False,
             "skip_creating_video": False,
         }
 
@@ -1480,7 +1480,7 @@ class EasyTrackingGUI(ctk.CTk):
             if key in merged:
                 merged[key] = bool(value)
         if merged.get("skip_id_tracking", False):
-            merged["skip_id_correction"] = True
+            merged["skip_refinement"] = True
         self._skip_flags = merged
         if hasattr(self, "_num_objects_sb"):
             self._apply_individual_count_state()
@@ -1663,7 +1663,7 @@ class EasyTrackingGUI(ctk.CTk):
         _, skip_key, _ = STEPS[step_i]
         if skip_key == "skip_cropping" and self._skip_flags.get("skip_creating_direction_dataset", False):
             return True
-        if skip_key == "skip_id_correction" and self._skip_flags.get("skip_id_tracking", False):
+        if skip_key == "skip_refinement" and self._skip_flags.get("skip_id_tracking", False):
             return True
         return bool(self._skip_flags.get(skip_key, False))
 
@@ -1754,9 +1754,9 @@ class EasyTrackingGUI(ctk.CTk):
         self._skip_flags[skip_key] = new_value
         self._manual_skip_keys.add(skip_key)
         if skip_key == "skip_id_tracking" and new_value:
-            self._skip_flags["skip_id_correction"] = True
-            self._manual_skip_keys.add("skip_id_correction")
-        if skip_key == "skip_id_correction" and not new_value:
+            self._skip_flags["skip_refinement"] = True
+            self._manual_skip_keys.add("skip_refinement")
+        if skip_key == "skip_refinement" and not new_value:
             self._skip_flags["skip_id_tracking"] = False
             self._manual_skip_keys.add("skip_id_tracking")
 

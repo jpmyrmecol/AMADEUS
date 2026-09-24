@@ -392,10 +392,10 @@ def run_lrf_dependent_stages(cfg: dict, cfg_path: str) -> None:
     else:
         print("Starting ID tracking process...")
         run_script(os.path.join(CURRENT_DIR, "multi_staged_association_variable.py") if cfg.get("VARIABLE_NUM_OBJECTS", False) else MULTI_STAGED_ASSOCIATION_SCRIPT, cfg_path)
-        if cfg.get("skip_id_correction", False):
-            skip_stage("refinement", "skip_id_correction is True")
+        if cfg.get("skip_refinement", False):
+            skip_stage("refinement", "skip_refinement is True")
         else:
-            print("Starting ID-switch correction...")
+            print("Starting refinement...")
             run_script(os.path.join(CURRENT_DIR, "refinement_variable.py") if cfg.get("VARIABLE_NUM_OBJECTS", False) else REFINEMENT_SCRIPT, cfg_path)
 
     if cfg.get("skip_creating_video", False):

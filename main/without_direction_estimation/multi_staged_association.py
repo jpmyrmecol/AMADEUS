@@ -2340,7 +2340,7 @@ def main() -> None:
                 'max_age': max_age,
                 'tracking_cost_cfg': tracking_cost_cfg,
                 'sharp_turn_accept_run': sharp_turn_accept_run,
-                'export_final_result': bool(cfg.get('skip_id_correction', False)),
+                'export_final_result': bool(cfg.get('skip_refinement', False)),
             })
 
     if not specs:

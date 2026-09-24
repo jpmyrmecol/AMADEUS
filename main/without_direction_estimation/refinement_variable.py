@@ -787,8 +787,8 @@ def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit('Usage: python refinement_variable.py config.yaml')
     cfg = load_config(sys.argv[1])
-    if cfg.get('skip_id_correction', False):
-        print('skip_id_correction is True; exiting.')
+    if cfg.get('skip_refinement', False):
+        print('skip_refinement is True; exiting.')
         return
 
     analysis       = cfg.get('analysis', {}) or {}

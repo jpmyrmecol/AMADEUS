@@ -500,7 +500,7 @@ class ConfigGUI(ctk.CTk):
         self.skip_training = tk.BooleanVar(value=False)
         self.skip_detection = tk.BooleanVar(value=False)
         self.skip_id_tracking = tk.BooleanVar(value=False)
-        self.skip_id_correction = tk.BooleanVar(value=False)
+        self.skip_refinement = tk.BooleanVar(value=False)
         self.skip_creating_video = tk.BooleanVar(value=False)
         self._skip_cb_by_var: dict[int, ctk.CTkCheckBox] = {}
 
@@ -730,7 +730,7 @@ class ConfigGUI(ctk.CTk):
             skip_vars=[
                 (self.skip_detection, "Skip Object Detection"),
                 (self.skip_id_tracking, "Skip ID Tracking"),
-                (self.skip_id_correction, "Skip ID Correction"),
+                (self.skip_refinement, "Skip Refinement"),
             ],
         )
         self.sections["Analysis"]["widgets"]["INTERACT_IOU"].configure(state="disabled")
@@ -1609,7 +1609,7 @@ class ConfigGUI(ctk.CTk):
         self.skip_training.set(cfg.get("skip_training", False))
         self.skip_detection.set(cfg.get("skip_detection", False))
         self.skip_id_tracking.set(cfg.get("skip_id_tracking", False))
-        self.skip_id_correction.set(cfg.get("skip_id_correction", False))
+        self.skip_refinement.set(cfg.get("skip_refinement", False))
         self.skip_creating_video.set(cfg.get("skip_creating_video", False))
         self.delete_tmp_files.set(cfg.get("delete_tmp_files", False))
 
@@ -1885,7 +1885,7 @@ class ConfigGUI(ctk.CTk):
         cfg["skip_training"] = self.skip_training.get()
         cfg["skip_detection"] = self.skip_detection.get()
         cfg["skip_id_tracking"] = self.skip_id_tracking.get()
-        cfg["skip_id_correction"] = self.skip_id_correction.get()
+        cfg["skip_refinement"] = self.skip_refinement.get()
         cfg["skip_creating_video"] = self.skip_creating_video.get()
         cfg["delete_tmp_files"] = self.delete_tmp_files.get()
         cfg.setdefault("SINGLE_PASTE", False)
