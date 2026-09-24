@@ -516,8 +516,11 @@ def auto_batch_size(
             if device_kind == "mps" and mps_recommended_gib is not None:
                 memory_budget_gib = min(memory_budget_gib, mps_recommended_gib)
             ram_batch = max(1, int(memory_budget_gib / max(per_sample_gib, 0.01)))
-            cpu_batch_multiplier = 3 if device_kind == "mps" else 2
-            cpu_batch_cap = max(4, int(physical_cpu) * cpu_batch_multiplier)
+            cpu_batch_cap = (
+                max_cpu_batch
+                if device_kind == "mps"
+                else max(4, int(physical_cpu) * 2)
+            )
             raw_batch = min(ram_batch, cpu_batch_cap, max_cpu_batch)
             # Stable, conventional batch sizes avoid awkward final batches and
             # make comparisons between runs easier. A 24-sample MPS batch was
