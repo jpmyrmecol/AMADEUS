@@ -451,6 +451,7 @@ def auto_batch_size(
     - AMADEUS_LABEL_DENSITY_HALF: labels/image at which the batch size is halved
       relative to density=0 (default 200)
     - AMADEUS_MAX_AUTO_BATCH: optional absolute cap on the resulting batch size
+    - AMADEUS_MAX_AUTO_CPU_BATCH: optional cap for CPU and MPS batch sizing
     """
     device_kind = _accelerator_type(device)
     total_gib = _cuda_total_gib(device)
@@ -486,8 +487,22 @@ def auto_batch_size(
                     1.0, image_size, mode, density_stat, task
                 )
                 per_sample_gib *= density_factor
-        ram_fraction = min(0.80, max(0.10, _float_env("AMADEUS_CPU_BATCH_RAM_FRACTION", 0.50)))
-        max_cpu_batch = max(1, int(_float_env("AMADEUS_MAX_AUTO_CPU_BATCH", 16)))
+        # MPS shares unified memory with the CPU. The local M1 Pro profile
+        # measured batch=24 below the MPS working-set limit with system RAM
+        # headroom, so let MPS use 60% of currently available RAM by default.
+        # CPU-only behavior retains its existing 50% default.
+        default_ram_fraction = 0.60 if device_kind == "mps" else 0.50
+        ram_fraction = min(
+            0.80,
+            max(0.10, _float_env("AMADEUS_CPU_BATCH_RAM_FRACTION", default_ram_fraction)),
+        )
+        # Keep the measured MPS batch available while preserving the existing
+        # CPU default. The memory estimate and MPS recommended limit still cap
+        # the selected value.
+        default_max_cpu_batch = 24 if device_kind == "mps" else 16
+        max_cpu_batch = max(
+            1, int(_float_env("AMADEUS_MAX_AUTO_CPU_BATCH", default_max_cpu_batch))
+        )
 
         if available_gib is None:
             batch = min(8, max_cpu_batch)
@@ -501,11 +516,17 @@ def auto_batch_size(
             if device_kind == "mps" and mps_recommended_gib is not None:
                 memory_budget_gib = min(memory_budget_gib, mps_recommended_gib)
             ram_batch = max(1, int(memory_budget_gib / max(per_sample_gib, 0.01)))
-            cpu_batch_cap = max(4, int(physical_cpu) * 2)
+            cpu_batch_multiplier = 3 if device_kind == "mps" else 2
+            cpu_batch_cap = max(4, int(physical_cpu) * cpu_batch_multiplier)
             raw_batch = min(ram_batch, cpu_batch_cap, max_cpu_batch)
             # Stable, conventional batch sizes avoid awkward final batches and
-            # make comparisons between runs easier.
-            batch = 1 << max(0, int(raw_batch).bit_length() - 1)
+            # make comparisons between runs easier. A 24-sample MPS batch was
+            # profiled directly; select it only when the memory estimate can
+            # support at least 24 samples.
+            if device_kind == "mps" and raw_batch >= 24:
+                batch = 24
+            else:
+                batch = 1 << max(0, int(raw_batch).bit_length() - 1)
 
         ram_text = "unknown" if available_gib is None else f"{available_gib:.1f}GiB"
         ram_batch_text = "unknown" if ram_batch is None else str(ram_batch)
