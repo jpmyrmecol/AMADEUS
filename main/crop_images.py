@@ -587,6 +587,7 @@ def try_random_crops(
     blob_contours_by_bbox_index: Optional[Dict[int, np.ndarray]] = None,
     object_masks_by_bbox_index: Optional[Dict[int, dict]] = None,
     object_infos_by_bbox_index: Optional[Dict[int, dict]] = None,
+    obb_fit_mode: str = "min_area",
     rng_seed: int = None,
     localize_to_bbox: Optional[Tuple[float, float, float, float]] = None,
 ):
@@ -706,7 +707,7 @@ def try_random_crops(
             if isinstance(obj_mask, dict) and isinstance(obj_mask.get("mask"), np.ndarray) and obj_mask["mask"].size > 0:
                 local_mask = np.zeros((crop_size, crop_size), np.uint8)
                 fill_localmask_on_crop_mask(local_mask, obj_mask, crop_x=x, crop_y=y)
-                local_obb_pts = mask_to_obb_points(local_mask, obb_fit_mode=task["obb_fit_mode"])
+                local_obb_pts = mask_to_obb_points(local_mask, obb_fit_mode=obb_fit_mode)
             if local_obb_pts is None:
                 local_obb_pts = np.asarray(bboxes[int(bbox_idx)]["obb_pts"], dtype=np.float32).reshape(4, 2).copy()
                 local_obb_pts[:, 0] -= float(x)
@@ -812,6 +813,7 @@ def _crop_one_frame_worker(task: dict) -> int:
         blob_contours_by_bbox_index=blob_map,
         object_masks_by_bbox_index=object_mask_map,
         object_infos_by_bbox_index=object_info_map,
+        obb_fit_mode=str(task["obb_fit_mode"]),
         localize_to_bbox=localize_to_bbox,
         rng_seed=int(task["rng_seed"]),
     ):
