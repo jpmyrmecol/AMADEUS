@@ -20,8 +20,18 @@ from typing import Callable
 
 try:
     from .project_paths import PROJECT_ROOT
+    from .update_support import (
+        acquire_update_lock,
+        find_other_amadeus_processes,
+        release_update_lock,
+    )
 except ImportError:  # Preserve direct execution with: python gui/gui_home.py
     from project_paths import PROJECT_ROOT
+    from update_support import (
+        acquire_update_lock,
+        find_other_amadeus_processes,
+        release_update_lock,
+    )
 
 
 VERSION_URL = "https://raw.githubusercontent.com/jpmyrmecol/AMADEUS/main/VERSION"
@@ -129,7 +139,11 @@ def _extract_archive(archive_path: Path, staging_root: Path, expected_version: s
         "pyproject.toml",
         "uv.lock",
         "gui/gui_home.py",
+        "gui/app_update.py",
+        "gui/update_support.py",
         "tools/setup_environment.py",
+        "tools/update_manifest.txt",
+        "tools/update_worker.py",
     )
     for required in required_files:
         if not (staging_root / required).is_file():
@@ -181,6 +195,35 @@ def start_update_check(
         except tk.TclError:
             pass
 
+    def ensure_idle() -> bool:
+        try:
+            running = find_other_amadeus_processes(PROJECT_ROOT)
+        except Exception as exc:
+            messagebox.showerror(
+                "AMADEUS Update",
+                "Could not verify that AMADEUS is idle. The update was not started.\n\n"
+                f"{exc}",
+                parent=root,
+            )
+            finish()
+            return False
+        if not running:
+            return True
+
+        shown = "\n".join(f"- {name} (PID {pid})" for pid, name in running[:6])
+        if len(running) > 6:
+            shown += f"\n- ... and {len(running) - 6} more"
+        messagebox.showwarning(
+            "AMADEUS Update",
+            "Another AMADEUS window or processing task is still running.\n\n"
+            "Close all other AMADEUS windows and wait for any tracking, training, "
+            "segmentation, refinement, batch, or video processing to finish before updating.\n\n"
+            f"Detected:\n{shown}",
+            parent=root,
+        )
+        finish()
+        return False
+
     try:
         current_version = (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
         current_tuple = _version_tuple(current_version)
@@ -229,6 +272,9 @@ def start_update_check(
             finish()
             return
 
+        if not ensure_idle():
+            return
+
         accepted = messagebox.askyesno(
             "AMADEUS Update",
             "A new version of AMADEUS is available.\n\n"
@@ -241,15 +287,26 @@ def start_update_check(
             finish()
             return
 
+        try:
+            lock_token = acquire_update_lock(PROJECT_ROOT)
+        except Exception as exc:
+            messagebox.showerror(
+                "AMADEUS Update",
+                f"The update could not be started.\n\n{exc}",
+                parent=root,
+            )
+            finish()
+            return
+
         status("Downloading")
         threading.Thread(
             target=download_worker,
-            args=(latest_version,),
+            args=(latest_version, lock_token),
             name="AMADEUS update download",
             daemon=True,
         ).start()
 
-    def download_worker(latest_version: str) -> None:
+    def download_worker(latest_version: str, lock_token: str) -> None:
         temporary_root: Path | None = None
         try:
             temporary_root = Path(tempfile.mkdtemp(prefix="amadeus-update-"))
@@ -259,12 +316,15 @@ def start_update_check(
             _download_archive(archive_path)
             _extract_archive(archive_path, staging_root, latest_version)
         except Exception as exc:
+            release_update_lock(PROJECT_ROOT, lock_token)
             if temporary_root is not None:
                 shutil.rmtree(temporary_root, ignore_errors=True)
             schedule(lambda error=exc: show_download_error(error))
             return
 
-        schedule(lambda: launch_updater(temporary_root, staging_root, latest_version))
+        schedule(
+            lambda: launch_updater(temporary_root, staging_root, latest_version, lock_token)
+        )
 
     def show_download_error(exc: Exception) -> None:
         try:
@@ -276,7 +336,17 @@ def start_update_check(
         finally:
             finish()
 
-    def launch_updater(temporary_root: Path, staging_root: Path, latest_version: str) -> None:
+    def launch_updater(
+        temporary_root: Path,
+        staging_root: Path,
+        latest_version: str,
+        lock_token: str,
+    ) -> None:
+        if not ensure_idle():
+            release_update_lock(PROJECT_ROOT, lock_token)
+            shutil.rmtree(temporary_root, ignore_errors=True)
+            return
+
         log_path = temporary_root / "updater.log"
         python = _app_python()
         command = [
@@ -295,6 +365,8 @@ def start_update_check(
             str(os.getpid()),
             "--python",
             python,
+            "--lock-token",
+            lock_token,
         ]
         kwargs: dict[str, object] = {"cwd": str(PROJECT_ROOT), "close_fds": True}
         log_stream = log_path.open("a", encoding="utf-8")
@@ -308,6 +380,7 @@ def start_update_check(
         except OSError as exc:
             if log_stream is not None:
                 log_stream.close()
+            release_update_lock(PROJECT_ROOT, lock_token)
             messagebox.showerror(
                 "AMADEUS Update",
                 f"The separate updater could not be started. AMADEUS has not been changed.\n\n{exc}",

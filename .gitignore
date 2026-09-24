@@ -3,3 +3,5 @@
 .uv/
 __pycache__/
 .ffmpeg-hardware/
+.amadeus-managed-files.json
+.amadeus-update.lock

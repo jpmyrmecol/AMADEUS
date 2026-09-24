@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import ctypes
 import os
 import re
@@ -15,6 +16,14 @@ import time
 import traceback
 import urllib.request
 from pathlib import Path
+
+from gui.update_support import (
+    adopt_update_lock,
+    find_other_amadeus_processes,
+    prepare_managed_update,
+    release_update_lock,
+    write_managed_state,
+)
 
 
 REPOSITORY_URL = "https://github.com/jpmyrmecol/AMADEUS.git"
@@ -148,9 +157,11 @@ def _apply_archive(
     staging: Path,
     temporary: Path,
     records: list[tuple[Path, Path | None]],
+    expected_version: str,
 ) -> None:
     backup_root = temporary / "backup"
     root_resolved = root.resolve()
+    managed_files = prepare_managed_update(root, staging, backup_root, records)
     for source in sorted(path for path in staging.rglob("*") if path.is_file()):
         relative = source.relative_to(staging)
         target = root / relative
@@ -181,6 +192,8 @@ def _apply_archive(
             os.replace(temporary_target, target)
         finally:
             temporary_target.unlink(missing_ok=True)
+
+    write_managed_state(root, managed_files, expected_version, backup_root, records)
 
 
 def _restore_archive(root: Path, records: list[tuple[Path, Path | None]], log) -> None:
@@ -393,6 +406,9 @@ def run(args: argparse.Namespace) -> int:
     if staged_version != expected:
         raise RuntimeError("The staged source version did not match the version approved for installation.")
 
+    adopt_update_lock(root, args.lock_token)
+    atexit.register(release_update_lock, root, args.lock_token)
+
     log_path = temporary / "updater.log"
     records: list[tuple[Path, Path | None]] = []
     old_head: str | None = None
@@ -404,12 +420,22 @@ def run(args: argparse.Namespace) -> int:
         _log(log, "[AMADEUS] Waiting for the Home window to close.")
         _wait_for_process(args.parent_pid)
         try:
+            running = find_other_amadeus_processes(root)
+            if running:
+                shown = ", ".join(f"{name} (PID {pid})" for pid, name in running[:6])
+                if len(running) > 6:
+                    shown += f", and {len(running) - 6} more"
+                raise RuntimeError(
+                    "Another AMADEUS process is still running after the Home window closed. "
+                    f"Close it and retry the update. Detected: {shown}"
+                )
+
             if _is_git_checkout(root):
                 _log(log, "[AMADEUS] Updating the clean main Git checkout.")
                 old_head = _git_update(root, expected, log)
             else:
                 _log(log, "[AMADEUS] Installing the verified source archive.")
-                _apply_archive(root, staging, temporary, records)
+                _apply_archive(root, staging, temporary, records, expected)
 
             installed_version = (root / "VERSION").read_text(encoding="utf-8").strip()
             if installed_version != expected:
@@ -496,6 +522,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-version", required=True)
     parser.add_argument("--parent-pid", required=True, type=int)
     parser.add_argument("--python", required=True, help="The Python executable used to restart AMADEUS.")
+    parser.add_argument("--lock-token", required=True, help="Token for the installation update lock.")
     return parser.parse_args()
 
 
