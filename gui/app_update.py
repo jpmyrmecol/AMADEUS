@@ -297,12 +297,12 @@ def start_update_check(
             python,
         ]
         kwargs: dict[str, object] = {"cwd": str(PROJECT_ROOT), "close_fds": True}
-        log_stream = None
+        log_stream = log_path.open("a", encoding="utf-8")
+        kwargs.update({"stdin": subprocess.DEVNULL, "stdout": log_stream, "stderr": subprocess.STDOUT})
         if os.name == "nt":
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         else:
-            log_stream = log_path.open("a", encoding="utf-8")
-            kwargs.update({"start_new_session": True, "stdout": log_stream, "stderr": subprocess.STDOUT})
+            kwargs["start_new_session"] = True
         try:
             subprocess.Popen(command, **kwargs)
         except OSError as exc:
@@ -319,12 +319,6 @@ def start_update_check(
         if log_stream is not None:
             log_stream.close()
 
-        messagebox.showinfo(
-            "AMADEUS Update",
-            "The update has been downloaded. AMADEUS will close, install the update and its dependencies, "
-            "then restart.",
-            parent=root,
-        )
         on_update_start()
 
     threading.Thread(target=check_worker, name="AMADEUS update check", daemon=True).start()
