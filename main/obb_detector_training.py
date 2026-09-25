@@ -22,6 +22,13 @@ from typing import Callable, List
 import yaml
 from ultralytics import YOLO
 
+from compute_backend import runtime_for
+from compute_telemetry import (
+    query_nvidia_smi as _query_nvidia_smi,
+    query_wddm_non_local_usage as _query_wddm_non_local_usage,
+    sample_accelerator,
+)
+
 from batch_utils import (
     resolve_batch_size,
     resolve_device,
@@ -556,46 +563,16 @@ def _parse_cuda_device_index(device) -> int | None:
     return None
 
 
-def _query_nvidia_smi(device) -> tuple[float | None, float | None, float | None]:
-    """Return (gpu_util_percent, vram_used_gib, vram_total_gib)."""
-    idx = _parse_cuda_device_index(device)
-    if idx is None:
-        return None, None, None
-    try:
-        out = subprocess.check_output(
-            [
-                "nvidia-smi",
-                f"--id={idx}",
-                "--query-gpu=utilization.gpu,memory.used,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=2.0,
-        ).strip()
-        first = out.splitlines()[0]
-        util_s, used_s, total_s = [x.strip() for x in first.split(",")[:3]]
-        return float(util_s), float(used_s) / 1024.0, float(total_s) / 1024.0
-    except Exception:
-        return None, None, None
-
-
 def _query_torch_vram(device) -> tuple[float | None, float | None]:
-    idx = _parse_cuda_device_index(device)
-    if idx is None:
+    runtime = runtime_for(device)
+    if runtime.capabilities.memory_model != "dedicated":
         return None, None
-    try:
-        import torch
+    allocated = runtime.allocated_memory()
+    reserved, _ = runtime.memory()
+    gib = 1024.0 ** 3
+    return (None if allocated is None else allocated / gib,
+            None if reserved is None else reserved / gib)
 
-        if not torch.cuda.is_available():
-            return None, None
-        allocated = torch.cuda.memory_allocated(idx) / (1024.0 ** 3)
-        reserved = torch.cuda.memory_reserved(idx) / (1024.0 ** 3)
-        return allocated, reserved
-    except Exception:
-        return None, None
 
 
 def _query_cpu_memory() -> tuple[float | None, float | None, float | None, float | None, float | None]:
@@ -640,52 +617,6 @@ def _query_ram_fraction() -> float | None:
         if not vm.total:
             return None
         return (vm.total - vm.available) / vm.total
-    except Exception:
-        return None
-
-
-def _query_wddm_non_local_usage(pid: int | None = None) -> float | None:
-    """Return one process's WDDM 'Non Local Usage' (GiB): the GPU
-    memory segment Windows' WDDM driver keeps off the GPU adapter itself
-    (for a discrete GPU, system RAM reached over the bus rather than
-    on-die VRAM), summed across every adapter/engine instance this
-    process holds. Defaults to this process; the CLI supervisor supplies its
-    CUDA child's PID so monitoring remains live even when that child holds the
-    GIL inside a long CUDA call.
-
-    This is the same pool NVIDIA's driver falls back to under the "CUDA
-    Sysmem Fallback Policy" when a dedicated-VRAM allocation can't be
-    satisfied: rather than raising an out-of-memory error, the allocation
-    silently lands here instead, which is drastically slower (PCIe-speed
-    access instead of on-die VRAM) -- this is the real mechanism behind a
-    training process that neither errors nor visibly runs out of VRAM, yet
-    slows to a crawl. Windows-only (WDDM has no equivalent on Linux/macOS);
-    returns None there, and on any query failure (counter unavailable, no
-    matching instance for this PID, timeout, etc.) -- callers must treat
-    None as "unknown", never as "zero usage".
-    """
-    if not sys.platform.startswith("win"):
-        return None
-    target_pid = os.getpid() if pid is None else int(pid)
-    script = (
-        "(Get-Counter -Counter '\\GPU Process Memory(*)\\Non Local Usage' "
-        "-ErrorAction SilentlyContinue).CounterSamples "
-        f"| Where-Object {{ $_.InstanceName -like 'pid_{target_pid}_*' }} "
-        "| Measure-Object -Property CookedValue -Sum "
-        "| Select-Object -ExpandProperty Sum"
-    )
-    try:
-        out = subprocess.check_output(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5.0,
-        ).strip()
-        if not out:
-            return 0.0
-        return float(out) / (1024.0 ** 3)
     except Exception:
         return None
 
@@ -915,6 +846,7 @@ class _DeviceSampler:
         wddm_interval: float = TRAIN_SAMPLER_WDDM_INTERVAL_SECONDS,
     ) -> None:
         self.device = device
+        self.runtime = runtime_for(device)
         self.interval = max(1.0, float(interval))
         self.wddm_interval = max(self.interval, float(wddm_interval))
         self._lock = threading.Lock()
@@ -936,24 +868,17 @@ class _DeviceSampler:
         cost is harmless.
         """
         gpu_util, used, total = self._sample_memory()
-        non_local = _query_wddm_non_local_usage()
+        non_local = (_query_wddm_non_local_usage(device=self.device)
+                     if self.runtime.wddm else None)
         self._publish(gpu_util, used, total, non_local)
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def _sample_memory(self) -> tuple[float | None, float | None, float | None]:
         """Return (gpu_util_pct, used_GiB, total_GiB) for any accelerator.
-        nvidia-smi covers CUDA and reports utilization; MPS has no equivalent
-        utilization figure, so only its memory is available there."""
-        gpu_util, used, total = _query_nvidia_smi(self.device)
-        if used is not None and total:
-            return gpu_util, used, total
-        if str(self.device).strip().lower() == "mps":
-            used_bytes, total_bytes = get_accelerator_memory("mps")
-            if used_bytes is not None and total_bytes:
-                gib = 1024.0 ** 3
-                return None, used_bytes / gib, total_bytes / gib
-        return gpu_util, used, total
+        NVIDIA may supply utilization; HIP/MPS use their allocator primitives
+        when no external provider is available."""
+        return sample_accelerator(self.device)
 
     def stop(self) -> None:
         self._stop.set()
@@ -984,7 +909,8 @@ class _DeviceSampler:
             gpu_util, used, total = self._sample_memory()
             non_local = None
             if time.monotonic() >= next_wddm:
-                non_local = _query_wddm_non_local_usage()
+                non_local = (_query_wddm_non_local_usage(device=self.device)
+                             if self.runtime.wddm else None)
                 next_wddm = time.monotonic() + self.wddm_interval
             self._publish(gpu_util, used, total, non_local)
 
@@ -2281,7 +2207,7 @@ def main(
             save_period=int(SAVE_PERIOD),         # default: 5
             seed=int(random_seed),
             deterministic=True,
-            amp=(str(device).strip().lower() != "cpu"),
+            amp=runtime_for(device).capabilities.amp,
             cache=False,                           # explicit: avoid RAM-cached datasets
             flipud=0.0,                           # default: 0.0
             fliplr=0.0,                           # default: 0.5
@@ -2728,6 +2654,11 @@ def _run_supervised_cli(args: list[str]) -> int:
     supervisor only warns about WDDM-related collapse and leaves the child
     running because no lower viable batch exists.
     """
+    with open(args[0], encoding="utf-8") as stream:
+        config = yaml.safe_load(stream) or {}
+    monitor_device = (config.get("training") or {}).get("DEVICE", "auto")
+    monitor_runtime = runtime_for(monitor_device)
+    use_wddm = monitor_runtime.wddm
     child_env = os.environ.copy()
     child_env[_TRAIN_WORKER_ENV] = "1"
     child_env["PYTHONUNBUFFERED"] = "1"
@@ -2748,7 +2679,8 @@ def _run_supervised_cli(args: list[str]) -> int:
                 can_lower_batch=False,
             )
             child = subprocess.Popen(command, env=child_env)
-            baseline_non_local = _query_wddm_non_local_usage(child.pid)
+            baseline_non_local = (_query_wddm_non_local_usage(child.pid, device=monitor_device)
+                                  if use_wddm else None)
             peak_vram_frac: float | None = None
             last_supervisor_warning = ""
             next_device_sample = time.monotonic()
@@ -2766,11 +2698,12 @@ def _run_supervised_cli(args: list[str]) -> int:
                     continue
                 next_device_sample = now + TRAIN_SAMPLER_WDDM_INTERVAL_SECONDS
 
-                current_non_local = _query_wddm_non_local_usage(child.pid)
+                current_non_local = (_query_wddm_non_local_usage(child.pid, device=monitor_device)
+                                  if use_wddm else None)
                 if baseline_non_local is None and current_non_local is not None:
                     baseline_non_local = current_non_local
                 vram_used = vram_total = vram_frac = None
-                if state["device_index"] >= 0:
+                if state["device_index"] >= 0 and monitor_runtime.capabilities.telemetry == "nvidia":
                     _gpu_util, vram_used, vram_total = _query_nvidia_smi(
                         str(state["device_index"])
                     )

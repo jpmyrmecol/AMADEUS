@@ -91,25 +91,19 @@ _total_vram_gib_cache: list = []
 
 
 def _total_vram_gib() -> float | None:
-    """Total VRAM of the first NVIDIA GPU in GiB, or None if it cannot be read."""
+    """Dedicated memory of the visible CUDA/HIP device, or None."""
     if _total_vram_gib_cache:
         return _total_vram_gib_cache[0]
 
-    import shutil
-
-    total: float | None = None
-    executable = shutil.which("nvidia-smi")
-    if executable:
-        try:
-            completed = subprocess.run(
-                [executable, "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5, check=False,
-            )
-            lines = (completed.stdout or "").strip().splitlines()
-            if completed.returncode == 0 and lines:
-                total = int(lines[0].strip()) / 1024.0  # MiB -> GiB
-        except (OSError, ValueError, subprocess.SubprocessError):
-            total = None
+    # Respect visible PyTorch devices and avoid treating HIP as NVIDIA.
+    if str(MAIN_PATH) not in sys.path:
+        sys.path.insert(0, str(MAIN_PATH))
+    from compute_backend import runtime_for
+    runtime = runtime_for()
+    total = None
+    if runtime.capabilities.memory_model == "dedicated":
+        _, budget = runtime.memory()
+        total = None if budget is None else budget / (1024.0 ** 3)
     _total_vram_gib_cache.append(total)
     return total
 
@@ -1375,6 +1369,7 @@ class EasyTrackingGUI(ctk.CTk):
     # Progress helpers
 
     def _reset_training_progress(self) -> None:
+        self._training_backend_label = ""
         self._train_epoch: int = 0
         self._train_total_epochs: int = 0
         self._train_epoch_started_at: float = 0.0
@@ -1421,6 +1416,8 @@ class EasyTrackingGUI(ctk.CTk):
         )
 
         fields = [f"Epoch: {epoch}/{total_epochs}"]
+        if self._training_backend_label:
+            fields.append(self._training_backend_label)
         # Ultralytics prints 0G whenever torch.cuda is unavailable, which is
         # exactly the CPU and MPS case where there is no VRAM to report.
         if reserved_decimal_gb > 0.0:
@@ -2284,6 +2281,9 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _handle_batch_output_record(self, line: str, state: dict) -> None:
         line = line.rstrip("\r\n")
+        backend_match = re.match(r"\[INFO\] training device: .* \(([^)]+)\)$", line)
+        if backend_match:
+            self._training_backend_label = backend_match.group(1)
 
         if line == "":
             if not state.get("last_was_tqdm", False):

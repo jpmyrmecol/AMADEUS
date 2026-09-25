@@ -47,3 +47,9 @@ See the [Publication page](https://amadeus.jpmyrmecol.com/publication.html) for 
 ## License
 
 AMADEUS is distributed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only). See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+
+## Compute backends
+
+See [compute backend architecture and setup profiles](docs/compute-backends.md) for
+NVIDIA CUDA, AMD ROCm, Apple MPS and CPU selection, supported wheel profiles,
+environment verification and hardware validation limits.

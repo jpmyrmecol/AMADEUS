@@ -11,6 +11,7 @@ assets/deep_green.json
 assets/logo_amadeus_mini.png
 assets/logo_amadeus_splash.png
 colab/AMADEUS_Colab.ipynb
+docs/compute-backends.md
 docs/single-animal-smoothing.md
 gui/__init__.py
 gui/advanced_tracking_layout.py
@@ -44,6 +45,8 @@ main/calibration.py
 main/checkpoint_utils.py
 main/colab_utils.py
 main/compact_log.py
+main/compute_backend.py
+main/compute_telemetry.py
 main/create_dataset.py
 main/create_video.py
 main/crop_images.py
@@ -99,7 +102,10 @@ main/without_direction_estimation/refinement.py
 main/without_direction_estimation/refinement_variable.py
 main/without_direction_estimation/training_paths.py
 pyproject.toml
+tests/smoke_compute_backend.py
 tests/test_batch_utils.py
+tests/test_compute_backend.py
+tests/test_runtime_profiles.py
 tests/test_update_manifest.py
 tests/test_update_support.py
 tests/test_update_worker.py
@@ -109,6 +115,7 @@ tools/check_torch.cmd
 tools/colab_runner.py
 tools/ffmpeg_runtime.py
 tools/macos_python.sh
+tools/runtime_profiles.py
 tools/setup_environment.py
 tools/uninstall.bat
 tools/uninstall_environment.ps1

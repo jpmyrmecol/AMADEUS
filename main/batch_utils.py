@@ -52,236 +52,46 @@ def _resolve_cuda_index(device) -> tuple[bool, int]:
     return False, 0
 
 
-def _resolve_cuda_indices(device) -> list[int]:
-    """Return requested CUDA indices for YOLO-style device strings."""
-    s = str(device).strip().lower()
-    if s == "cuda":
-        return [0]
-    if s.startswith("cuda:"):
-        s = s[5:]
-    if not s:
-        return []
-    if all(part.strip().isdigit() for part in s.split(",")):
-        return [int(part.strip()) for part in s.split(",") if part.strip()]
-    return []
+# Compatibility facade: these names describe PyTorch's API, not GPU vendor.
+try:
+    from .compute_backend import (
+        Backend, runtime_for, resolve_device,
+        cuda_indices as _resolve_cuda_indices, mps_available as _mps_available,
+    )
+except ImportError:  # Direct scripts in main/
+    from compute_backend import (
+        Backend, runtime_for, resolve_device,
+        cuda_indices as _resolve_cuda_indices, mps_available as _mps_available,
+    )
 
 
 def _cuda_device_count() -> int:
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return 0
-        return int(torch.cuda.device_count())
-    except Exception:
+    runtime = runtime_for()
+    if runtime.capabilities.torch_device != "cuda":
         return 0
-
-
-def _mps_available() -> bool:
-    """Return whether the PyTorch MPS backend can execute a small operation."""
-    try:
-        import torch
-
-        if not torch.backends.mps.is_available():
-            return False
-        value = torch.ones(1, device="mps") + 1
-        torch.mps.synchronize()
-        return value.item() == 2
-    except Exception:
-        return False
-
-
-def resolve_device(device="auto", purpose: str = "YOLO") -> str:
-    """Resolve a configured device to a value accepted by Ultralytics.
-
-    Existing configs commonly store ``0`` as the default device.  On machines
-    without a CUDA-visible NVIDIA GPU, passing that value directly to
-    Ultralytics raises before training or prediction starts, so CUDA-like
-    requests fall back to CPU when Torch cannot use them.
-
-    "auto" prefers CUDA, then Apple Silicon MPS, then CPU. An explicit "mps"
-    request is validated the same way explicit CUDA requests already are,
-    falling back to CPU with a warning when MPS isn't actually usable.
-    Ultralytics accepts "mps" as a device string natively, so the resolved
-    value is passed straight through -- no separate MPS code path is needed
-    downstream for YOLO itself.
-    """
-    requested = str(device).strip()
-    requested_lower = requested.lower()
-    if requested_lower in {"", "auto", "none"}:
-        count = _cuda_device_count()
-        if count > 0:
-            resolved = "0"
-            backend = f"cuda:{resolved}"
-        elif _mps_available():
-            resolved = "mps"
-            backend = "mps"
-        else:
-            resolved = "cpu"
-            backend = "cpu"
-        print(f"[INFO] {purpose} device auto-selected: {resolved} ({backend})")
-        return resolved
-
-    if requested_lower == "cpu":
-        return "cpu"
-
-    if requested_lower == "mps":
-        if _mps_available():
-            return "mps"
-        print(f"[WARN] {purpose} device='mps' requested, but torch.backends.mps.is_available() is False; using CPU.")
-        return "cpu"
-
-    cuda_indices = _resolve_cuda_indices(requested)
-    requests_cuda = requested_lower == "cuda" or requested_lower.startswith("cuda:") or bool(cuda_indices)
-    if not requests_cuda:
-        return requested
-
-    count = _cuda_device_count()
-    if count <= 0:
-        print(
-            f"[WARN] {purpose} device='{requested}' requests CUDA, "
-            "but torch.cuda.is_available() is False; using CPU."
-        )
-        return "cpu"
-
-    invalid = [idx for idx in cuda_indices if idx < 0 or idx >= count]
-    if invalid:
-        print(
-            f"[WARN] {purpose} device='{requested}' requests unavailable CUDA index "
-            f"{invalid}; torch sees {count} CUDA device(s). Using CPU."
-        )
-        return "cpu"
-
-    return requested
-
-
-# --- Accelerator utilities (CUDA/MPS/CPU) ------------------------------------
-#
-# Small, explicit helpers so device-specific memory/cache/sync calls live in
-# one place instead of being repeated as raw torch.cuda.* calls throughout
-# the codebase. CUDA behavior is always the exact pre-existing torch.cuda.*
-# call; MPS is the only backend these helpers add support for; CPU is always
-# a no-op.
+    import torch
+    return int(torch.cuda.device_count())
 
 
 def _accelerator_type(device=None) -> str:
-    """Return 'cuda', 'mps', or 'cpu' for a device spec, torch.device, or None.
-
-    None resolves to whichever accelerator is actually active (CUDA first,
-    then MPS), matching resolve_device()'s auto-selection order.
-    """
-    try:
-        import torch
-    except Exception:
-        return "cpu"
-
-    if isinstance(device, torch.device):
-        return device.type
-
-    if device is None:
-        if torch.cuda.is_available():
-            return "cuda"
-        if _mps_available():
-            return "mps"
-        return "cpu"
-
-    s = str(device).strip().lower()
-    if s == "mps":
-        return "mps"
-    if s == "cpu":
-        return "cpu"
-    is_cuda, _idx = _resolve_cuda_index(device)
-    if is_cuda or _resolve_cuda_indices(device):
-        return "cuda"
-    return "cpu"
+    """Compatibility API namespace ('cuda' includes ROCm), not backend identity."""
+    return runtime_for(device).capabilities.torch_device
 
 
 def effective_dataloader_workers(device, configured_workers: int) -> int:
-    """Return the workers Ultralytics actually uses for this backend.
-
-    Ultralytics 8.3.185 forces ``args.workers`` to zero for CPU and MPS
-    devices.  Keep the configured value available for retry bookkeeping, but
-    use this value for diagnostics and memory-pressure decisions.
-    """
-    configured = max(0, int(configured_workers))
-    return 0 if _accelerator_type(device) in {"cpu", "mps"} else configured
+    return max(0, int(configured_workers)) if runtime_for(device).capabilities.configured_workers else 0
 
 
 def empty_accelerator_cache(device=None) -> None:
-    """Clear the CUDA or MPS caching allocator; a no-op on CPU.
-
-    CUDA keeps its exact previous torch.cuda.empty_cache() behavior; the only
-    thing this adds is the MPS branch (torch.mps.empty_cache()), so an
-    OOM-retry that used to silently skip cache-clearing on Apple Silicon now
-    actually frees memory before the next attempt, same as it already did
-    for CUDA.
-    """
-    try:
-        import torch
-    except Exception:
-        return
-
-    kind = _accelerator_type(device)
-    if kind == "cuda" and torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    elif kind == "mps":
-        try:
-            torch.mps.empty_cache()
-        except Exception:
-            pass
+    runtime_for(device).empty_cache()
 
 
 def synchronize_accelerator(device=None) -> None:
-    """torch.cuda.synchronize() / torch.mps.synchronize(); a no-op on CPU."""
-    try:
-        import torch
-    except Exception:
-        return
-
-    kind = _accelerator_type(device)
-    if kind == "cuda" and torch.cuda.is_available():
-        torch.cuda.synchronize()
-    elif kind == "mps":
-        try:
-            torch.mps.synchronize()
-        except Exception:
-            pass
+    runtime_for(device).synchronize()
 
 
 def get_accelerator_memory(device=None) -> tuple[float | None, float | None]:
-    """Return (used_bytes, budget_bytes) for the active accelerator, or (None, None).
-
-    CUDA: (reserved, total) via torch.cuda.memory_reserved()/device properties
-    -- unchanged from what callers computed inline before.
-    MPS: (driver_allocated_memory(), recommended_max_memory()), the pair
-    Apple/PyTorch expose for judging unified-memory headroom; this is a
-    distinct signal from plain system RAM usage (which callers already get
-    separately via psutil) since not all RAM pressure comes from the MPS
-    allocator.
-    """
-    try:
-        import torch
-    except Exception:
-        return None, None
-
-    kind = _accelerator_type(device)
-    if kind == "cuda" and torch.cuda.is_available():
-        try:
-            is_cuda, idx = _resolve_cuda_index(device if device is not None else "cuda")
-            idx = idx if is_cuda else torch.cuda.current_device()
-            used = float(torch.cuda.memory_reserved(idx))
-            total = float(torch.cuda.get_device_properties(idx).total_memory)
-            return used, total
-        except Exception:
-            return None, None
-    if kind == "mps":
-        try:
-            used = float(torch.mps.driver_allocated_memory())
-            total = float(torch.mps.recommended_max_memory())
-            return used, total
-        except Exception:
-            return None, None
-    return None, None
+    return runtime_for(device).memory()
 
 
 def _float_env(name: str, default: float) -> float:
@@ -292,16 +102,12 @@ def _float_env(name: str, default: float) -> float:
 
 
 def _cuda_total_gib(device) -> float | None:
-    """Return CUDA device total memory in GiB."""
-    try:
-        import torch
-
-        is_cuda, idx = _resolve_cuda_index(device)
-        if not is_cuda or not torch.cuda.is_available():
-            return None
-        return torch.cuda.get_device_properties(idx).total_memory / (1024.0 ** 3)
-    except Exception:
+    """Dedicated memory for either CUDA or HIP; never MPS unified memory."""
+    runtime = runtime_for(device)
+    if runtime.capabilities.memory_model != "dedicated":
         return None
+    _used, total = runtime.memory()
+    return None if total is None else total / (1024.0 ** 3)
 
 
 def _mps_recommended_gib(device) -> float | None:
@@ -428,7 +234,7 @@ def _batch_size_from_memory(
     return batch, per_sample_cost, density_factor
 
 
-def auto_batch_size(
+def _estimate_batch_size(
     image_size: int,
     device,
     mode: str = "train",
@@ -588,6 +394,38 @@ def auto_batch_size(
     return batch
 
 
+# Separate dispatch points deliberately retain the established formulas. ROCm
+# initially uses the memory estimate; this is not a claim of optimal throughput.
+def _cuda_batch_policy(**kwargs):
+    return _estimate_batch_size(**kwargs)
+
+
+def _rocm_batch_policy(**kwargs):
+    return _estimate_batch_size(**kwargs)
+
+
+def _mps_batch_policy(**kwargs):
+    return _estimate_batch_size(**kwargs)
+
+
+def _cpu_batch_policy(**kwargs):
+    return _estimate_batch_size(**kwargs)
+
+
+BATCH_POLICIES = {
+    Backend.NVIDIA_CUDA: _cuda_batch_policy,
+    Backend.AMD_ROCM: _rocm_batch_policy,
+    Backend.APPLE_MPS: _mps_batch_policy,
+    Backend.CPU: _cpu_batch_policy,
+}
+
+
+def auto_batch_size(image_size, device, mode="train", labels_dir=None, task="detect"):
+    return BATCH_POLICIES[runtime_for(device).backend](
+        image_size=image_size, device=device, mode=mode, labels_dir=labels_dir, task=task,
+    )
+
+
 def resolve_batch_size(
     value,
     image_size: int,
@@ -619,6 +457,9 @@ _OOM_MARKERS = (
     "bad allocation",
     "cublas_status_alloc_failed",
     "cudnn_status_alloc_failed",
+    "hiperroroutofmemory",
+    "hipblas_status_alloc_failed",
+    "miopen_status_alloc_failed",
 )
 
 
@@ -632,8 +473,8 @@ def _is_oom_error(exc: BaseException) -> tuple[bool, str]:
     message = str(exc).lower()
     if not isinstance(exc, MemoryError) and not any(marker in message for marker in _OOM_MARKERS):
         return False, ""
-    if any(x in message for x in ("cuda", "cublas", "cudnn")):
-        backend = "CUDA"
+    if any(x in message for x in ("cuda", "cublas", "cudnn", "hip", "miopen")):
+        backend = "AMD ROCm" if runtime_for().backend == Backend.AMD_ROCM else "CUDA"
     elif "mps" in message:
         backend = "MPS"
     else:

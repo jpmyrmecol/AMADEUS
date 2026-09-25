@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shlex
 import shutil
@@ -13,15 +15,13 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "gui"))
+from tools.runtime_profiles import PROFILES, TORCH_VERSION, TORCHVISION_VERSION, check_support
 from splash_ipc import signal_stop  # noqa: E402
 
-TORCH_VERSION = "2.7.1"
-TORCHVISION_VERSION = "0.22.1"
 NUMPY_VERSION = "1.26.4"
 SCIPY_VERSION = "1.11.4"
-PYTORCH_CU128_INDEX = "https://download.pytorch.org/whl/cu128"
-PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 ENVIRONMENT_ROOT = Path(os.environ.get("AMADEUS_VENV", PROJECT_ROOT / ".venv")).expanduser().absolute()
 READY_MARKER = ENVIRONMENT_ROOT / ".amadeus-ready"
 # uv resolves uv.lock, so the executable version is pinned separately in
@@ -87,13 +87,34 @@ def _is_apple_silicon() -> bool:
     return sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64")
 
 
+def amd_runtime_candidate() -> bool:
+    """Driver hint only, NOT a hardware support verdict; verify real ops later."""
+    import platform
+    if not (sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}):
+        return False
+    if not Path("/dev/kfd").exists():
+        return False
+    for vendor in Path("/sys/class/drm").glob("card*/device/vendor"):
+        try:
+            if vendor.read_text().strip().lower() == "0x1002":
+                return True
+        except OSError:
+            pass
+    return False
+
+
 def select_torch_profile() -> tuple[str, str]:
-    """Select CUDA when NVIDIA is available; macOS uses wheels with MPS support."""
-    if _is_apple_silicon():
-        return "macos", "Apple Silicon detected; using macOS wheels (MPS/Metal and CPU)."
-    if not nvidia_gpu_is_available():
-        return "cpu", "No usable NVIDIA GPU was detected; using CPU wheels."
-    return "cu128", "An NVIDIA GPU was detected; using CUDA 12.8 wheels."
+    requested = os.environ.get("AMADEUS_TORCH_PROFILE", "auto").strip().lower()
+    if requested not in {"", "auto"}:
+        check_support(requested)
+        return requested, f"Requested PyTorch profile: {requested}; runtime verification is required."
+    if sys.platform == "darwin":
+        return "macos", "Using macOS wheels (MPS/Metal when available, otherwise CPU)."
+    if nvidia_gpu_is_available():
+        return "cu128", "An NVIDIA GPU was detected; using CUDA 12.8 wheels."
+    if amd_runtime_candidate():
+        return "rocm63", "AMD driver detected; trying ROCm 6.3 wheels. GPU computation and NMS must pass."
+    return "cpu", "No accelerator runtime candidate detected; using CPU wheels."
 
 
 def venv_python() -> Path:
@@ -268,76 +289,19 @@ print("[AMADEUS] NumPy/SciPy binary compatibility: OK")
 
 
 def verify_pytorch_profile(profile: str) -> None:
-    """Verify torch, torchvision, CUDA computation, and CUDA NMS when required."""
-    python = venv_python()
-    code = f'''
+    """Verify the selected wheel build and accelerator computation/NMS when required."""
+    check_support(profile)
+    code = f"""
 import torch
 import torchvision
-
-profile = {profile!r}
-print("[AMADEUS] PyTorch:", torch.__version__)
-print("[AMADEUS] torchvision:", torchvision.__version__)
-print("[AMADEUS] PyTorch CUDA runtime:", torch.version.cuda or "CPU")
-print("[AMADEUS] GPU available:", torch.cuda.is_available())
-
-if torch.__version__.split("+")[0] != {TORCH_VERSION!r}:
-    raise RuntimeError(f"Expected torch {TORCH_VERSION}, found {{torch.__version__}}")
-if torchvision.__version__.split("+")[0] != {TORCHVISION_VERSION!r}:
-    raise RuntimeError(
-        f"Expected torchvision {TORCHVISION_VERSION}, found {{torchvision.__version__}}"
-    )
-
-if profile == "cu128":
-    if "+cu128" not in torch.__version__:
-        raise RuntimeError(f"Expected torch +cu128, found {{torch.__version__}}")
-    import platform
-    arm_linux = platform.system() == "Linux" and platform.machine() in ("aarch64", "arm64")
-    if not arm_linux and "+cu128" not in torchvision.__version__:
-        raise RuntimeError(f"Expected torchvision +cu128, found {{torchvision.__version__}}")
-    if torch.version.cuda != "12.8":
-        raise RuntimeError(f"Expected CUDA runtime 12.8, found {{torch.version.cuda}}")
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA verification failed: PyTorch cannot access an NVIDIA GPU")
-
-    print("[AMADEUS] GPU:", torch.cuda.get_device_name(0))
-    print("[AMADEUS] CUDA architectures:", torch.cuda.get_arch_list())
-
-    x = torch.ones(1, device="cuda")
-    y = x + 1
-    torch.cuda.synchronize()
-    if y.item() != 2:
-        raise RuntimeError("CUDA computation returned an unexpected result")
-    print("[AMADEUS] CUDA computation verification: OK")
-
-    from torchvision.ops import nms
-
-    boxes = torch.tensor(
-        [[0.0, 0.0, 10.0, 10.0], [1.0, 1.0, 9.0, 9.0]],
-        device="cuda",
-    )
-    scores = torch.tensor([0.9, 0.8], device="cuda")
-    keep = nms(boxes, scores, 0.5)
-    torch.cuda.synchronize()
-    if keep.numel() < 1:
-        raise RuntimeError("torchvision CUDA NMS returned an unexpected result")
-    print("[AMADEUS] torchvision CUDA NMS verification: OK")
-else:
-    if torch.version.cuda is not None:
-        raise RuntimeError(
-            f"Expected a CPU PyTorch build, found CUDA runtime {{torch.version.cuda}}"
-        )
-    print("[AMADEUS]", "macOS PyTorch verification: OK" if profile == "macos" else "CPU PyTorch verification: OK")
-
-    import platform
-
-    if platform.system() == "Darwin" and platform.machine() in ("arm64", "aarch64"):
-        from main.batch_utils import _mps_available
-        if _mps_available():
-            print("[AMADEUS] MPS computation verification: OK")
-        else:
-            print("[AMADEUS] MPS cannot execute a test operation; automatic device selection will use CPU.")
-'''
-    result = subprocess.run([str(python), "-c", code], cwd=PROJECT_ROOT, check=False)
+from tools.runtime_profiles import verify_execution
+from main.compute_backend import detect_backend
+verify_execution({profile!r}, torch, torchvision)
+print("[AMADEUS] PyTorch:", torch.__version__, "torchvision:", torchvision.__version__)
+print("[AMADEUS] Runtime backend:", detect_backend().value)
+print("[AMADEUS] PyTorch profile verification: OK")
+"""
+    result = subprocess.run([str(venv_python()), "-c", code], cwd=PROJECT_ROOT, check=False)
     if result.returncode:
         raise RuntimeError("PyTorch/torchvision environment verification failed")
 
@@ -346,19 +310,12 @@ def install_exact_pytorch_profile(uv_executable: str, profile: str) -> None:
     """Install only torch and torchvision, without modifying their dependencies."""
     python = venv_python()
 
-    if profile == "cu128":
-        torch_spec = f"torch=={TORCH_VERSION}+cu128"
-        torchvision_spec = f"torchvision=={TORCHVISION_VERSION}+cu128"
-        index = PYTORCH_CU128_INDEX
-    elif sys.platform == "darwin":
-        # PyTorch macOS wheels do not use the +cpu local-version suffix.
-        torch_spec = f"torch=={TORCH_VERSION}"
-        torchvision_spec = f"torchvision=={TORCHVISION_VERSION}"
-        index = None
-    else:
-        torch_spec = f"torch=={TORCH_VERSION}+cpu"
-        torchvision_spec = f"torchvision=={TORCHVISION_VERSION}+cpu"
-        index = PYTORCH_CPU_INDEX
+    check_support(profile)
+    selected = PROFILES[profile]
+    suffix = f"+{selected.suffix}" if selected.suffix and sys.platform != "darwin" else ""
+    torch_spec = f"torch=={TORCH_VERSION}{suffix}"
+    torchvision_spec = f"torchvision=={TORCHVISION_VERSION}{suffix}"
+    index = selected.index if sys.platform != "darwin" else None
 
     if sys.platform.startswith("linux"):
         import platform
@@ -468,7 +425,7 @@ def install_amadeus_command() -> Path:
             'cd /d "%AMADEUS_ROOT%"\n'
             'call "%AMADEUS_ROOT%\\.venv\\Scripts\\activate.bat"\n'
             "if errorlevel 1 exit /b 1\n"
-            'if defined CUDA_VISIBLE_DEVICES "%AMADEUS_ROOT%\\.venv\\Scripts\\python.exe" -c "import torch; print(\'[AMADEUS] Selected GPU:\', torch.cuda.get_device_name(0)); print(\'[AMADEUS] GPU utilization:\', torch.cuda.utilization(0), \'%%\')"\n'
+            'if defined CUDA_VISIBLE_DEVICES "%AMADEUS_ROOT%\\.venv\\Scripts\\python.exe" -c "from main.compute_telemetry import print_device_summary; print_device_summary()"\n'
             'set "AMADEUS_SPLASH_TOKEN=%RANDOM%%RANDOM%%RANDOM%"\n'
             'start "AMADEUS Splash" /min "%AMADEUS_ROOT%\\.venv\\Scripts\\python.exe" "%AMADEUS_ROOT%\\gui\\splash_standalone.py" "%AMADEUS_SPLASH_TOKEN%" "4"\n'
             '"%AMADEUS_ROOT%\\.venv\\Scripts\\amadeus.exe" %*\n'
@@ -571,9 +528,31 @@ def check_uv_version(uv_executable: str) -> str:
     )
 
 
+def ready_identity(profile: str) -> dict:
+    inputs = ("pyproject.toml", "uv.lock", "VERSION", "tools/setup_environment.py",
+              "tools/runtime_profiles.py", "main/compute_backend.py")
+    digest = hashlib.sha256()
+    for name in inputs:
+        digest.update((PROJECT_ROOT / name).read_bytes())
+    return {"schema": 1, "profile": profile, "inputs": digest.hexdigest()}
+
+
+def environment_ready() -> bool:
+    """Legacy empty markers are invalid. Verify installed wheels on every fast path."""
+    try:
+        profile, _ = select_torch_profile()
+        if json.loads(READY_MARKER.read_text()) != ready_identity(profile):
+            return False
+        verify_pytorch_profile(profile)
+        return True
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return False
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--uv", required=True, help="Path to the uv executable.")
+    parser.add_argument("--check-ready", action="store_true")
+    parser.add_argument("--uv", help="Path to the uv executable.")
     parser.add_argument("--python", default=os.environ.get("AMADEUS_PYTHON"),
                         help="Python executable used to create the application environment.")
     return parser.parse_args()
@@ -581,6 +560,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.check_ready:
+        return 0 if environment_ready() else 1
+    if not args.uv:
+        raise RuntimeError("--uv is required for setup")
     profile, explanation = select_torch_profile()
     print(f"[AMADEUS] {explanation}", flush=True)
     print("[AMADEUS] Preparing the locked Python environment...", flush=True)
@@ -603,7 +586,7 @@ def main() -> int:
         verify_gui_environment()
         prepare_ffmpeg()
         command_path = install_amadeus_command()
-        READY_MARKER.touch()
+        READY_MARKER.write_text(json.dumps(ready_identity(profile)), encoding="utf-8")
     except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         signal_stop()
