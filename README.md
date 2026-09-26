@@ -42,7 +42,9 @@ AMADEUS learns directly from the input videos. Recommended conditions include a 
 
 ## Citation
 
-See the [Publication page](https://amadeus.jpmyrmecol.com/publication.html) for citation information when the preprint is available. Please also cite the project website: https://amadeus.jpmyrmecol.com/.
+Preprint: Yusuke Notomi, Kentaro Matsumura, and Shigeto Dobata (2026). **AMADEUS: Annotation-free multi-animal direction estimation using self-supervised learning.** bioRxiv. https://doi.org/10.64898/2026.09.19.752854
+
+See the [Publication page](https://amadeus.jpmyrmecol.com/publication.html) for citation information. Please also cite the project website: https://amadeus.jpmyrmecol.com/.
 
 ## License
 
