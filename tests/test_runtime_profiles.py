@@ -39,6 +39,39 @@ class ProfileTests(unittest.TestCase):
             with patch.object(setup.sys, 'platform', 'darwin'):
                 self.assertEqual(setup.select_torch_profile()[0], 'macos')
 
+    def test_linux_nvidia_profile_reports_driver_details(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            setup.sys, 'platform', 'linux'
+        ), patch.object(
+            setup, 'nvidia_gpu_is_available', return_value=True
+        ), patch.object(
+            setup, 'query_nvidia_driver_info',
+            return_value=('NVIDIA GeForce RTX 4070', '570.86.16', '/usr/lib/wsl/lib/nvidia-smi'),
+        ):
+            profile, explanation = setup.select_torch_profile()
+            self.assertEqual(profile, 'cu128')
+            self.assertIn('RTX 4070', explanation)
+            self.assertIn('570.86.16', explanation)
+            self.assertIn('/usr/lib/wsl/lib/nvidia-smi', explanation)
+
+    def test_cuda_verification_failure_reports_driver_diagnostic(self):
+        failed = SimpleNamespace(
+            returncode=1,
+            stdout='',
+            stderr='RuntimeError: CUDA driver version is insufficient',
+        )
+        with patch.object(setup.subprocess, 'run', return_value=failed), patch.object(
+            setup, 'query_nvidia_driver_info',
+            return_value=('NVIDIA GeForce RTX 4070', '570.86.16', '/usr/bin/nvidia-smi'),
+        ):
+            with self.assertRaises(RuntimeError) as error:
+                setup.verify_pytorch_profile('cu128')
+        message = str(error.exception)
+        self.assertIn('RTX 4070', message)
+        self.assertIn('570.86.16', message)
+        self.assertIn('CUDA driver version is insufficient', message)
+        self.assertIn('compatible NVIDIA driver', message)
+
     def test_rocm_support_policy_is_separate(self):
         with patch.object(profiles.sys, 'platform', 'win32'):
             with self.assertRaises(RuntimeError):

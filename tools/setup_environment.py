@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "gui"))
 from tools.runtime_profiles import PROFILES, TORCH_VERSION, TORCHVISION_VERSION, check_support
+from main.compute_telemetry import query_nvidia_driver_info
 from splash_ipc import signal_stop  # noqa: E402
 
 NUMPY_VERSION = "1.26.4"
@@ -30,55 +30,20 @@ READY_MARKER = ENVIRONMENT_ROOT / ".amadeus-ready"
 PYPROJECT_FILE = PROJECT_ROOT / "pyproject.toml"
 
 
-def nvidia_smi_candidates() -> list[str]:
-    """Return nvidia-smi locations, including common Windows driver paths."""
-    candidates: list[Path | str] = []
-    discovered = shutil.which("nvidia-smi")
-    if discovered:
-        candidates.append(discovered)
-
-    if os.name == "nt":
-        windows_dir = Path(os.environ.get("WINDIR", r"C:\Windows"))
-        program_files = Path(
-            os.environ.get("ProgramW6432", os.environ.get("ProgramFiles", r"C:\Program Files"))
-        )
-        candidates.extend(
-            [
-                windows_dir / "System32" / "nvidia-smi.exe",
-                program_files / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe",
-            ]
-        )
-        driver_store = windows_dir / "System32" / "DriverStore" / "FileRepository"
-        if driver_store.is_dir():
-            candidates.extend(driver_store.glob("nv*/*nvidia-smi.exe"))
-
-    unique: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        value = str(candidate)
-        key = os.path.normcase(os.path.abspath(value))
-        if key not in seen and Path(value).is_file():
-            seen.add(key)
-            unique.append(value)
-    return unique
-
-
 def nvidia_gpu_is_available() -> bool:
     """Return whether a working NVIDIA GPU is reported by the driver."""
-    for executable in nvidia_smi_candidates():
-        try:
-            result = subprocess.run(
-                [executable],
-                check=False,
-                capture_output=True,
-                text=True,
-                errors="replace",
-            )
-        except OSError:
-            continue
-        if result.returncode == 0:
-            return True
-    return False
+    return query_nvidia_driver_info() is not None
+
+
+def _nvidia_driver_diagnostic() -> str:
+    info = query_nvidia_driver_info()
+    if info is None:
+        return (
+            "nvidia-smi could not report an NVIDIA GPU. On WSL2, AMADEUS also checks "
+            "/usr/lib/wsl/lib/nvidia-smi even when that directory is not on PATH."
+        )
+    name, driver, executable = info
+    return f"NVIDIA GPU: {name}; driver: {driver}; nvidia-smi: {executable}"
 
 
 def _is_apple_silicon() -> bool:
@@ -126,7 +91,10 @@ def select_torch_profile() -> tuple[str, str]:
     if sys.platform == "darwin":
         return "macos", "Using macOS wheels (MPS/Metal when available, otherwise CPU)."
     if nvidia_gpu_is_available():
-        return "cu128", "An NVIDIA GPU was detected; using CUDA 12.8 wheels."
+        return "cu128", (
+            "An NVIDIA GPU was detected; using CUDA 12.8 wheels. "
+            + _nvidia_driver_diagnostic()
+        )
     if amd_runtime_candidate():
         return "rocm63", "AMD driver detected; trying ROCm 6.3 wheels. GPU computation and NMS must pass."
     if windows_amd_gpu_candidate():
@@ -321,9 +289,31 @@ print("[AMADEUS] PyTorch:", torch.__version__, "torchvision:", torchvision.__ver
 print("[AMADEUS] Runtime backend:", detect_backend().value)
 print("[AMADEUS] PyTorch profile verification: OK")
 """
-    result = subprocess.run([str(venv_python()), "-c", code], cwd=PROJECT_ROOT, check=False)
+    result = subprocess.run(
+        [str(venv_python()), "-c", code],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
     if result.returncode:
-        raise RuntimeError("PyTorch/torchvision environment verification failed")
+        detail = (result.stderr or result.stdout or "").strip()
+        if len(detail) > 3000:
+            detail = detail[-3000:]
+        lines = ["PyTorch/torchvision environment verification failed."]
+        if profile == "cu128":
+            lines.append(_nvidia_driver_diagnostic())
+            lines.append(
+                "The cu128 PyTorch build requires a compatible NVIDIA driver. "
+                "If the verifier reports a CUDA initialization or driver-version error, "
+                "update the NVIDIA driver and rerun AMADEUS."
+            )
+        if detail:
+            lines.append("Verifier output:\n" + detail)
+        raise RuntimeError("\n".join(lines))
 
 
 def install_exact_pytorch_profile(uv_executable: str, profile: str) -> None:

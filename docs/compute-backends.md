@@ -74,10 +74,16 @@ installation limitation, not a requirement for a `rocm` device name; PyTorch
 HIP continues to use `cuda` device strings.
 
 Setup chooses macOS wheels on macOS, then an NVIDIA driver candidate, then a Linux
-AMD candidate (`/dev/kfd` plus AMD DRM vendor), otherwise CPU. This is only wheel
-selection. Build/runtime/suffix/version verification, GPU tensor computation and
-torchvision GPU NMS must succeed before setup writes a ready marker. Unsupported
-AMD hardware is never accepted solely from its vendor or `is_available()`.
+AMD candidate (`/dev/kfd` plus AMD DRM vendor), otherwise CPU. NVIDIA discovery
+checks PATH plus common native-Linux locations and the WSL2 GPU bridge at
+`/usr/lib/wsl/lib/nvidia-smi`; runtime telemetry uses the same candidate list.
+When CUDA is selected, setup reports the detected GPU, driver version and
+`nvidia-smi` path. A failed CUDA verification includes the same driver diagnostic
+and the verifier output so driver/runtime incompatibilities are distinguishable
+from package errors. This is only wheel selection. Build/runtime/suffix/version
+verification, GPU tensor computation and torchvision GPU NMS must succeed before
+setup writes a ready marker. Unsupported AMD hardware is never accepted solely
+from its vendor or `is_available()`.
 This smoke verification cannot certify every operator on every GPU: the AMD GPU,
 driver and OS compatibility matrix still applies. No compatibility override such
 as `HSA_OVERRIDE_GFX_VERSION` is installed.

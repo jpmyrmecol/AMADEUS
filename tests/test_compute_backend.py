@@ -173,13 +173,43 @@ class BackendTests(unittest.TestCase):
 
     def test_nvidia_telemetry_units_unchanged(self):
         with patch.object(cb, '_torch', return_value=fake_torch(cuda='12.8')), patch.object(
+            telemetry, 'nvidia_smi_candidates', return_value=['nvidia-smi']
+        ), patch.object(
             telemetry.subprocess, 'check_output', return_value='70, 2048, 12288'
         ):
             self.assertEqual(telemetry.sample_accelerator('0'), (70., 2., 12.))
 
+    def test_nvidia_smi_falls_back_to_wsl_bridge_path(self):
+        with patch.object(cb, '_torch', return_value=fake_torch(cuda='12.8')), patch.object(
+            telemetry, 'nvidia_smi_candidates',
+            return_value=['nvidia-smi', '/usr/lib/wsl/lib/nvidia-smi'],
+        ), patch.object(
+            telemetry.subprocess, 'check_output',
+            side_effect=[FileNotFoundError(), '70, 2048, 12288'],
+        ) as query:
+            self.assertEqual(telemetry.sample_accelerator('0'), (70., 2., 12.))
+            self.assertEqual(query.call_count, 2)
+            self.assertEqual(query.call_args.args[0][0], '/usr/lib/wsl/lib/nvidia-smi')
+
+    def test_nvidia_driver_info_falls_back_to_wsl_bridge_path(self):
+        with patch.object(
+            telemetry, 'nvidia_smi_candidates',
+            return_value=['nvidia-smi', '/usr/lib/wsl/lib/nvidia-smi'],
+        ), patch.object(
+            telemetry.subprocess, 'check_output',
+            side_effect=[FileNotFoundError(), 'NVIDIA GeForce RTX 4070, 570.86.16'],
+        ) as query:
+            self.assertEqual(
+                telemetry.query_nvidia_driver_info(),
+                ('NVIDIA GeForce RTX 4070', '570.86.16', '/usr/lib/wsl/lib/nvidia-smi'),
+            )
+            self.assertEqual(query.call_count, 2)
+
     def test_nvidia_telemetry_respects_visible_device_order(self):
         with patch.object(cb, '_torch', return_value=fake_torch(cuda='12.8')), patch.dict(
             'os.environ', {'CUDA_VISIBLE_DEVICES': '1,0'}, clear=True
+        ), patch.object(
+            telemetry, 'nvidia_smi_candidates', return_value=['nvidia-smi']
         ), patch.object(telemetry.subprocess, 'check_output', return_value='70, 2048, 12288') as query:
             self.assertEqual(telemetry.sample_accelerator('0'), (70., 2., 12.))
             self.assertIn('--id=1', query.call_args.args[0])
