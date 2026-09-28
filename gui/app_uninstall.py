@@ -274,9 +274,11 @@ def _launch_uninstaller(project_root: Path) -> None:
         launcher = Path(tempfile.gettempdir()) / f"AMADEUS-uninstall-launch-{uuid.uuid4().hex}.command"
         launcher.write_text(
             "#!/usr/bin/env bash\n"
-            + "exec "
+            + "status=0\n"
             + " ".join(shlex.quote(part) for part in command)
-            + "\n",
+            + " || status=$?\n"
+            + 'rm -f -- "$0" 2>/dev/null || true\n'
+            + 'exit "$status"\n',
             encoding="utf-8",
         )
         launcher.chmod(0o700)
