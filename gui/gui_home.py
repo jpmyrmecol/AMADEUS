@@ -18,12 +18,14 @@ from PIL import Image, ImageTk
 import customtkinter as ctk
 
 try:
+    from .app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
     from .app_update import probe_update_status, start_update_check
     from .project_paths import PROJECT_ROOT, gui_asset, gui_script
     from .splash_ipc import TOKEN_ENV_VAR, external_started_at, signal_stop
     from .splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
 except ImportError:  # Preserve direct execution with: python gui/gui_home.py
+    from app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
     from app_update import probe_update_status, start_update_check
     from project_paths import PROJECT_ROOT, gui_asset, gui_script
     from splash_ipc import TOKEN_ENV_VAR, external_started_at, signal_stop
@@ -334,6 +336,9 @@ def build_home(root: ctk.CTk) -> None:
     easy_panel.grid(row=0, column=0, columnspan=6, sticky="nsew")
 
     corner_buttons = {
+        "uninstall": {
+            "text": "Uninstall", "hover": False, "shape_id": None, "text_id": None,
+        },
         "help": {
             "text": "Help", "hover": False, "shape_id": None, "text_id": None,
         },
@@ -344,6 +349,9 @@ def build_home(root: ctk.CTk) -> None:
     }
 
     def corner_bounds(name: str) -> tuple[int, int, int, int]:
+        if name == "uninstall":
+            x0, y0 = 24, 24
+            return x0, y0, x0 + 96, y0 + 30
         index = 0 if name == "help" else 1
         x1, y0 = easy_panel.winfo_width() - 24, 24 + index * 38
         x0, y1 = x1 - 96, y0 + 30
@@ -481,7 +489,13 @@ def build_home(root: ctk.CTk) -> None:
         for name in corner_buttons:
             x0, y0, x1, y1 = corner_bounds(name)
             if x0 <= event.x <= x1 and y0 <= event.y <= y1:
-                if name == "help":
+                if name == "uninstall":
+                    def close_for_uninstall() -> None:
+                        root._amadeus_uninstall_requested = True
+                        root.destroy()
+
+                    start_uninstall(root, on_uninstall_start=close_for_uninstall)
+                elif name == "help":
                     open_manual("EN")
                 else:
                     def close_for_update() -> None:
@@ -533,6 +547,7 @@ def main() -> int:
     has_external_splash = ensure_external_splash()
     root = ctk.CTk()
     root._amadeus_update_requested = False
+    root._amadeus_uninstall_requested = False
     configure_dpi_scaling(root)
     root.withdraw()
     root.title(home_window_title())
@@ -591,6 +606,8 @@ def main() -> int:
         splash.AMADEUS_SPLASH_CANVAS.bind("<ButtonPress>", reveal_main_window, add="+")
     reveal_job = root.after(remaining_ms, reveal_main_window)
     root.mainloop()
+    if getattr(root, "_amadeus_uninstall_requested", False):
+        return UNINSTALL_EXIT_CODE
     return 42 if getattr(root, "_amadeus_update_requested", False) else 0
 
 
