@@ -11,6 +11,14 @@ After you configure foreground segmentation, AMADEUS extracts single-animal blob
 
 ## Install and launch
 
+### Recommended environment
+
+AMADEUS currently recommends **Windows or Linux with an NVIDIA GPU** as the most stable environment.
+
+For NVIDIA GPUs, **8 GB or more of VRAM is recommended**, although the required memory depends on factors such as video resolution and the number of animals. AMADEUS has also been confirmed to run on laptop GPUs with **4 GB of VRAM**.
+
+Support for other environments, including Apple Silicon and AMD GPUs, is being expanded. Some dependencies may not yet be fully optimized for these platforms, and GPU acceleration or processing performance may be limited depending on the hardware and backend.
+
 Use the [installers on the website](https://amadeus.jpmyrmecol.com/#install), or clone this repository and run the launcher from its root directory.
 
 | Operating system | Launcher |
@@ -19,7 +27,7 @@ Use the [installers on the website](https://amadeus.jpmyrmecol.com/#install), or
 | macOS on Apple Silicon | Open `AMADEUS.command` |
 | Linux / WSL2 | Run `bash AMADEUS.sh` |
 
-macOS and Linux have not yet been extensively tested. For platform requirements, installation details, and troubleshooting, see the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html).
+For platform requirements, installation details, and troubleshooting, see the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html).
 
 To update AMADEUS, select **Update** below **Help** on the Home screen. Review the version change and confirm to install; AMADEUS closes during the update and restarts when setup is complete.
 
