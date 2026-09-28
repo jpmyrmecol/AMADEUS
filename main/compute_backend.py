@@ -175,29 +175,31 @@ def resolve_device(device="auto", purpose="YOLO") -> str:
         result = "cpu"
     elif value in {"mps", "mps:0"}:
         if not mps_available():
-            raise RuntimeError(f"{purpose}: requested MPS device is unavailable; use DEVICE=auto or cpu.")
-        result, runtime = "mps", Runtime(Backend.APPLE_MPS)
+            print(f"[WARN] {purpose}: requested MPS device is unavailable; falling back to CPU.")
+            result, runtime = "cpu", Runtime(Backend.CPU)
+        else:
+            result, runtime = "mps", Runtime(Backend.APPLE_MPS)
     elif cuda_indices(value) or value.startswith("cuda"):
         if runtime.capabilities.torch_device != "cuda":
-            raise RuntimeError(
-                f"{purpose}: requested GPU device {requested!r} is unavailable; "
-                "check the installed PyTorch accelerator profile or use DEVICE=auto or cpu."
+            print(
+                f"[WARN] {purpose}: requested GPU device {requested!r} is unavailable; "
+                "falling back to CPU."
             )
-        result = requested
+            result, runtime = "cpu", Runtime(Backend.CPU)
+        else:
+            result = requested
     else:
         return requested  # Leave invalid/custom inputs to Ultralytics validation.
     if runtime.backend == Backend.AMD_ROCM and result != "cpu":
         try:
             torch = _torch()
             for index in cuda_indices(result):
-                value = torch.ones(1, device=f"cuda:{index}") + 1
+                probe = torch.ones(1, device=f"cuda:{index}") + 1
                 torch.cuda.synchronize(index)
-                if value.item() != 2:
+                if probe.item() != 2:
                     raise RuntimeError("Unexpected HIP computation result")
         except Exception as exc:
-            if not automatic:
-                raise RuntimeError(f"{purpose}: AMD ROCm cannot execute on device={result}: {exc}") from exc
-            print(f"[WARN] AMD ROCm cannot execute on device={result}: {exc}; using CPU.")
+            print(f"[WARN] AMD ROCm cannot execute on device={result}: {exc}; falling back to CPU.")
             result, runtime = "cpu", Runtime(Backend.CPU)
     print(f"[INFO] {purpose} device: {result} ({runtime.backend.value})")
     return result

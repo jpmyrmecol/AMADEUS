@@ -74,16 +74,13 @@ class BackendTests(unittest.TestCase):
                     self.assertEqual(batch.resolve_device('mps'), 'mps')
                     self.assertEqual(batch.resolve_device('mps:0'), 'mps')
                 else:
-                    with self.assertRaisesRegex(RuntimeError, 'requested MPS'):
-                        batch.resolve_device('mps')
+                    self.assertEqual(batch.resolve_device('mps'), 'cpu')
                 for spec in ('0', 'cuda', 'cuda:1', '0,1'):
                     if auto == '0':
                         self.assertEqual(batch.resolve_device(spec), spec)
                     else:
-                        with self.assertRaisesRegex(RuntimeError, 'requested GPU'):
-                            batch.resolve_device(spec)
-                with self.assertRaisesRegex(RuntimeError, 'requested GPU'):
-                    batch.resolve_device('99')
+                        self.assertEqual(batch.resolve_device(spec), 'cpu')
+                self.assertEqual(batch.resolve_device('99'), 'cpu')
                 if backend == cb.Backend.AMD_ROCM:
                     self.assertEqual(cb.runtime_for('cuda:1').torch_device, 'cuda:1')
                     self.assertEqual(batch._accelerator_type('0'), 'cuda')
@@ -91,18 +88,18 @@ class BackendTests(unittest.TestCase):
     def test_unusable_hip_is_not_selected(self):
         torch = fake_torch(hip='6.3')
         torch.ones.side_effect = RuntimeError('invalid device function')
-        with patch.object(cb, '_torch', return_value=torch), redirect_stdout(io.StringIO()):
+        with patch.object(cb, '_torch', return_value=torch), redirect_stdout(io.StringIO()) as log:
             self.assertEqual(cb.resolve_device('auto'), 'cpu')
-            with self.assertRaisesRegex(RuntimeError, 'cannot execute'):
-                cb.resolve_device('cuda:1')
+            self.assertEqual(cb.resolve_device('cuda:1'), 'cpu')
+            self.assertIn('falling back to CPU', log.getvalue())
 
     def test_mps_probe_failure_falls_back(self):
         torch = fake_torch(available=False, mps=True)
         torch.mps.synchronize.side_effect = RuntimeError('MPS unavailable')
-        with patch.object(cb, '_torch', return_value=torch), redirect_stdout(io.StringIO()):
+        with patch.object(cb, '_torch', return_value=torch), redirect_stdout(io.StringIO()) as log:
             self.assertEqual(cb.resolve_device('auto'), 'cpu')
-            with self.assertRaisesRegex(RuntimeError, 'requested MPS'):
-                cb.resolve_device('mps')
+            self.assertEqual(cb.resolve_device('mps'), 'cpu')
+            self.assertIn('falling back to CPU', log.getvalue())
 
     def test_memory_cache_sync_and_worker_capabilities(self):
         for backend, spec in [(cb.Backend.NVIDIA_CUDA, '1'), (cb.Backend.AMD_ROCM, 'cuda:1'),

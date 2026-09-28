@@ -19,13 +19,13 @@ Detection requires available CUDA-API devices and checks `torch.version.hip`
 **before** `torch.version.cuda`; an unknown build is not classified as NVIDIA.
 Next comes MPS availability plus a small execution probe, then CPU. `DEVICE=auto`
 selects logical GPU 0, MPS, or CPU in that order. Explicit CPU remains CPU; MPS
-and CUDA-style indices are validated. Automatic selection falls back to CPU
-when unavailable; explicit accelerator requests fail with an error.
-ROCm selection additionally executes a tiny operation on each requested device:
-merely detecting an AMD PCI vendor or a HIP build is not a support verdict.
-No `rocm:0` device is generated. Logs and the training progress display retain
-backend identity separately from the device string. An explicitly requested
-unavailable GPU or MPS device now raises an error; `auto` may fall back to CPU.
+and CUDA-style indices are validated. If a requested GPU or MPS device is
+unavailable, AMADEUS prints a warning and falls back to CPU rather than failing
+the tracking run. ROCm selection additionally executes a tiny operation on each
+requested device: merely detecting an AMD PCI vendor or a HIP build is not a
+support verdict. No `rocm:0` device is generated. Logs and the training progress
+display retain backend identity separately from the device string. Invalid or
+custom device strings are still left to Ultralytics validation.
 
 The capability table owns the API namespace, memory model, telemetry provider,
 worker policy and permission to request AMP. Ultralytics still performs its own
