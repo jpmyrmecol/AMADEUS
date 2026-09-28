@@ -9,6 +9,10 @@ set +e
 bash "$SCRIPT_DIR/AMADEUS.sh" "$@"
 status=$?
 set -e
+if (( status == 42 )); then
+  echo "[AMADEUS] Update accepted. The updater will restart AMADEUS automatically."
+  exit 0
+fi
 if (( status != 0 )); then
   echo "AMADEUS failed with exit code ${status}. See the run's log.txt for the full diagnostic log."
   if [[ -t 0 && -t 1 ]]; then

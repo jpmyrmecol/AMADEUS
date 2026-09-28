@@ -8,6 +8,46 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+show_version_status() {
+    if [ ! -f "$SCRIPT_DIR/VERSION" ]; then
+        echo "[AMADEUS] Version: unavailable"
+        return 0
+    fi
+
+    current="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
+    echo "[AMADEUS] Version: v$current"
+
+    latest=""
+    if command -v curl >/dev/null 2>&1; then
+        latest="$(curl -fsSL --connect-timeout 1 --max-time 2 \
+            "https://raw.githubusercontent.com/jpmyrmecol/AMADEUS/main/VERSION" 2>/dev/null || true)"
+    elif command -v wget >/dev/null 2>&1; then
+        latest="$(wget -qO- --timeout=2 --tries=1 \
+            "https://raw.githubusercontent.com/jpmyrmecol/AMADEUS/main/VERSION" 2>/dev/null || true)"
+    fi
+    latest="$(printf '%s' "$latest" | tr -d '[:space:]')"
+
+    if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+       [[ ! "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "[AMADEUS] Latest version: unavailable (offline or update check failed)"
+        return 0
+    fi
+
+    IFS=. read -r current_major current_minor current_patch <<< "$current"
+    IFS=. read -r latest_major latest_minor latest_patch <<< "$latest"
+    if (( latest_major > current_major ||
+          (latest_major == current_major && latest_minor > current_minor) ||
+          (latest_major == current_major && latest_minor == current_minor && latest_patch > current_patch) )); then
+        echo "[AMADEUS] Update available: v$current -> v$latest"
+    elif (( latest_major == current_major && latest_minor == current_minor && latest_patch == current_patch )); then
+        echo "[AMADEUS] Latest version: v$latest (up to date)"
+    else
+        echo "[AMADEUS] Latest version: v$latest (installed version is newer)"
+    fi
+}
+
+show_version_status
+
 # Report unsupported hosts before downloading dependencies.
 case "$(uname -s)" in
     Darwin)
@@ -152,9 +192,18 @@ case ":${PATH}:" in
 esac
 
 echo "[AMADEUS] Environment is ready. Starting the GUI..."
-if ! "$AMADEUS_VENV/bin/amadeus" "$@"; then
+set +e
+"$AMADEUS_VENV/bin/amadeus" "$@"
+status=$?
+set -e
+
+if (( status == 42 )); then
+    echo "[AMADEUS] Update accepted. The updater will restart AMADEUS automatically."
+    exit 0
+fi
+if (( status != 0 )); then
     echo "[ERROR] AMADEUS exited with an error." >&2
-    exit 1
+    exit "$status"
 fi
 
 echo "[AMADEUS] The GUI has closed."

@@ -14,7 +14,6 @@ import sys
 import tempfile
 import time
 import traceback
-import urllib.request
 from pathlib import Path
 
 from gui.update_support import (
@@ -216,162 +215,15 @@ def _restore_archive(root: Path, records: list[tuple[Path, Path | None]], log) -
             raise
 
 
-def _required_uv_version(root: Path) -> str:
-    in_tool_uv = False
-    for raw_line in (root / "pyproject.toml").read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if line.startswith("[") and line.endswith("]"):
-            in_tool_uv = line == "[tool.uv]"
-            continue
-        if not in_tool_uv:
-            continue
-        key, separator, value = line.partition("=")
-        if key.strip() != "required-version" or not separator:
-            continue
-        match = re.fullmatch(r'"==([0-9]+(?:\.[0-9]+){1,3})"', value.strip())
-        if match:
-            return match.group(1)
-        break
-    raise RuntimeError("[tool.uv].required-version must be an exact == version pin.")
-
-
-def _uv_version(executable: Path) -> str:
-    try:
-        completed = subprocess.run(
-            [str(executable), "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-    except OSError:
-        return ""
-    fields = completed.stdout.strip().splitlines()
-    parts = fields[0].split() if fields else []
-    return parts[1] if completed.returncode == 0 and len(parts) > 1 else ""
-
-
-def _find_pinned_uv(root: Path, required: str) -> Path | None:
-    names = ("uv.exe", "uv") if os.name == "nt" else ("uv",)
-    candidates = [root / ".uv" / name for name in names]
-    candidates.extend(root / ".uv" / "bin" / name for name in names)
-    on_path = shutil.which("uv")
-    if on_path:
-        candidates.append(Path(on_path))
-    candidates.extend(Path.home() / ".local" / "bin" / name for name in names)
-    candidates.extend(Path.home() / ".cargo" / "bin" / name for name in names)
-    seen: set[str] = set()
-    for candidate in candidates:
-        identity = os.path.normcase(str(candidate.resolve(strict=False)))
-        if identity in seen:
-            continue
-        seen.add(identity)
-        if candidate.is_file() and _uv_version(candidate) == required:
-            return candidate
-    return None
-
-
-def _bootstrap_uv(root: Path, required: str, log) -> Path:
-    if os.name == "nt":
-        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
-        if not powershell:
-            raise RuntimeError("PowerShell is required to prepare the pinned uv version on Windows.")
-        completed = _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(root / "tools" / "uv_bootstrap.ps1"),
-                "-ProjectRoot",
-                str(root),
-            ],
-            cwd=root,
-            log=log,
-        )
-        resolved = Path(completed.stdout.strip().splitlines()[-1])
-        if _uv_version(resolved) != required:
-            raise RuntimeError(f"Could not prepare the required uv {required}.")
-        return resolved
-
-    installer_url = f"https://astral.sh/uv/{required}/install.sh"
-    request = urllib.request.Request(installer_url, headers={"User-Agent": "AMADEUS-Updater"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        installer = response.read(2 * 1024 * 1024 + 1)
-    if len(installer) > 2 * 1024 * 1024:
-        raise RuntimeError("The pinned uv installer exceeded the 2 MiB safety limit.")
-
-    environment = os.environ.copy()
-    environment["UV_INSTALL_DIR"] = str(root / ".uv")
-    environment["INSTALLER_NO_MODIFY_PATH"] = "1"
-    _log(log, f"[AMADEUS] Installing pinned uv {required} into {root / '.uv'}")
-    completed = subprocess.run(
-        ["sh"],
-        cwd=root,
-        env=environment,
-        input=installer.decode("utf-8"),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    if completed.stdout:
-        print(completed.stdout, end="", flush=True)
-        log.write(completed.stdout)
-    if completed.stderr:
-        print(completed.stderr, end="", file=sys.stderr, flush=True)
-        log.write(completed.stderr)
-    log.flush()
-    if completed.returncode:
-        raise RuntimeError(f"Installing the pinned uv {required} failed.")
-
-    resolved = _find_pinned_uv(root, required)
-    if resolved is None:
-        raise RuntimeError(f"uv {required} could not be found after installation.")
-    return resolved
-
-
-def _setup_environment(root: Path, python: str, log) -> None:
-    required = _required_uv_version(root)
-    uv = _find_pinned_uv(root, required)
-    if uv is None:
-        _log(log, f"[AMADEUS] The required uv {required} is not installed; preparing it.")
-        uv = _bootstrap_uv(root, required, log)
-
-    command = [python, str(root / "tools" / "setup_environment.py"), "--uv", str(uv)]
-    environment = os.environ.copy()
-    environment.setdefault("UV_PROJECT_ENVIRONMENT", str(root / ".venv"))
-    _log(log, "[AMADEUS] Syncing locked dependencies and checking the installed runtime.")
-    process = subprocess.Popen(
-        command,
-        cwd=root,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
-    assert process.stdout is not None
-    for line in process.stdout:
-        print(line, end="", flush=True)
-        log.write(line)
-        log.flush()
-    return_code = process.wait()
-    if return_code:
-        raise RuntimeError(f"Dependency setup exited with code {return_code}.")
-
-
 def _restart(root: Path, python: str) -> None:
+    """Hand off to a fresh launcher after this updater has fully exited."""
+    environment = os.environ.copy()
+    environment.pop("AMADEUS_SPLASH_TOKEN", None)
+    environment.pop("AMADEUS_SPLASH_SECONDS", None)
+    environment.pop("VIRTUAL_ENV", None)
+    environment.pop("PYTHONHOME", None)
+
     if os.name == "nt":
-        # A fresh launcher must prepare the environment only after this updater
-        # process (which itself runs from .venv) has exited. The detached
-        # PowerShell window waits for the update lock to disappear, then starts
-        # the updated AMADEUS.bat.
         root_literal = str(root).replace("'", "''")
         script = (
             f"$root='{root_literal}'; "
@@ -396,21 +248,39 @@ def _restart(root: Path, python: str) -> None:
                 script,
             ],
             cwd=root,
+            env=environment,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             close_fds=True,
         )
         return
 
-    environment = os.environ.copy()
-    environment.pop("AMADEUS_SPLASH_TOKEN", None)
-    environment.pop("AMADEUS_SPLASH_SECONDS", None)
-    kwargs: dict[str, object] = {
-        "cwd": str(root),
-        "env": environment,
-        "close_fds": True,
-        "start_new_session": True,
-    }
-    subprocess.Popen([python, "-m", "gui.gui_home"], **kwargs)
+    handoff_script = r"""
+root="$1"
+lock="$root/.amadeus-update.lock"
+deadline=$((SECONDS + 600))
+while [ -e "$lock" ] && (( SECONDS < deadline )); do
+    sleep 0.25
+done
+if [ -e "$lock" ]; then
+    exit 1
+fi
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    exec open -a Terminal "$root/AMADEUS.command"
+fi
+
+exec /bin/bash "$root/AMADEUS.sh"
+"""
+    subprocess.Popen(
+        ["/bin/bash", "-c", handoff_script, "amadeus-update-handoff", str(root)],
+        cwd=root,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
 
 def _show_error(message: str) -> None:
     try:
@@ -446,7 +316,6 @@ def run(args: argparse.Namespace) -> int:
     log_path = temporary / "updater.log"
     records: list[tuple[Path, Path | None]] = []
     old_head: str | None = None
-    environment_attempted = False
     failure: Exception | None = None
     rollback_ok = True
 
@@ -475,15 +344,11 @@ def run(args: argparse.Namespace) -> int:
             if installed_version != expected:
                 raise RuntimeError("The installed source version does not match the version approved for installation.")
 
-            if os.name == "nt":
-                _log(
-                    log,
-                    "[AMADEUS] Source update installed. The fresh Windows launcher will "
-                    "prepare the updated environment after this updater exits.",
-                )
-            else:
-                environment_attempted = True
-                _setup_environment(root, args.python, log)
+            _log(
+                log,
+                "[AMADEUS] Source update installed. A fresh platform launcher will "
+                "prepare the updated environment after this updater exits.",
+            )
         except Exception as exc:
             failure = exc
             _log(log, f"[ERROR] Update failed: {exc}")
@@ -512,14 +377,6 @@ def run(args: argparse.Namespace) -> int:
                 except Exception:
                     rollback_ok = False
 
-            if rollback_ok and environment_attempted:
-                try:
-                    _log(log, "[AMADEUS] Restoring dependencies for the previous source version.")
-                    _setup_environment(root, args.python, log)
-                except Exception as rollback_error:
-                    rollback_ok = False
-                    _log(log, f"[ERROR] Could not restore the previous Python environment: {rollback_error}")
-
         if failure is not None:
             if rollback_ok:
                 message = "The update failed. The previous source files were restored."
@@ -541,10 +398,10 @@ def run(args: argparse.Namespace) -> int:
                     )
             return 1
 
-        if os.name == "nt":
-            _log(log, f"[AMADEUS] Source updated to {_version_label(expected)}; handing off to the launcher.")
-        else:
-            _log(log, f"[AMADEUS] Updated to {_version_label(expected)}; restarting AMADEUS.")
+        _log(
+            log,
+            f"[AMADEUS] Source updated to {_version_label(expected)}; handing off to a fresh launcher.",
+        )
 
     try:
         _restart(root, args.python)
