@@ -1739,9 +1739,9 @@ class CrossingReviewApp(ctk.CTk):
         self._set_workflow_stage("optional_configurations")
 
     def _set_workflow_stage(self, stage: str):
-        """Show optional sections on request; button state carries workflow readiness."""
+        """Show optional sections on request while preserving their original order."""
         show_optional = bool(self.optional_configurations_var.get())
-        for section, optional in [
+        sections = [
             (getattr(self, "seg_section", None), False),
             (getattr(self, "roi_section", None), True),
             (getattr(self, "region_expansion_section", None), True),
@@ -1749,13 +1749,19 @@ class CrossingReviewApp(ctk.CTk):
             (getattr(self, "result_section", None), True),
             (getattr(self, "additional_outlier_section", None), True),
             (getattr(self, "single_blob_smoothing_section", None), True),
-        ]:
+        ]
+
+        # Reset the pack order before restoring visible sections. This keeps
+        # optional sections in their original positions after toggling them on.
+        for section, _optional in sections:
             if section is None:
                 continue
-            if optional and not show_optional:
-                state = self._collapsible_sections.get(section)
-                if state is not None:
-                    state["outer"].pack_forget()
+            state = self._collapsible_sections.get(section)
+            if state is not None:
+                state["outer"].pack_forget()
+
+        for section, optional in sections:
+            if section is None or (optional and not show_optional):
                 continue
             self._pack_sidebar_section(section)
         self._update_analysis_dependent_buttons()
