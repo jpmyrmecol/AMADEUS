@@ -630,7 +630,6 @@ def build_training_dataset(
         rotation_angles=rotation_angles,
         num_preview_frames=int(num_preview_frames),
     )
-    write_refine_dataset_previews(dataset_root, max_previews=REFINE_DATASET_PREVIEW_COUNT)
     return dataset_root
 
 def find_existing_last_model(refine_root: str) -> str | None:
