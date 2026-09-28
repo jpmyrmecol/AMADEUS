@@ -14,6 +14,16 @@ except ImportError:
     from compute_backend import runtime_for
 
 
+def _nvidia_smi_id(logical_index: int) -> str:
+    """Map a PyTorch logical index through CUDA_VISIBLE_DEVICES when set."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None:
+        devices = [part.strip() for part in visible.split(",")]
+        if 0 <= logical_index < len(devices) and devices[logical_index]:
+            return devices[logical_index]
+    return str(logical_index)
+
+
 def query_nvidia_smi(device) -> tuple[float | None, float | None, float | None]:
     """Return (gpu_util_percent, vram_used_gib, vram_total_gib)."""
     runtime = runtime_for(device)
@@ -26,7 +36,7 @@ def query_nvidia_smi(device) -> tuple[float | None, float | None, float | None]:
         out = subprocess.check_output(
             [
                 "nvidia-smi",
-                f"--id={idx}",
+                f"--id={_nvidia_smi_id(idx)}",
                 "--query-gpu=utilization.gpu,memory.used,memory.total",
                 "--format=csv,noheader,nounits",
             ],

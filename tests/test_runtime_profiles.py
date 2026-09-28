@@ -48,6 +48,17 @@ class ProfileTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             profiles.check_support('unknown')
 
+    def test_windows_amd_does_not_silently_claim_rocm(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(setup.sys, 'platform', 'win32'), patch.object(
+            setup, 'nvidia_gpu_is_available', return_value=False
+        ), patch.object(setup, 'amd_runtime_candidate', return_value=False), patch.object(
+            setup, 'windows_amd_gpu_candidate', return_value=True
+        ):
+            profile, explanation = setup.select_torch_profile()
+            self.assertEqual(profile, 'cpu')
+            self.assertIn('Windows', explanation)
+            self.assertIn('ROCm', explanation)
+
     def test_build_verification_matrix_rejects_wrong_vendor_and_profile(self):
         with patch.object(profiles.sys, 'platform', 'linux'), patch.object(profiles.platform, 'machine', return_value='x86_64'):
             for wanted in ('cpu', 'cu128', 'rocm63'):

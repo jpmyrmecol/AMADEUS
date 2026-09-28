@@ -27,6 +27,7 @@ def fake_torch(hip=None, cuda=None, available=True, mps=False):
             is_available=Mock(return_value=available), device_count=Mock(return_value=2),
             empty_cache=Mock(), synchronize=Mock(), memory_reserved=Mock(return_value=2 * GIB),
             memory_allocated=Mock(return_value=GIB),
+            mem_get_info=Mock(return_value=(10 * GIB, 12 * GIB)),
             get_device_properties=Mock(return_value=SimpleNamespace(total_memory=12 * GIB)),
         ),
         backends=SimpleNamespace(mps=SimpleNamespace(is_available=Mock(return_value=mps))),
@@ -69,11 +70,20 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual(batch.resolve_device('auto'), auto)
                 self.assertIn(backend.value, log.getvalue())
                 self.assertEqual(batch.resolve_device('cpu'), 'cpu')
-                self.assertEqual(batch.resolve_device('mps'), 'mps' if auto == 'mps' else 'cpu')
-                self.assertEqual(batch.resolve_device('mps:0'), 'mps' if auto == 'mps' else 'cpu')
+                if auto == 'mps':
+                    self.assertEqual(batch.resolve_device('mps'), 'mps')
+                    self.assertEqual(batch.resolve_device('mps:0'), 'mps')
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'requested MPS'):
+                        batch.resolve_device('mps')
                 for spec in ('0', 'cuda', 'cuda:1', '0,1'):
-                    self.assertEqual(batch.resolve_device(spec), spec if auto == '0' else 'cpu')
-                self.assertEqual(batch.resolve_device('99'), 'cpu')
+                    if auto == '0':
+                        self.assertEqual(batch.resolve_device(spec), spec)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'requested GPU'):
+                            batch.resolve_device(spec)
+                with self.assertRaisesRegex(RuntimeError, 'requested GPU'):
+                    batch.resolve_device('99')
                 if backend == cb.Backend.AMD_ROCM:
                     self.assertEqual(cb.runtime_for('cuda:1').torch_device, 'cuda:1')
                     self.assertEqual(batch._accelerator_type('0'), 'cuda')
@@ -83,14 +93,16 @@ class BackendTests(unittest.TestCase):
         torch.ones.side_effect = RuntimeError('invalid device function')
         with patch.object(cb, '_torch', return_value=torch), redirect_stdout(io.StringIO()):
             self.assertEqual(cb.resolve_device('auto'), 'cpu')
-            self.assertEqual(cb.resolve_device('cuda:1'), 'cpu')
+            with self.assertRaisesRegex(RuntimeError, 'cannot execute'):
+                cb.resolve_device('cuda:1')
 
     def test_mps_probe_failure_falls_back(self):
         torch = fake_torch(available=False, mps=True)
         torch.mps.synchronize.side_effect = RuntimeError('MPS unavailable')
         with patch.object(cb, '_torch', return_value=torch), redirect_stdout(io.StringIO()):
             self.assertEqual(cb.resolve_device('auto'), 'cpu')
-            self.assertEqual(cb.resolve_device('mps'), 'cpu')
+            with self.assertRaisesRegex(RuntimeError, 'requested MPS'):
+                cb.resolve_device('mps')
 
     def test_memory_cache_sync_and_worker_capabilities(self):
         for backend, spec in [(cb.Backend.NVIDIA_CUDA, '1'), (cb.Backend.AMD_ROCM, 'cuda:1'),
@@ -137,7 +149,7 @@ class BackendTests(unittest.TestCase):
         torch = fake_torch(hip='6.3')
         torch.cuda.memory_reserved.side_effect = RuntimeError('unavailable')
         with patch.object(cb, '_torch', return_value=torch):
-            self.assertEqual(telemetry.sample_accelerator('0'), (None, None, None))
+            self.assertEqual(telemetry.sample_accelerator('0'), (None, None, 12.))
         torch.mps.empty_cache.side_effect = AttributeError('old torch')
         torch.mps.synchronize.side_effect = AttributeError('old torch')
         torch.mps.recommended_max_memory.side_effect = AttributeError('old torch')
@@ -168,6 +180,15 @@ class BackendTests(unittest.TestCase):
         ):
             self.assertEqual(telemetry.sample_accelerator('0'), (70., 2., 12.))
 
+    def test_nvidia_telemetry_respects_visible_device_order(self):
+        with patch.object(cb, '_torch', return_value=fake_torch(cuda='12.8')), patch.dict(
+            'os.environ', {'CUDA_VISIBLE_DEVICES': '1,0'}, clear=True
+        ), patch.object(telemetry.subprocess, 'check_output', return_value='70, 2048, 12288') as query:
+            self.assertEqual(telemetry.sample_accelerator('0'), (70., 2., 12.))
+            self.assertIn('--id=1', query.call_args.args[0])
+            self.assertEqual(telemetry.sample_accelerator('cuda:1'), (70., 2., 12.))
+            self.assertIn('--id=0', query.call_args.args[0])
+
     def test_both_training_samplers_route_without_nvidia_or_wddm_on_hip(self):
         # Execute the actual lightweight sampler class without importing YOLO/GUI.
         for path in ('main/obb_detector_training.py', 'main/without_direction_estimation/obb_detector_training.py'):
@@ -191,8 +212,8 @@ class BackendTests(unittest.TestCase):
     def test_existing_batch_values_and_independent_dispatch(self):
         psutil = SimpleNamespace(virtual_memory=lambda: SimpleNamespace(available=64 * GIB),
                                   cpu_count=lambda logical=False: 8)
-        for backend, spec, expected in [(cb.Backend.NVIDIA_CUDA, '0', 36),
-            (cb.Backend.AMD_ROCM, '0', 36), (cb.Backend.APPLE_MPS, 'mps', 16),
+        for backend, spec, expected in [(cb.Backend.NVIDIA_CUDA, '0', 22),
+            (cb.Backend.AMD_ROCM, '0', 22), (cb.Backend.APPLE_MPS, 'mps', 16),
             (cb.Backend.CPU, 'cpu', 16)]:
             torch = fake_torch(hip='6.3' if backend == cb.Backend.AMD_ROCM else None,
                                cuda='12.8' if backend == cb.Backend.NVIDIA_CUDA else None)
@@ -202,6 +223,17 @@ class BackendTests(unittest.TestCase):
                 with patch.dict(batch.BATCH_POLICIES, {backend: Mock(return_value=13)}):
                     self.assertEqual(batch.auto_batch_size(640, spec), 13)
         self.assertEqual(len(set(batch.BATCH_POLICIES.values())), 4)
+
+    def test_gpu_batch_budget_uses_driver_free_memory_on_cuda_and_hip(self):
+        for hip, cuda in [('6.3', None), (None, '12.8')]:
+            torch = fake_torch(hip=hip, cuda=cuda)
+            with self.subTest(hip=hip), patch.object(cb, '_torch', return_value=torch), redirect_stdout(io.StringIO()):
+                self.assertEqual(batch.auto_batch_size(640, '0'), 22)
+                torch.cuda.mem_get_info.return_value = (2 * GIB, 12 * GIB)
+                self.assertEqual(batch.auto_batch_size(640, '0'), 3)
+                torch.cuda.mem_get_info.side_effect = RuntimeError('query unavailable')
+                self.assertEqual(batch.auto_batch_size(640, '0'), 21)
+                torch.cuda.mem_get_info.assert_called_with(0)
 
     def test_oom_recovery_and_non_oom_errors(self):
         torch = fake_torch(hip='6.3')

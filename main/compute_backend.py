@@ -116,14 +116,32 @@ class Runtime:
         try:
             torch = _torch()
             if self.capabilities.memory_model == "dedicated":
-                return (float(torch.cuda.memory_reserved(self.index)),
-                        float(torch.cuda.get_device_properties(self.index).total_memory))
+                # A missing allocator counter must not hide the device capacity.
+                try:
+                    used = float(torch.cuda.memory_reserved(self.index))
+                except Exception:
+                    used = None
+                try:
+                    total = float(torch.cuda.get_device_properties(self.index).total_memory)
+                except Exception:
+                    total = None
+                return used, total
             if self.capabilities.memory_model == "unified":
                 return (float(torch.mps.driver_allocated_memory()),
                         float(torch.mps.recommended_max_memory()))
         except Exception:
             pass
         return None, None
+
+    def free_memory(self) -> float | None:
+        """Driver-reported free bytes for the selected CUDA/HIP device."""
+        if self.capabilities.memory_model != "dedicated":
+            return None
+        try:
+            free, _total = _torch().cuda.mem_get_info(self.index)
+            return max(0.0, float(free))
+        except Exception:
+            return None
 
     def allocated_memory(self) -> float | None:
         try:
@@ -167,16 +185,23 @@ def cuda_indices(device) -> list[int]:
 def resolve_device(device="auto", purpose="YOLO") -> str:
     requested = str(device).strip()
     value = requested.lower()
+    automatic = value in {"auto", "none", ""}
     runtime = runtime_for(device)
-    if value in {"auto", "none", ""}:
+    if automatic:
         result = "0" if runtime.capabilities.torch_device == "cuda" else runtime.torch_device
     elif value == "cpu":
         result = "cpu"
     elif value in {"mps", "mps:0"}:
-        result = "mps" if mps_available() else "cpu"
-        runtime = Runtime(Backend.APPLE_MPS if result == "mps" else Backend.CPU)
+        if not mps_available():
+            raise RuntimeError(f"{purpose}: requested MPS device is unavailable; use DEVICE=auto or cpu.")
+        result, runtime = "mps", Runtime(Backend.APPLE_MPS)
     elif cuda_indices(value) or value.startswith("cuda"):
-        result = requested if runtime.capabilities.torch_device == "cuda" else "cpu"
+        if runtime.capabilities.torch_device != "cuda":
+            raise RuntimeError(
+                f"{purpose}: requested GPU device {requested!r} is unavailable; "
+                "check the installed PyTorch accelerator profile or use DEVICE=auto or cpu."
+            )
+        result = requested
     else:
         return requested  # Leave invalid/custom inputs to Ultralytics validation.
     if runtime.backend == Backend.AMD_ROCM and result != "cpu":
@@ -188,6 +213,8 @@ def resolve_device(device="auto", purpose="YOLO") -> str:
                 if value.item() != 2:
                     raise RuntimeError("Unexpected HIP computation result")
         except Exception as exc:
+            if not automatic:
+                raise RuntimeError(f"{purpose}: AMD ROCm cannot execute on device={result}: {exc}") from exc
             print(f"[WARN] AMD ROCm cannot execute on device={result}: {exc}; using CPU.")
             result, runtime = "cpu", Runtime(Backend.CPU)
     print(f"[INFO] {purpose} device: {result} ({runtime.backend.value})")

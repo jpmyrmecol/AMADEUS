@@ -103,6 +103,21 @@ def amd_runtime_candidate() -> bool:
     return False
 
 
+def windows_amd_gpu_candidate() -> bool:
+    """Detect an AMD display adapter for an honest CPU-profile explanation."""
+    if sys.platform != "win32":
+        return False
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty PNPDeviceID"],
+            capture_output=True, text=True, errors="replace", timeout=8, check=False,
+        )
+        return result.returncode == 0 and "VEN_1002" in result.stdout.upper()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def select_torch_profile() -> tuple[str, str]:
     requested = os.environ.get("AMADEUS_TORCH_PROFILE", "auto").strip().lower()
     if requested not in {"", "auto"}:
@@ -114,6 +129,11 @@ def select_torch_profile() -> tuple[str, str]:
         return "cu128", "An NVIDIA GPU was detected; using CUDA 12.8 wheels."
     if amd_runtime_candidate():
         return "rocm63", "AMD driver detected; trying ROCm 6.3 wheels. GPU computation and NMS must pass."
+    if windows_amd_gpu_candidate():
+        return "cpu", (
+            "AMD GPU detected on Windows. This locked environment only provides Linux ROCm 6.3 "
+            "wheels; using CPU. Windows ROCm needs a separate supported PyTorch/ROCm profile."
+        )
     return "cpu", "No accelerator runtime candidate detected; using CPU wheels."
 
 

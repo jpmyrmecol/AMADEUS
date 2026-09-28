@@ -10,8 +10,8 @@ both CUDA and HIP and intentionally retain their existing training semantics.
 
 | Runtime backend | Current installation scope | PyTorch / YOLO device | Memory model | External telemetry | WDDM |
 | --- | --- | --- | --- | --- | --- |
-| NVIDIA CUDA | Windows, Linux | `cuda:0` / `0` | reserved / dedicated total | optional NVIDIA SMI | Windows only |
-| AMD ROCm | supported Linux x86_64 systems | `cuda:0` / `0` | reserved / dedicated total | allocator fallback; AMD SMI not required | disabled |
+| NVIDIA CUDA | Windows, Linux | `cuda:0` / `0` | driver free / dedicated total for initial batch; allocator for monitoring | optional NVIDIA SMI | Windows only |
+| AMD ROCm | supported Linux x86_64 systems | `cuda:0` / `0` | driver free / dedicated total for initial batch; allocator for monitoring | allocator fallback; AMD SMI not required | disabled |
 | Apple MPS | macOS Apple Silicon | `mps` | driver allocation / recommended working-set budget | allocator fallback | disabled |
 | CPU | CPU fallback | `cpu` | existing system-RAM batch policy | existing psutil system telemetry | disabled |
 
@@ -19,11 +19,13 @@ Detection requires available CUDA-API devices and checks `torch.version.hip`
 **before** `torch.version.cuda`; an unknown build is not classified as NVIDIA.
 Next comes MPS availability plus a small execution probe, then CPU. `DEVICE=auto`
 selects logical GPU 0, MPS, or CPU in that order. Explicit CPU remains CPU; MPS
-and CUDA-style indices are validated and fall back to CPU when unavailable.
+and CUDA-style indices are validated. Automatic selection falls back to CPU
+when unavailable; explicit accelerator requests fail with an error.
 ROCm selection additionally executes a tiny operation on each requested device:
 merely detecting an AMD PCI vendor or a HIP build is not a support verdict.
 No `rocm:0` device is generated. Logs and the training progress display retain
-backend identity separately from the device string.
+backend identity separately from the device string. An explicitly requested
+unavailable GPU or MPS device now raises an error; `auto` may fall back to CPU.
 
 The capability table owns the API namespace, memory model, telemetry provider,
 worker policy and permission to request AMP. Ultralytics still performs its own
@@ -33,12 +35,21 @@ unknown (`None`), never evidence of zero memory pressure. On NVIDIA, SMI device
 usage remains preferred; if unavailable, allocator reserved memory is used.
 Allocator memory does not include other processes and must not be interpreted
 as complete board utilization. MPS retains driver/working-set semantics; its
-recommended budget is not dedicated VRAM.
+recommended budget is not dedicated VRAM. NVIDIA SMI queries map PyTorch's
+logical device index through `CUDA_VISIBLE_DEVICES`, so a masked or reordered
+Linux GPU is not confused with another card.
 
 Each of CUDA, ROCm, MPS and CPU has a separate batch-policy entry in
-`BATCH_POLICIES`. Initially they reuse the established estimator where applicable;
-this does not assert that CUDA and ROCm have the same optimal batch. No new batch
-constants, MPS thresholds or performance workarounds were introduced. Resume,
+`BATCH_POLICIES`. CUDA and ROCm use the same initial heuristic, but now budget
+from driver-reported *free* memory rather than total capacity: at most 75% of
+free memory, leaving at least 1 GiB free, and never more than 80% of device
+capacity. If the free-memory API fails, the budget is 60% of capacity. This
+accounts for other GPU processes and model/optimizer overhead, but remains a
+heuristic. The existing OOM recovery can lower the batch during training;
+fixed user-specified batches are preserved. MPS and CPU keep their separate
+policies. The one-time training batch increase now requires independent GPU
+telemetry. ROCm's allocator-only measurement, and NVIDIA when SMI is missing,
+cannot justify an increase because other processes are invisible. Resume,
 optimizer state, checkpoint selection and recovery thresholds are unchanged.
 The inactive preflight calibration module is not re-enabled by this refactor.
 
@@ -54,6 +65,17 @@ uses official torch **2.7.1+rocm6.3**, torchvision **0.22.1+rocm6.3**, and their
 PyTorch's shared wheel index. Existing lockfile package versions are unchanged.
 Runtime identity does not depend on these names or versions. The Linux restriction
 belongs to this wheel profile, not to the AMD runtime backend.
+
+**Windows ROCm limitation:** This repository's locked PyTorch 2.7.1 / ROCm 6.3
+profile has Linux wheels only. AMD's Windows PyTorch distribution instead uses
+Python 3.12, PyTorch 2.9.1 and ROCm 7.2.1 on a restricted set of Windows 11
+GPUs. The Windows launcher therefore selects CPU on an AMD-only system and
+reports that choice when it detects an AMD adapter. Installing AMD's Windows
+wheels into the managed environment is not supported: the locked setup would
+replace them. Windows ROCm needs a separate locked dependency profile and
+hardware validation, including YOLO training and torchvision NMS. This is an
+installation limitation, not a requirement for a `rocm` device name; PyTorch
+HIP continues to use `cuda` device strings.
 
 Setup chooses macOS wheels on macOS, then an NVIDIA driver candidate, then a Linux
 AMD candidate (`/dev/kfd` plus AMD DRM vendor), otherwise CPU. This is only wheel
@@ -85,7 +107,15 @@ wheel pair and execution every time, so swapping wheels after a successful setup
 cannot silently pass. POSIX launchers already run setup every time. This adds
 verification latency to the former Windows timestamp-only fast path.
 
-## Validation (2026-09-25)
+## Validation
+
+On 2026-09-29, 32 hardware-independent tests passed on Windows. They cover
+free-memory batch budgeting for CUDA and HIP, unavailable-memory fallback,
+explicit-device errors, NVIDIA visible-device reordering, and the requirement
+for independent telemetry before increasing a batch. Linux NVIDIA, Linux ROCm
+and Windows ROCm hardware runs remain unverified.
+
+### Historical validation (2026-09-25)
 
 Base: repository main `07e6775`. No test files were present in that checkout
 (despite historical test paths in the update manifest). Twenty focused unittest tests provide
@@ -134,3 +164,5 @@ manual smoke and a representative training/resume workload before rollout.
 - [AMD ROCm 6.3.3 compatibility](https://rocm.docs.amd.com/en/docs-6.3.3/compatibility/compatibility-matrix.html): GPU, OS and framework compatibility are separate requirements; official PyTorch wheel availability alone is not AMD certification of every combination.
 - [PyTorch MPS APIs](https://docs.pytorch.org/docs/2.7/mps.html): allocator and recommended working-set measurements.
 - [Pinned Ultralytics device selection](https://github.com/ultralytics/ultralytics/blob/v8.3.185/ultralytics/utils/torch_utils.py): CUDA-style devices reach the shared PyTorch API.
+- [AMD Windows PyTorch installation](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installryz/windows/install-pytorch.html): official wheel and Python requirements differ from this repository's locked Linux ROCm profile.
+- [AMD Windows compatibility](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/windows/windows_compatibility.html): supported GPU and OS matrix for the Windows PyTorch distribution.

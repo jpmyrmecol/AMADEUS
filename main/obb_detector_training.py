@@ -1882,6 +1882,9 @@ class _InitialLoadCheck:
         self._finalize_epoch_throughput()
         if (
             self.allow_headroom_raise
+            # Allocator-only ROCm (or NVIDIA without SMI) cannot see other
+            # processes, so low allocator use alone must not raise the batch.
+            and self.sampler.snapshot()[0] is not None
             and self._max_vram_frac is not None
             and self._max_vram_frac < TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER
         ):

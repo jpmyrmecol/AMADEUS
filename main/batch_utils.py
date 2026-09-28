@@ -110,6 +110,21 @@ def _cuda_total_gib(device) -> float | None:
     return None if total is None else total / (1024.0 ** 3)
 
 
+def _cuda_batch_budget_gib(device, total_gib: float) -> tuple[float, float | None]:
+    """Budget from currently free CUDA/HIP memory, with room for model state.
+
+    Total VRAM can be mostly occupied by another process. ``mem_get_info``
+    sees that pressure on both NVIDIA and ROCm; allocator reserved memory does
+    not. This is an initial estimate, so training's OOM recovery still applies.
+    """
+    free = runtime_for(device).free_memory()
+    free_gib = None if free is None else free / (1024.0 ** 3)
+    if free_gib is None:
+        # Unknown free memory is not evidence that the entire card is empty.
+        return max(0.0, total_gib * 0.60), None
+    return max(0.0, min(total_gib * 0.80, free_gib * 0.75, free_gib - 1.0)), free_gib
+
+
 def _mps_recommended_gib(device) -> float | None:
     """Return the MPS recommended working-set size in GiB when available."""
     if _accelerator_type(device) != "mps":
@@ -243,7 +258,7 @@ def _estimate_batch_size(
 ) -> int:
     """Estimate batch size from a unified GPU-memory / image-size / label-density cost model.
 
-    Batch size is the floor of total VRAM divided by an estimated per-sample
+    Batch size is the floor of a conservative available-VRAM budget divided by an estimated per-sample
     memory cost. That cost is the product of an image-resolution term and,
     for training on detect/obb tasks, a label-density term derived from a
     high percentile of per-image instance counts (default p95) rather than
@@ -364,8 +379,9 @@ def _estimate_batch_size(
         if estimated is not None:
             density_stat, mean_labels, total_files, sampled_files = estimated
 
+    budget_gib, free_gib = _cuda_batch_budget_gib(device, total_gib)
     batch, per_sample_cost, density_factor = _batch_size_from_memory(
-        total_gib, image_size, mode, density_stat, task
+        budget_gib, image_size, mode, density_stat, task
     )
 
     max_auto_batch = os.environ.get("AMADEUS_MAX_AUTO_BATCH")
@@ -376,16 +392,19 @@ def _estimate_batch_size(
         batch = new_batch
 
     suffix = " (capped)" if capped else ""
+    free_text = "unavailable" if free_gib is None else f"{free_gib:.1f}GiB"
     if density_stat is None:
         print(
             "[INFO] auto batch cost: "
-            f"total_vram={total_gib:.1f}GiB, per_sample_cost={per_sample_cost:.5f}, "
+            f"total_vram={total_gib:.1f}GiB, free_vram={free_text}, "
+            f"batch_budget={budget_gib:.1f}GiB, per_sample_cost={per_sample_cost:.5f}, "
             f"density_factor={density_factor:.3f}, selected_batch={batch}{suffix}"
         )
     else:
         print(
             "[INFO] auto batch cost: "
-            f"total_vram={total_gib:.1f}GiB, p{percentile:.0f}_labels_per_image={density_stat:.1f}, "
+            f"total_vram={total_gib:.1f}GiB, free_vram={free_text}, "
+            f"batch_budget={budget_gib:.1f}GiB, p{percentile:.0f}_labels_per_image={density_stat:.1f}, "
             f"mean_labels_per_image={mean_labels:.1f}, sampled={sampled_files}/{total_files}, "
             f"per_sample_cost={per_sample_cost:.5f}, density_factor={density_factor:.3f}, "
             f"selected_batch={batch}{suffix}"
