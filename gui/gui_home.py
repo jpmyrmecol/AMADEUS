@@ -349,19 +349,29 @@ def build_home(root: ctk.CTk) -> None:
         x0, y1 = x1 - 96, y0 + 30
         return x0, y0, x1, y1
 
+    UPDATE_GREEN = "#115e37"
+    UPDATE_GREEN_HOVER = "#1a7c48"
+
     def corner_fill(name: str, state: dict) -> str:
         if state["hover"]:
-            return ACCENT_BLUE if name == "update" else ACCENT_RED_ORANGE
+            return UPDATE_GREEN_HOVER if name == "update" else ACCENT_RED_ORANGE
         if name == "update" and state.get("available", False):
             started = float(state.get("pulse_started_at", 0.0)) or time.monotonic()
-            # Fade smoothly from the normal black background to a restrained
-            # blue highlight (about 80% of the accent intensity), then back.
-            phase = ((time.monotonic() - started) % 2.6) / 2.6
-            eased = 0.5 - 0.5 * math.cos(phase * 2.0 * math.pi)
+            # Fade from true black to the deep green used by the dark GUI theme.
+            # Clamp and remap the trough so the button spends several frames at
+            # exactly #000000 rather than merely approaching black.
+            phase = ((time.monotonic() - started) % 2.8) / 2.8
+            raw = 0.5 - 0.5 * math.cos(phase * 2.0 * math.pi)
+            eased = 0.0 if raw <= 0.06 else (raw - 0.06) / 0.94
             return _rgb_to_hex(
-                _mix_rgb(_hex_to_rgb(DEFAULT_BG), _hex_to_rgb(ACCENT_BLUE), 0.80 * eased)
+                _mix_rgb(_hex_to_rgb(DEFAULT_BG), _hex_to_rgb(UPDATE_GREEN), eased)
             )
         return "#181818"
+
+    def corner_outline(name: str, state: dict) -> str:
+        if name == "update" and state.get("available", False):
+            return corner_fill(name, state)
+        return "#333333"
 
     def draw_corner_buttons(_event=None) -> None:
         radius = 8
@@ -380,7 +390,7 @@ def build_home(root: ctk.CTk) -> None:
                     smooth=True,
                     splinesteps=24,
                     fill=fill,
-                    outline="#333333",
+                    outline=corner_outline(name, state),
                     tags=("corner_button", name),
                 )
                 state["text_id"] = easy_panel.create_text(
@@ -394,7 +404,11 @@ def build_home(root: ctk.CTk) -> None:
                 continue
 
             easy_panel.coords(state["shape_id"], *points)
-            easy_panel.itemconfigure(state["shape_id"], fill=fill)
+            easy_panel.itemconfigure(
+                state["shape_id"],
+                fill=fill,
+                outline=corner_outline(name, state),
+            )
             easy_panel.coords(state["text_id"], (x0 + x1) / 2, (y0 + y1) / 2)
 
     def set_corner_hover(name: str, value: bool) -> None:
@@ -403,7 +417,11 @@ def build_home(root: ctk.CTk) -> None:
             return
         state["hover"] = value
         if state["shape_id"] is not None:
-            easy_panel.itemconfigure(state["shape_id"], fill=corner_fill(name, state))
+            easy_panel.itemconfigure(
+                state["shape_id"],
+                fill=corner_fill(name, state),
+                outline=corner_outline(name, state),
+            )
 
     def set_update_caption(text: str) -> None:
         state = corner_buttons["update"]
@@ -416,10 +434,13 @@ def build_home(root: ctk.CTk) -> None:
         state["pulse_job"] = None
         if not state.get("available", False):
             if state["shape_id"] is not None and not state["hover"]:
-                easy_panel.itemconfigure(state["shape_id"], fill="#181818")
+                easy_panel.itemconfigure(
+                    state["shape_id"], fill="#181818", outline="#333333"
+                )
             return
         if state["shape_id"] is not None and not state["hover"]:
-            easy_panel.itemconfigure(state["shape_id"], fill=corner_fill("update", state))
+            fill = corner_fill("update", state)
+            easy_panel.itemconfigure(state["shape_id"], fill=fill, outline=fill)
         # ~30 fps is smooth enough for a subtle button fade without adding
         # noticeable work to the otherwise static Home window.
         state["pulse_job"] = root.after(34, pulse_update_button)
