@@ -2,6 +2,7 @@
 @REM SPDX-License-Identifier: AGPL-3.0-only
 
 @echo off
+set "AMADEUS_LAUNCH_CWD=%CD%"
 cd /d "%~dp0"
 
 call :show_version_status
@@ -39,6 +40,12 @@ start "AMADEUS Splash" /min ".venv\Scripts\python.exe" "gui\splash_standalone.py
 set "AMADEUS_GUI_EXIT=%ERRORLEVEL%"
 if "%AMADEUS_GUI_EXIT%"=="42" (
     echo [AMADEUS] Update accepted. The updater will restart AMADEUS automatically.
+    cd /d "%AMADEUS_LAUNCH_CWD%"
+    exit /b 0
+)
+if "%AMADEUS_GUI_EXIT%"=="43" (
+    echo [AMADEUS] Uninstall accepted. A separate Command Prompt will remove AMADEUS.
+    cd /d "%AMADEUS_LAUNCH_CWD%"
     exit /b 0
 )
 if not "%AMADEUS_GUI_EXIT%"=="0" (
