@@ -17,6 +17,7 @@ docs/mps-training-policy.md
 docs/single-animal-smoothing.md
 gui/__init__.py
 gui/advanced_tracking_layout.py
+gui/app_uninstall.py
 gui/app_update.py
 gui/canvas_file_drop.py
 gui/color.py
