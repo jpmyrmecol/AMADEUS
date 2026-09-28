@@ -164,6 +164,66 @@ def find_other_amadeus_processes(
     return matches
 
 
+def terminate_other_amadeus_processes(
+    project_root: Path,
+    *,
+    current_pid: int | None = None,
+    terminate_timeout: float = 4.0,
+    kill_timeout: float = 2.0,
+) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    """Stop every other AMADEUS process associated with this installation.
+
+    Returns a pair: stopped processes and any processes that remain alive.
+    The caller's process is never targeted. Processes first receive a normal
+    terminate request; only survivors are force-killed after the grace period.
+    """
+    current_pid = os.getpid() if current_pid is None else int(current_pid)
+    detected = find_other_amadeus_processes(project_root, current_pid=current_pid)
+    if not detected:
+        return [], []
+
+    processes: list[psutil.Process] = []
+    for pid, _name in detected:
+        try:
+            process = psutil.Process(pid)
+            if process.pid == current_pid:
+                continue
+            processes.append(process)
+        except psutil.Error:
+            continue
+
+    for process in processes:
+        try:
+            process.terminate()
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.Error:
+            pass
+
+    _gone, alive = psutil.wait_procs(processes, timeout=max(0.0, terminate_timeout))
+    for process in alive:
+        try:
+            process.kill()
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.Error:
+            pass
+
+    if alive:
+        psutil.wait_procs(alive, timeout=max(0.0, kill_timeout))
+
+    remaining_now = dict(
+        find_other_amadeus_processes(project_root, current_pid=current_pid)
+    )
+    stopped = [
+        (pid, name)
+        for pid, name in detected
+        if pid not in remaining_now
+    ]
+    remaining = sorted(remaining_now.items())
+    return stopped, remaining
+
+
 def _normalize_relative_path(value: str) -> str:
     if not value or "\\" in value or "\x00" in value:
         raise ValueError(f"Invalid managed path: {value!r}")

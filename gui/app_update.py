@@ -24,6 +24,8 @@ try:
         acquire_update_lock,
         find_other_amadeus_processes,
         release_update_lock,
+        terminate_other_amadeus_processes,
+        terminate_other_amadeus_processes,
     )
 except ImportError:  # Preserve direct execution with: python gui/gui_home.py
     from project_paths import PROJECT_ROOT
@@ -207,30 +209,33 @@ def start_update_check(
         except tk.TclError:
             pass
 
-    def ensure_idle() -> bool:
+    def stop_other_amadeus_processes() -> bool:
+        status("Stopping...")
         try:
-            running = find_other_amadeus_processes(PROJECT_ROOT)
+            _stopped, remaining = terminate_other_amadeus_processes(
+                PROJECT_ROOT,
+                current_pid=os.getpid(),
+            )
         except Exception as exc:
             messagebox.showerror(
                 "AMADEUS Update",
-                "Could not verify that AMADEUS is idle. The update was not started.\n\n"
+                "Could not stop running AMADEUS processes. The update was not started.\n\n"
                 f"{exc}",
                 parent=root,
             )
             finish()
             return False
-        if not running:
+
+        if not remaining:
             return True
 
-        shown = "\n".join(f"- {name} (PID {pid})" for pid, name in running[:6])
-        if len(running) > 6:
-            shown += f"\n- ... and {len(running) - 6} more"
-        messagebox.showwarning(
+        shown = "\n".join(f"- {name} (PID {pid})" for pid, name in remaining[:6])
+        if len(remaining) > 6:
+            shown += f"\n- ... and {len(remaining) - 6} more"
+        messagebox.showerror(
             "AMADEUS Update",
-            "Another AMADEUS window or processing task is still running.\n\n"
-            "Close all other AMADEUS windows and wait for any tracking, training, "
-            "segmentation, refinement, batch, or video processing to finish before updating.\n\n"
-            f"Detected:\n{shown}",
+            "Some AMADEUS processes could not be stopped, so the update was cancelled.\n\n"
+            f"Still running:\n{shown}",
             parent=root,
         )
         finish()
@@ -284,14 +289,30 @@ def start_update_check(
             finish()
             return
 
-        if not ensure_idle():
-            return
+        try:
+            running = find_other_amadeus_processes(
+                PROJECT_ROOT,
+                current_pid=os.getpid(),
+            )
+        except Exception:
+            running = []
 
+        running_note = (
+            f"\n\nDetected {len(running)} other AMADEUS process"
+            + ("" if len(running) == 1 else "es")
+            + "."
+            if running
+            else ""
+        )
         accepted = messagebox.askyesno(
             "AMADEUS Update",
             "A new version of AMADEUS is available.\n\n"
             f"{_version_label(current_version)} → {_version_label(latest_version)}\n\n"
-            "Download and install this update now?",
+            "Updating will close all other AMADEUS windows and stop any active "
+            "tracking, training, segmentation, refinement, batch, or video-processing tasks. "
+            "In-progress work in those processes will be interrupted."
+            f"{running_note}\n\n"
+            "Stop all running AMADEUS processes and update now?",
             parent=root,
             default=messagebox.NO,
         )
@@ -308,6 +329,10 @@ def start_update_check(
                 parent=root,
             )
             finish()
+            return
+
+        if not stop_other_amadeus_processes():
+            release_update_lock(PROJECT_ROOT, lock_token)
             return
 
         status("Downloading")
@@ -354,7 +379,10 @@ def start_update_check(
         latest_version: str,
         lock_token: str,
     ) -> None:
-        if not ensure_idle():
+        # The user already approved closing all AMADEUS processes. Repeat the
+        # stop immediately before launch to cover a process opened while the
+        # update archive was downloading.
+        if not stop_other_amadeus_processes():
             release_update_lock(PROJECT_ROOT, lock_token)
             shutil.rmtree(temporary_root, ignore_errors=True)
             return
