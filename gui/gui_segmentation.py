@@ -1282,6 +1282,7 @@ class CrossingReviewApp(ctk.CTk):
         self.area_absolute_frame = None
         self.area_iqr_boxplot = None
 
+        self.optional_configurations_var = tk.BooleanVar(value=False)
         self.show_overlay_var = tk.BooleanVar(value=True)
         self.show_centers_var = tk.BooleanVar(value=True)
         self.show_contours_var = tk.BooleanVar(value=True)
@@ -1407,11 +1408,19 @@ class CrossingReviewApp(ctk.CTk):
         def section(title: str, *, expanded: bool = False) -> ctk.CTkFrame:
             return self._make_collapsible_section(parent, title, expanded=expanded)
 
+        self.optional_configurations_checkbox = ctk.CTkCheckBox(
+            parent,
+            text="Show optional settings",
+            variable=self.optional_configurations_var,
+            command=self._on_optional_configurations_changed,
+        )
+        self.optional_configurations_checkbox.pack(anchor="w", padx=8, pady=(8, 4))
+
         self.seg_section = section("Background / Segmentation", expanded=True)
         self.roi_section = section("ROI (Optional)")
         self.region_expansion_section = section("Region Expansion (Optional)")
         self.ana_section = section("Outlier Extraction", expanded=True)
-        self.result_section = section("Result OBB Import (beta)")
+        self.result_section = section("Result OBB Import (Optional)")
         self.additional_outlier_section = section("Additional Outlier (Optional)")
         self.single_blob_smoothing_section = section("Single-animal Smoothing (Optional)")
 
@@ -1726,19 +1735,29 @@ class CrossingReviewApp(ctk.CTk):
             return
         state["outer"].pack(fill="x", padx=8, pady=6)
 
+    def _on_optional_configurations_changed(self):
+        self._set_workflow_stage("optional_configurations")
+
     def _set_workflow_stage(self, stage: str):
-        """Keep all sections available; button state carries workflow readiness."""
-        for section in [
-            getattr(self, "seg_section", None),
-            getattr(self, "roi_section", None),
-            getattr(self, "region_expansion_section", None),
-            getattr(self, "ana_section", None),
-            getattr(self, "result_section", None),
-            getattr(self, "additional_outlier_section", None),
-            getattr(self, "single_blob_smoothing_section", None),
+        """Show optional sections on request; button state carries workflow readiness."""
+        show_optional = bool(self.optional_configurations_var.get())
+        for section, optional in [
+            (getattr(self, "seg_section", None), False),
+            (getattr(self, "roi_section", None), True),
+            (getattr(self, "region_expansion_section", None), True),
+            (getattr(self, "ana_section", None), False),
+            (getattr(self, "result_section", None), True),
+            (getattr(self, "additional_outlier_section", None), True),
+            (getattr(self, "single_blob_smoothing_section", None), True),
         ]:
-            if section is not None:
-                self._pack_sidebar_section(section)
+            if section is None:
+                continue
+            if optional and not show_optional:
+                state = self._collapsible_sections.get(section)
+                if state is not None:
+                    state["outer"].pack_forget()
+                continue
+            self._pack_sidebar_section(section)
         self._update_analysis_dependent_buttons()
 
     def _update_analysis_dependent_buttons(self):
