@@ -48,7 +48,6 @@ from random_utils import derive_seed, normalize_seed
 LOW_OBB_ASPECT_REASON = "low_obb_aspect"
 
 RAW_YOLO_SUBDIR = "yolo_raw"
-REFINE_DATASET_PREVIEW_COUNT = 10
 
 
 def draw_text_plain(img, text, x, y, color, scale=0.6, thickness=1):
@@ -399,86 +398,6 @@ def select_evenly_spaced_image_paths(
         selected_indices.sort()
 
     return [image_paths_all[i] for i in selected_indices]
-
-
-def render_refine_dataset_preview(image: np.ndarray, label_lines: List[str]) -> np.ndarray:
-    """Render OBB labels and their direction triangles on a YOLO dataset image."""
-    preview = np.ascontiguousarray(image.copy())
-    height, width = preview.shape[:2]
-    obb_color = OBB_COLOR
-    direction_color = obb_color
-
-    for line_number, line in enumerate(label_lines, start=1):
-        parts = line.strip().split()
-        if not parts:
-            continue
-        if len(parts) != 9:
-            raise ValueError(
-                f"Invalid refine OBB label at line {line_number}: expected 9 fields, got {len(parts)}"
-            )
-        class_id = int(float(parts[0]))
-        pts = np.asarray([float(value) for value in parts[1:]], dtype=np.float32).reshape(4, 2)
-        pts[:, 0] *= float(width)
-        pts[:, 1] *= float(height)
-        draw_obb(preview, pts, obb_color, thickness=2)
-        draw_direction_triangle_for_obb(
-            preview,
-            pts,
-            class_id,
-            direction_color,
-            alpha=0.6,
-            scale=1.2,
-            outline_thickness=1,
-        )
-    return preview
-
-
-def write_refine_dataset_previews(
-    dataset_root: str,
-    max_previews: int = REFINE_DATASET_PREVIEW_COUNT,
-) -> int:
-    """Write previews sampled from the final train/test YOLO dataset."""
-    preview_dir = os.path.join(dataset_root, "preview")
-    if os.path.isdir(preview_dir):
-        shutil.rmtree(preview_dir)
-    os.makedirs(preview_dir, exist_ok=True)
-
-    image_paths = []
-    for split in ("train", "test"):
-        split_image_dir = os.path.join(dataset_root, split, "images")
-        if not os.path.isdir(split_image_dir):
-            continue
-        for name in sorted(os.listdir(split_image_dir)):
-            if os.path.splitext(name)[1].lower() in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"):
-                image_paths.append(os.path.join(split_image_dir, name))
-
-    limit = max(0, int(max_previews))
-    if limit == 0 or not image_paths:
-        return 0
-    selected_paths = select_evenly_spaced_image_paths(
-        image_paths,
-        training_ratio=min(1.0, float(limit) / float(len(image_paths))),
-    )
-
-    written = 0
-    for image_path in selected_paths:
-        split = os.path.basename(os.path.dirname(os.path.dirname(image_path)))
-        stem = os.path.splitext(os.path.basename(image_path))[0]
-        label_path = os.path.join(dataset_root, split, "labels", f"{stem}.txt")
-        if not os.path.isfile(label_path):
-            raise FileNotFoundError(f"Refine dataset label not found: {label_path}")
-
-        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
-        if image is None:
-            raise RuntimeError(f"Failed to read refine dataset image: {image_path}")
-        with open(label_path, "r", encoding="utf-8") as f:
-            preview = render_refine_dataset_preview(image, f.readlines())
-
-        output_path = os.path.join(preview_dir, f"{split}_{stem}.png")
-        if not cv2.imwrite(output_path, preview):
-            raise RuntimeError(f"Failed to write refine dataset preview: {output_path}")
-        written += 1
-    return written
 
 
 def resolve_refine_dataset_workers(requested_workers=None) -> int:
