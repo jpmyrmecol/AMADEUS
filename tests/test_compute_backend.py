@@ -132,6 +132,8 @@ class BackendTests(unittest.TestCase):
         for hip, cuda in [('6.3', None), (None, '12.8')]:
             torch = fake_torch(hip=hip, cuda=cuda)
             with patch.object(cb, '_torch', return_value=torch), patch.object(
+                telemetry, 'nvidia_smi_candidates', return_value=['nvidia-smi']
+            ), patch.object(
                 telemetry.subprocess, 'check_output', side_effect=FileNotFoundError
             ) as process:
                 self.assertEqual(telemetry.sample_accelerator('0'), (None, 2., 12.))
