@@ -354,13 +354,12 @@ def build_home(root: ctk.CTk) -> None:
             return ACCENT_BLUE if name == "update" else ACCENT_RED_ORANGE
         if name == "update" and state.get("available", False):
             started = float(state.get("pulse_started_at", 0.0)) or time.monotonic()
-            # Slow cosine easing gives a soft "breathing" notification rather
-            # than a binary blink. One full breath takes about 2.6 seconds.
+            # Fade smoothly from the normal black background to a restrained
+            # blue highlight (about 80% of the accent intensity), then back.
             phase = ((time.monotonic() - started) % 2.6) / 2.6
             eased = 0.5 - 0.5 * math.cos(phase * 2.0 * math.pi)
-            amount = 0.24 + 0.62 * eased
             return _rgb_to_hex(
-                _mix_rgb(_hex_to_rgb("#101b28"), _hex_to_rgb(ACCENT_BLUE), amount)
+                _mix_rgb(_hex_to_rgb(DEFAULT_BG), _hex_to_rgb(ACCENT_BLUE), 0.80 * eased)
             )
         return "#181818"
 
