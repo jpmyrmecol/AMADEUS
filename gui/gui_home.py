@@ -369,8 +369,6 @@ def build_home(root: ctk.CTk) -> None:
         return "#181818"
 
     def corner_outline(name: str, state: dict) -> str:
-        if name == "update" and state.get("available", False):
-            return corner_fill(name, state)
         return "#333333"
 
     def draw_corner_buttons(_event=None) -> None:
@@ -440,7 +438,9 @@ def build_home(root: ctk.CTk) -> None:
             return
         if state["shape_id"] is not None and not state["hover"]:
             fill = corner_fill("update", state)
-            easy_panel.itemconfigure(state["shape_id"], fill=fill, outline=fill)
+            easy_panel.itemconfigure(
+                state["shape_id"], fill=fill, outline="#333333"
+            )
         # ~30 fps is smooth enough for a subtle button fade without adding
         # noticeable work to the otherwise static Home window.
         state["pulse_job"] = root.after(34, pulse_update_button)
