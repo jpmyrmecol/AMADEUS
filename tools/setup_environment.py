@@ -426,6 +426,7 @@ def install_amadeus_command() -> Path:
         command_path = command_dir / "amadeus.cmd"
         command_path.write_text(
             "@echo off\n"
+            'set "AMADEUS_LAUNCH_CWD=%CD%"\n'
             f'set "AMADEUS_ROOT={project_root}"\n'
             'if not exist "%AMADEUS_ROOT%\\.venv\\Scripts\\activate.bat" (\n'
             "    echo [ERROR] AMADEUS is not installed at %AMADEUS_ROOT%.\n"
@@ -439,7 +440,18 @@ def install_amadeus_command() -> Path:
             'set "AMADEUS_SPLASH_TOKEN=%RANDOM%%RANDOM%%RANDOM%"\n'
             'start "AMADEUS Splash" /min "%AMADEUS_ROOT%\\.venv\\Scripts\\python.exe" "%AMADEUS_ROOT%\\gui\\splash_standalone.py" "%AMADEUS_SPLASH_TOKEN%" "4"\n'
             '"%AMADEUS_ROOT%\\.venv\\Scripts\\amadeus.exe" %*\n'
-            "if errorlevel 1 exit /b 1\n"
+            'set "AMADEUS_GUI_EXIT=%ERRORLEVEL%"\n'
+            'if "%AMADEUS_GUI_EXIT%"=="42" (\n'
+            '    cd /d "%AMADEUS_LAUNCH_CWD%"\n'
+            "    echo [AMADEUS] Update accepted. The updater will restart AMADEUS automatically.\n"
+            "    exit /b 0\n"
+            ")\n"
+            'if "%AMADEUS_GUI_EXIT%"=="43" (\n'
+            '    cd /d "%AMADEUS_LAUNCH_CWD%"\n'
+            "    echo [AMADEUS] Uninstall accepted. A separate Command Prompt will remove AMADEUS.\n"
+            "    exit /b 0\n"
+            ")\n"
+            'if not "%AMADEUS_GUI_EXIT%"=="0" exit /b %AMADEUS_GUI_EXIT%\n'
             "echo [AMADEUS] The GUI has closed. The AMADEUS virtual environment is active.\n"
             'echo [AMADEUS] Type "amadeus" or "amade" for the home GUI.\n',
             encoding="utf-8",
@@ -458,7 +470,12 @@ def install_amadeus_command() -> Path:
     command_path.write_text(
         "#!/usr/bin/env sh\n"
         f"cd {shlex.quote(str(PROJECT_ROOT))}\n"
-        f"exec {shlex.quote(str(ENVIRONMENT_ROOT / 'bin' / 'amadeus'))} \"$@\"\n",
+        f"{shlex.quote(str(ENVIRONMENT_ROOT / 'bin' / 'amadeus'))} \"$@\"\n"
+        "status=$?\n"
+        "if [ \"$status\" -eq 42 ] || [ \"$status\" -eq 43 ]; then\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit \"$status\"\n",
         encoding="utf-8",
     )
     command_path.chmod(0o755)
