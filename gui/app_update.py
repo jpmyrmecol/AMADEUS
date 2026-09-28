@@ -22,7 +22,6 @@ try:
     from .project_paths import PROJECT_ROOT
     from .update_support import (
         acquire_update_lock,
-        find_other_amadeus_processes,
         release_update_lock,
         terminate_other_amadeus_processes,
         terminate_other_amadeus_processes,
@@ -31,7 +30,6 @@ except ImportError:  # Preserve direct execution with: python gui/gui_home.py
     from project_paths import PROJECT_ROOT
     from update_support import (
         acquire_update_lock,
-        find_other_amadeus_processes,
         release_update_lock,
     )
 
@@ -289,29 +287,13 @@ def start_update_check(
             finish()
             return
 
-        try:
-            running = find_other_amadeus_processes(
-                PROJECT_ROOT,
-                current_pid=os.getpid(),
-            )
-        except Exception:
-            running = []
-
-        running_note = (
-            f"\n\nDetected {len(running)} other AMADEUS process"
-            + ("" if len(running) == 1 else "es")
-            + "."
-            if running
-            else ""
-        )
         accepted = messagebox.askyesno(
             "AMADEUS Update",
             "A new version of AMADEUS is available.\n\n"
             f"{_version_label(current_version)} → {_version_label(latest_version)}\n\n"
             "Updating will close all other AMADEUS windows and stop any active "
             "tracking, training, segmentation, refinement, batch, or video-processing tasks. "
-            "In-progress work in those processes will be interrupted."
-            f"{running_note}\n\n"
+            "In-progress work in those processes will be interrupted.\n\n"
             "Stop all running AMADEUS processes and update now?",
             parent=root,
             default=messagebox.NO,
