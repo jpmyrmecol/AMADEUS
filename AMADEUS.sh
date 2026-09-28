@@ -201,6 +201,10 @@ if (( status == 42 )); then
     echo "[AMADEUS] Update accepted. The updater will restart AMADEUS automatically."
     exit 0
 fi
+if (( status == 43 )); then
+    echo "[AMADEUS] Uninstall accepted. A separate terminal will remove AMADEUS."
+    exit 0
+fi
 if (( status != 0 )); then
     echo "[ERROR] AMADEUS exited with an error." >&2
     exit "$status"
