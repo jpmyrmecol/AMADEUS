@@ -1,6 +1,7 @@
 # Copyright (C) 2026 Yusuke Notomi
 # SPDX-License-Identifier: AGPL-3.0-only
 
+import math
 import os
 import subprocess
 import sys
@@ -338,7 +339,7 @@ def build_home(root: ctk.CTk) -> None:
         },
         "update": {
             "text": "Update", "hover": False, "shape_id": None, "text_id": None,
-            "available": False, "pulse_on": False, "pulse_job": None,
+            "available": False, "pulse_started_at": 0.0, "pulse_job": None,
         },
     }
 
@@ -350,9 +351,17 @@ def build_home(root: ctk.CTk) -> None:
 
     def corner_fill(name: str, state: dict) -> str:
         if state["hover"]:
-            return ACCENT_RED_ORANGE
+            return ACCENT_BLUE if name == "update" else ACCENT_RED_ORANGE
         if name == "update" and state.get("available", False):
-            return ACCENT_RED_ORANGE if state.get("pulse_on", False) else "#6b2414"
+            started = float(state.get("pulse_started_at", 0.0)) or time.monotonic()
+            # Slow cosine easing gives a soft "breathing" notification rather
+            # than a binary blink. One full breath takes about 2.6 seconds.
+            phase = ((time.monotonic() - started) % 2.6) / 2.6
+            eased = 0.5 - 0.5 * math.cos(phase * 2.0 * math.pi)
+            amount = 0.24 + 0.62 * eased
+            return _rgb_to_hex(
+                _mix_rgb(_hex_to_rgb("#101b28"), _hex_to_rgb(ACCENT_BLUE), amount)
+            )
         return "#181818"
 
     def draw_corner_buttons(_event=None) -> None:
@@ -407,18 +416,19 @@ def build_home(root: ctk.CTk) -> None:
         state = corner_buttons["update"]
         state["pulse_job"] = None
         if not state.get("available", False):
-            state["pulse_on"] = False
             if state["shape_id"] is not None and not state["hover"]:
                 easy_panel.itemconfigure(state["shape_id"], fill="#181818")
             return
-        state["pulse_on"] = not state.get("pulse_on", False)
         if state["shape_id"] is not None and not state["hover"]:
             easy_panel.itemconfigure(state["shape_id"], fill=corner_fill("update", state))
-        state["pulse_job"] = root.after(550, pulse_update_button)
+        # ~30 fps is smooth enough for a subtle button fade without adding
+        # noticeable work to the otherwise static Home window.
+        state["pulse_job"] = root.after(34, pulse_update_button)
 
     def mark_update_available(latest_version: str) -> None:
         state = corner_buttons["update"]
         state["available"] = True
+        state["pulse_started_at"] = time.monotonic()
         state["text"] = "Update!"
         if state["text_id"] is not None:
             easy_panel.itemconfigure(state["text_id"], text=state["text"])
