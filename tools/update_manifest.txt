@@ -80,6 +80,7 @@ main/variable_population.py
 main/video_compat.py
 main/video_encoders.py
 main/video_frame_count.py
+main/version_info.py
 main/weight_utils.py
 main/without_direction_estimation/README.md
 main/without_direction_estimation/__init__.py

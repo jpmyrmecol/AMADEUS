@@ -72,6 +72,18 @@ def _fetch_latest_version() -> str:
     return version
 
 
+def probe_update_status() -> tuple[str, str, bool]:
+    """Return installed version, latest version and whether an update is available.
+
+    This is intentionally silent so Home can probe in the background without
+    showing an error dialog when the machine is offline.
+    """
+    current_version = (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    current_tuple = _version_tuple(current_version)
+    latest_version = _fetch_latest_version()
+    return current_version, latest_version, _version_tuple(latest_version) > current_tuple
+
+
 def _download_archive(archive_path: Path) -> None:
     with urllib.request.urlopen(_request(ARCHIVE_URL), timeout=REQUEST_TIMEOUT_SECONDS) as response:
         content_length = response.headers.get("Content-Length")

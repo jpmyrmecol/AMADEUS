@@ -103,20 +103,14 @@ def query_nvidia_driver_info() -> tuple[str, str, str] | None:
     return None
 
 
-def query_nvidia_smi(device) -> tuple[float | None, float | None, float | None]:
-    """Return (gpu_util_percent, vram_used_gib, vram_total_gib)."""
-    runtime = runtime_for(device)
-    if runtime.capabilities.telemetry != "nvidia":
-        return None, None, None
-    idx = runtime.index
-    if idx is None:
-        return None, None, None
+def query_nvidia_smi_index(logical_index: int = 0) -> tuple[float | None, float | None, float | None]:
+    """Return NVIDIA utilization/VRAM for a logical CUDA index without importing torch."""
     for executable in nvidia_smi_candidates():
         try:
             out = subprocess.check_output(
                 [
                     executable,
-                    f"--id={_nvidia_smi_id(idx)}",
+                    f"--id={_nvidia_smi_id(int(logical_index))}",
                     "--query-gpu=utilization.gpu,memory.used,memory.total",
                     "--format=csv,noheader,nounits",
                 ],
@@ -132,6 +126,17 @@ def query_nvidia_smi(device) -> tuple[float | None, float | None, float | None]:
         except Exception:
             continue
     return None, None, None
+
+
+def query_nvidia_smi(device) -> tuple[float | None, float | None, float | None]:
+    """Return (gpu_util_percent, vram_used_gib, vram_total_gib)."""
+    runtime = runtime_for(device)
+    if runtime.capabilities.telemetry != "nvidia":
+        return None, None, None
+    idx = runtime.index
+    if idx is None:
+        return None, None, None
+    return query_nvidia_smi_index(idx)
 
 
 def query_wddm_non_local_usage(pid: int | None = None, device=None) -> float | None:

@@ -36,6 +36,7 @@ from experiment_utils import (
 )
 from path_utils import resolve_config_paths
 from random_utils import normalize_seed
+from version_info import check_version_status, version_label
 from main.compact_log import CompactChildOutput, GuiProgressPassthrough
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -130,9 +131,16 @@ def _begin_logging(config_path: str) -> str:
         _CONSOLE_STDERR = sys.stderr
     _ARCHIVE_LOG_PATH = log_path
     _ARCHIVE_LOG = open(log_path, "a", encoding="utf-8", buffering=1)
-    separator = f"=== AMADEUS RUN START {_iso_timestamp()} PID={os.getpid()} ===\n"
+    version_status = check_version_status(timeout=2.0)
+    separator = (
+        f"=== AMADEUS {version_label(version_status.current)} RUN START "
+        f"{_iso_timestamp()} PID={os.getpid()} ===\n"
+    )
     _write_archive(separator)
     header = [
+        f"amadeus_version={version_status.current}",
+        f"latest_version={version_status.latest or 'unavailable'}",
+        f"update_status={version_status.state}",
         f"python_executable={sys.executable}",
         f"python_version={sys.version.split()[0]}",
         f"platform={platform.platform()}",
@@ -147,6 +155,23 @@ def _begin_logging(config_path: str) -> str:
     _write_archive("[RUN HEADER] " + "\n[RUN HEADER] ".join(header) + "\n")
     sys.stdout = TeeStream(_CONSOLE_STDOUT, _ARCHIVE_LOG)
     sys.stderr = TeeStream(_CONSOLE_STDERR, _ARCHIVE_LOG)
+    print(f"[AMADEUS] Version: {version_label(version_status.current)}", flush=True)
+    if version_status.latest is None:
+        print("[AMADEUS] Latest version: unavailable (offline or update check failed)", flush=True)
+    elif version_status.update_available:
+        print(
+            f"[AMADEUS] Update available: {version_label(version_status.current)} "
+            f"-> {version_label(version_status.latest)}",
+            flush=True,
+        )
+    elif version_status.state == "up_to_date":
+        print(f"[AMADEUS] Latest version: {version_label(version_status.latest)} (up to date)", flush=True)
+    else:
+        print(
+            f"[AMADEUS] Latest version: {version_label(version_status.latest)} "
+            "(installed version is newer)",
+            flush=True,
+        )
     print(f"Saving CLI log to: {log_path}", flush=True)
     return log_path
 

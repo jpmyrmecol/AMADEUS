@@ -17,6 +17,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
+import psutil
 import yaml
 
 try:
@@ -144,6 +145,7 @@ CTK_THEME = str(gui_asset("deep_green.json"))
 
 if MAIN_DIR not in sys.path:
     sys.path.insert(0, MAIN_DIR)
+from compute_telemetry import query_nvidia_smi_index
 from experiment_utils import DEFAULT_LR0, DEFAULT_LRF
 from path_utils import relativize_config_paths
 from segmentation_metadata import (
@@ -289,6 +291,9 @@ class EasyTrackingGUI(ctk.CTk):
         self._batch_losses: list[float] = []   # live per-batch box_loss from YOLO training
         self._refine_losses: list[float] = []  # live per-batch box_loss from direction_class_filtering
         self._reset_training_progress()
+        self._system_monitor_snapshot: dict[str, float | str | None] = {}
+        self._system_monitor_stop = threading.Event()
+        self._system_monitor_thread: threading.Thread | None = None
 
         self._build_ui()
         self._set_skip_flags(self._default_skip_flags(), render=True)
@@ -772,11 +777,14 @@ class EasyTrackingGUI(ctk.CTk):
         self, canvas: tk.Canvas, values: list, title: str,
         x_label: str, color: str,
         y_offset: int = 0, panel_height: int = 0,
+        x_offset: int = 0, panel_width: int = 0,
     ) -> None:
-        cw = max(canvas.winfo_width(), 100)
+        full_width = max(canvas.winfo_width(), 100)
+        cw = panel_width or full_width
         ph = panel_height or max(canvas.winfo_height(), 100)
 
-        ml, mr, mt, mb = 54, 8, 22, 30
+        ml, mr, mt, mb = 54, 8, 22, 26
+        plot_left = x_offset + ml
         pw = cw - ml - mr
         ph_inner = ph - mt - mb
 
@@ -789,41 +797,47 @@ class EasyTrackingGUI(ctk.CTk):
         n = len(values)
 
         def px(i: int) -> int:
-            return ml + int(i / max(n - 1, 1) * pw)
+            return plot_left + int(i / max(n - 1, 1) * pw)
 
         def py(v: float) -> int:
             return y_offset + mt + int((1 - (v - min_v) / rng) * ph_inner)
 
-        # background
-        canvas.create_rectangle(0, y_offset, cw, y_offset + ph,
-                                 fill="#1a1a1a", outline="")
-        # title
-        canvas.create_text(cw // 2, y_offset + 11, text=title,
-                            fill="#cccccc", font=("TkDefaultFont", 9, "bold"), anchor="center")
-        # horizontal grid + y-axis labels
+        canvas.create_rectangle(
+            x_offset, y_offset, x_offset + cw, y_offset + ph,
+            fill="#1a1a1a", outline="",
+        )
+        canvas.create_text(
+            x_offset + cw // 2, y_offset + 11, text=title,
+            fill="#cccccc", font=("TkDefaultFont", 9, "bold"), anchor="center",
+        )
+
         for frac in (0.0, 0.5, 1.0):
             v = min_v + frac * rng
             y = py(v)
-            canvas.create_line(ml, y, ml + pw, y, fill="#272727", dash=(3, 5))
+            canvas.create_line(plot_left, y, plot_left + pw, y, fill="#272727", dash=(3, 5))
             lbl = f"{v:.4g}" if abs(v) < 1e4 else f"{v:.2e}"
-            canvas.create_text(ml - 3, y, text=lbl,
-                                fill="#666", font=("TkDefaultFont", 7), anchor="e")
-        # axes
-        canvas.create_line(ml, y_offset + mt, ml, y_offset + mt + ph_inner,
-                            fill="#555", width=1)
-        canvas.create_line(ml, y_offset + mt + ph_inner,
-                            ml + pw, y_offset + mt + ph_inner,
-                            fill="#555", width=1)
-        # x-axis labels
-        canvas.create_text(ml, y_offset + mt + ph_inner + 8, text="0",
-                            fill="#666", font=("TkDefaultFont", 7), anchor="n")
-        canvas.create_text(ml + pw, y_offset + mt + ph_inner + 8, text=str(n - 1),
-                            fill="#666", font=("TkDefaultFont", 7), anchor="n")
+            canvas.create_text(
+                plot_left - 3, y, text=lbl,
+                fill="#666", font=("TkDefaultFont", 7), anchor="e",
+            )
+
+        axis_y = y_offset + mt + ph_inner
+        canvas.create_line(plot_left, y_offset + mt, plot_left, axis_y, fill="#555", width=1)
+        canvas.create_line(plot_left, axis_y, plot_left + pw, axis_y, fill="#555", width=1)
+        canvas.create_text(
+            plot_left, axis_y + 4, text="0",
+            fill="#666", font=("TkDefaultFont", 7), anchor="n",
+        )
+        canvas.create_text(
+            plot_left + pw, axis_y + 4, text=str(n - 1),
+            fill="#666", font=("TkDefaultFont", 7), anchor="n",
+        )
         if x_label:
-            canvas.create_text(ml + pw // 2, y_offset + mt + ph_inner + 20,
-                                text=x_label, fill="#888",
-                                font=("TkDefaultFont", 7), anchor="n")
-        # data line
+            canvas.create_text(
+                plot_left + pw // 2, axis_y + 14,
+                text=x_label, fill="#888", font=("TkDefaultFont", 7), anchor="n",
+            )
+
         if n >= 2:
             pts = []
             for i, v in enumerate(values):
@@ -832,19 +846,21 @@ class EasyTrackingGUI(ctk.CTk):
             canvas.create_line(pts, fill=color, width=3, smooth=True)
         elif n == 1:
             x0, y0 = px(0), py(values[0])
-            canvas.create_oval(x0 - 3, y0 - 3, x0 + 3, y0 + 3,
-                                fill=color, outline="")
+            canvas.create_oval(x0 - 3, y0 - 3, x0 + 3, y0 + 3, fill=color, outline="")
 
     def _render_multi_line_chart(
         self, canvas: tk.Canvas, series: list, title: str,
         x_label: str = "",
         y_offset: int = 0, panel_height: int = 0,
+        subtitle: str = "",
     ) -> None:
         """Draw multiple series on the same axes. series: [(values, color, label), ...]"""
         cw = max(canvas.winfo_width(), 100)
         ph = panel_height or max(canvas.winfo_height(), 100)
 
-        ml, mr, mt, mb = 54, 8, 22, 30
+        ml, mr = 54, 8
+        mt = 34 if subtitle else 22
+        mb = 26
         pw = cw - ml - mr
         ph_inner = ph - mt - mb
 
@@ -865,8 +881,15 @@ class EasyTrackingGUI(ctk.CTk):
             return y_offset + mt + int((1 - (v - min_v) / rng) * ph_inner)
 
         canvas.create_rectangle(0, y_offset, cw, y_offset + ph, fill="#1a1a1a", outline="")
-        canvas.create_text(cw // 2, y_offset + 11, text=title,
-                           fill="#cccccc", font=("TkDefaultFont", 9, "bold"), anchor="center")
+        canvas.create_text(
+            cw // 2, y_offset + 11, text=title,
+            fill="#cccccc", font=("TkDefaultFont", 9, "bold"), anchor="center",
+        )
+        if subtitle:
+            canvas.create_text(
+                cw // 2, y_offset + 24, text=subtitle,
+                fill="#777777", font=("TkDefaultFont", 7), anchor="center",
+            )
 
         for frac in (0.0, 0.5, 1.0):
             v = min_v + frac * rng
@@ -875,16 +898,19 @@ class EasyTrackingGUI(ctk.CTk):
             lbl = f"{v:.4g}" if abs(v) < 1e4 else f"{v:.2e}"
             canvas.create_text(ml - 3, y, text=lbl, fill="#666", font=("TkDefaultFont", 7), anchor="e")
 
-        canvas.create_line(ml, y_offset + mt, ml, y_offset + mt + ph_inner, fill="#555", width=1)
-        canvas.create_line(ml, y_offset + mt + ph_inner,
-                           ml + pw, y_offset + mt + ph_inner, fill="#555", width=1)
-        canvas.create_text(ml, y_offset + mt + ph_inner + 8, text="0",
-                           fill="#666", font=("TkDefaultFont", 7), anchor="n")
-        canvas.create_text(ml + pw, y_offset + mt + ph_inner + 8, text=str(n_max - 1),
-                           fill="#666", font=("TkDefaultFont", 7), anchor="n")
+        axis_y = y_offset + mt + ph_inner
+        canvas.create_line(ml, y_offset + mt, ml, axis_y, fill="#555", width=1)
+        canvas.create_line(ml, axis_y, ml + pw, axis_y, fill="#555", width=1)
+        canvas.create_text(ml, axis_y + 4, text="0", fill="#666", font=("TkDefaultFont", 7), anchor="n")
+        canvas.create_text(
+            ml + pw, axis_y + 4, text=str(n_max - 1),
+            fill="#666", font=("TkDefaultFont", 7), anchor="n",
+        )
         if x_label:
-            canvas.create_text(ml + pw // 2, y_offset + mt + ph_inner + 20,
-                                text=x_label, fill="#888", font=("TkDefaultFont", 7), anchor="n")
+            canvas.create_text(
+                ml + pw // 2, axis_y + 14,
+                text=x_label, fill="#888", font=("TkDefaultFont", 7), anchor="n",
+            )
 
         for vals, color, label in valid_series:
             n = len(vals)
@@ -898,15 +924,16 @@ class EasyTrackingGUI(ctk.CTk):
                 x0, y0 = px(0, 1), py(vals[0])
                 canvas.create_oval(x0 - 3, y0 - 3, x0 + 3, y0 + 3, fill=color, outline="")
 
-        # Legend (top-right inside plot area)
         ly = y_offset + mt + 8
         for vals, color, label in valid_series:
             if not vals:
                 continue
             lx = ml + pw - 4
             canvas.create_line(lx - 18, ly + 4, lx - 4, ly + 4, fill=color, width=3)
-            canvas.create_text(lx - 22, ly + 4, text=label, fill=color,
-                               font=("TkDefaultFont", 7), anchor="e")
+            canvas.create_text(
+                lx - 22, ly + 4, text=label, fill=color,
+                font=("TkDefaultFont", 7), anchor="e",
+            )
             ly += 14
 
     def _render_dual_chart(self, data: dict) -> None:
@@ -951,19 +978,92 @@ class EasyTrackingGUI(ctk.CTk):
         y_offset: int,
         panel_height: int,
         msg: str = "",
+        *,
+        x_offset: int = 0,
+        panel_width: int = 0,
     ) -> None:
-        cw = max(canvas.winfo_width(), 100)
+        full_width = max(canvas.winfo_width(), 100)
+        cw = panel_width or full_width
         ph = max(panel_height, 50)
-        canvas.create_rectangle(0, y_offset, cw, y_offset + ph, fill="#1a1a1a", outline="")
-        canvas.create_text(cw // 2, y_offset + 11, text=title,
-                           fill="#cccccc", font=("TkDefaultFont", 9, "bold"), anchor="center")
+        canvas.create_rectangle(
+            x_offset, y_offset, x_offset + cw, y_offset + ph,
+            fill="#1a1a1a", outline="",
+        )
+        canvas.create_text(
+            x_offset + cw // 2, y_offset + 11, text=title,
+            fill="#cccccc", font=("TkDefaultFont", 9, "bold"), anchor="center",
+        )
         if msg:
-            canvas.create_text(cw // 2, y_offset + ph // 2, text=msg,
-                               fill="#555555", font=("TkDefaultFont", 9),
-                               justify="center", width=max(80, cw - 40), anchor="center")
+            canvas.create_text(
+                x_offset + cw // 2, y_offset + ph // 2, text=msg,
+                fill="#555555", font=("TkDefaultFont", 9),
+                justify="center", width=max(80, cw - 24), anchor="center",
+            )
+
+    def _render_system_monitor(
+        self,
+        canvas: tk.Canvas,
+        *,
+        x_offset: int,
+        y_offset: int,
+        panel_width: int,
+        panel_height: int,
+    ) -> None:
+        snapshot = dict(self._system_monitor_snapshot)
+        canvas.create_rectangle(
+            x_offset, y_offset, x_offset + panel_width, y_offset + panel_height,
+            fill="#171717", outline="",
+        )
+        canvas.create_text(
+            x_offset + panel_width // 2, y_offset + 11,
+            text="System Monitor", fill="#cccccc",
+            font=("TkDefaultFont", 9, "bold"), anchor="center",
+        )
+
+        def gib_text(used, total) -> str:
+            if used is None:
+                return "n/a"
+            if total:
+                return f"{used:.1f}/{total:.1f} GiB"
+            return f"{used:.1f} GiB"
+
+        if not snapshot:
+            canvas.create_text(
+                x_offset + panel_width // 2,
+                y_offset + panel_height // 2,
+                text="Waiting for metrics...",
+                fill="#555555", font=("TkDefaultFont", 8),
+                width=max(60, panel_width - 18), justify="center",
+            )
+            return
+
+        gpu_util = snapshot.get("gpu_util")
+        lines = [
+            f"GPU  {gpu_util:.0f}%" if isinstance(gpu_util, (int, float)) else "GPU  n/a",
+            f"VRAM  {gib_text(snapshot.get('vram_used'), snapshot.get('vram_total'))}",
+            f"CPU  {snapshot.get('cpu', 0.0):.0f}%",
+            f"RAM  {gib_text(snapshot.get('ram_used'), snapshot.get('ram_total'))}",
+            f"Swap  {gib_text(snapshot.get('swap_used'), snapshot.get('swap_total'))}",
+        ]
+        if snapshot.get("backend"):
+            lines.insert(0, str(snapshot["backend"]))
+
+        start_y = y_offset + 34
+        available_h = max(20, panel_height - 42)
+        step = max(15, min(22, available_h // max(1, len(lines))))
+        for index, line in enumerate(lines):
+            canvas.create_text(
+                x_offset + 10,
+                start_y + index * step,
+                text=line,
+                fill="#9a9a9a" if index else "#bbbbbb",
+                font=("TkDefaultFont", 7 if panel_width < 170 else 8),
+                anchor="nw",
+                width=max(50, panel_width - 16),
+            )
 
     def _render_training_monitor(self, data: dict) -> None:
-        """Two stacked charts: YOLO loss (top) + weighted mAP fitness (bottom)."""
+        """Training view: full-width loss above 3:1 mAP fitness/system monitor."""
         self._canvas_content = {"type": "training_monitor", "data": data}
         c = self._display_canvas
         c.delete("all")
@@ -979,33 +1079,53 @@ class EasyTrackingGUI(ctk.CTk):
             self._render_multi_line_chart(
                 c,
                 loss_series,
-                data.get("loss_title", "Direction Model: Training Loss"),
+                "Loss",
                 data.get("loss_x_label", ""),
                 y_offset=0,
                 panel_height=half,
+                subtitle="Lower and leveling off is generally a good sign.",
             )
         else:
-            self._render_empty_chart_panel(c, "Direction Model: Training Loss", 0, half)
+            self._render_empty_chart_panel(
+                c, "Loss", 0, half,
+                "Lower and leveling off is generally a good sign.",
+            )
 
         c.create_line(0, half, cw, half, fill="#2d2d2d", width=1)
+        fitness_width = max(1, int(round(cw * 0.75)))
+        monitor_width = max(1, cw - fitness_width)
+
         if fitness:
             self._render_line_chart(
                 c,
                 fitness,
-                "Weighted mAP Fitness",
+                "mAP Fitness",
                 "epoch",
                 "#4dbbd5",
                 y_offset=half,
                 panel_height=ch - half,
+                x_offset=0,
+                panel_width=fitness_width,
             )
         else:
             self._render_empty_chart_panel(
                 c,
-                "Weighted mAP Fitness",
+                "mAP Fitness",
                 half,
                 ch - half,
                 "Waiting for first epoch mAP",
+                x_offset=0,
+                panel_width=fitness_width,
             )
+
+        c.create_line(fitness_width, half, fitness_width, ch, fill="#2d2d2d", width=1)
+        self._render_system_monitor(
+            c,
+            x_offset=fitness_width,
+            y_offset=half,
+            panel_width=monitor_width,
+            panel_height=ch - half,
+        )
 
     # Data readers
 
@@ -1225,7 +1345,7 @@ class EasyTrackingGUI(ctk.CTk):
             self._draw_training_monitor(
                 {
                     "loss_series": [(self._batch_losses, "#1f8040", "train")],
-                    "loss_title": "Direction Model: Training Loss (batch)",
+                    "loss_title": "Loss",
                     "loss_x_label": "batch",
                     "fitness": fitness,
                 }
@@ -1251,7 +1371,7 @@ class EasyTrackingGUI(ctk.CTk):
             self._draw_training_monitor(
                 {
                     "loss_series": series,
-                    "loss_title": "Direction Model: Training Loss",
+                    "loss_title": "Loss",
                     "loss_x_label": "epoch",
                     "fitness": fitness,
                 }
@@ -1351,6 +1471,52 @@ class EasyTrackingGUI(ctk.CTk):
                     self._canvas_status.configure(text=f"Running: {label}")
 
     # Polling
+
+    def _stop_system_monitor(self) -> None:
+        stop = getattr(self, "_system_monitor_stop", None)
+        if stop is not None:
+            stop.set()
+        self._system_monitor_thread = None
+
+    def _start_system_monitor(self) -> None:
+        self._stop_system_monitor()
+        self._system_monitor_stop = threading.Event()
+        stop = self._system_monitor_stop
+        self._system_monitor_snapshot = {}
+
+        def worker() -> None:
+            psutil.cpu_percent(interval=None)
+            while not stop.is_set():
+                if self._batch_proc is None:
+                    break
+                if self._active_step != 7:
+                    if stop.wait(0.5):
+                        break
+                    continue
+
+                vm = psutil.virtual_memory()
+                swap = psutil.swap_memory()
+                gpu_util, vram_used, vram_total = query_nvidia_smi_index(0)
+                self._system_monitor_snapshot = {
+                    "backend": self._training_backend_label or "System",
+                    "gpu_util": gpu_util,
+                    "vram_used": vram_used,
+                    "vram_total": vram_total,
+                    "cpu": psutil.cpu_percent(interval=None),
+                    "ram_used": vm.used / (1024.0 ** 3),
+                    "ram_total": vm.total / (1024.0 ** 3),
+                    "swap_used": swap.used / (1024.0 ** 3),
+                    "swap_total": swap.total / (1024.0 ** 3),
+                }
+                if stop.wait(1.0):
+                    break
+
+        self._system_monitor_thread = threading.Thread(
+            target=worker,
+            name="AMADEUS Easy Tracking system monitor",
+            daemon=True,
+        )
+        self._system_monitor_thread.start()
 
     def _canvas_poll(self) -> None:
         """Check for new visual content while the batch runs."""
@@ -2274,6 +2440,7 @@ class EasyTrackingGUI(ctk.CTk):
             env=env,
             **kw,
         )
+        self._start_system_monitor()
         threading.Thread(target=self._monitor_batch, daemon=True).start()
 
     def _echo_tqdm_line(self, line: str, previous_len: int) -> int:
@@ -2454,6 +2621,7 @@ class EasyTrackingGUI(ctk.CTk):
                 pass
             self._canvas_poll_id = None
 
+        self._stop_system_monitor()
         self._batch_proc = None
         self._active_step = -1
         self._active_block_vis = -1

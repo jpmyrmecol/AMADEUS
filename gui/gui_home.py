@@ -4,6 +4,7 @@
 import os
 import subprocess
 import sys
+import threading
 import time
 import tkinter as tk
 import uuid
@@ -16,13 +17,13 @@ from PIL import Image, ImageTk
 import customtkinter as ctk
 
 try:
-    from .app_update import start_update_check
+    from .app_update import probe_update_status, start_update_check
     from .project_paths import PROJECT_ROOT, gui_asset, gui_script
     from .splash_ipc import TOKEN_ENV_VAR, external_started_at, signal_stop
     from .splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
 except ImportError:  # Preserve direct execution with: python gui/gui_home.py
-    from app_update import start_update_check
+    from app_update import probe_update_status, start_update_check
     from project_paths import PROJECT_ROOT, gui_asset, gui_script
     from splash_ipc import TOKEN_ENV_VAR, external_started_at, signal_stop
     from splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
@@ -332,8 +333,13 @@ def build_home(root: ctk.CTk) -> None:
     easy_panel.grid(row=0, column=0, columnspan=6, sticky="nsew")
 
     corner_buttons = {
-        "help": {"text": "Help", "hover": False, "shape_id": None, "text_id": None},
-        "update": {"text": "Update", "hover": False, "shape_id": None, "text_id": None},
+        "help": {
+            "text": "Help", "hover": False, "shape_id": None, "text_id": None,
+        },
+        "update": {
+            "text": "Update", "hover": False, "shape_id": None, "text_id": None,
+            "available": False, "pulse_on": False, "pulse_job": None,
+        },
     }
 
     def corner_bounds(name: str) -> tuple[int, int, int, int]:
@@ -341,6 +347,13 @@ def build_home(root: ctk.CTk) -> None:
         x1, y0 = easy_panel.winfo_width() - 24, 24 + index * 38
         x0, y1 = x1 - 96, y0 + 30
         return x0, y0, x1, y1
+
+    def corner_fill(name: str, state: dict) -> str:
+        if state["hover"]:
+            return ACCENT_RED_ORANGE
+        if name == "update" and state.get("available", False):
+            return ACCENT_RED_ORANGE if state.get("pulse_on", False) else "#6b2414"
+        return "#181818"
 
     def draw_corner_buttons(_event=None) -> None:
         radius = 8
@@ -351,7 +364,7 @@ def build_home(root: ctk.CTk) -> None:
                 x1, y1 - radius, x1, y1, x1 - radius, y1, x0 + radius, y1,
                 x0, y1, x0, y1 - radius, x0, y0 + radius, x0, y0,
             ]
-            fill = ACCENT_RED_ORANGE if state["hover"] else "#181818"
+            fill = corner_fill(name, state)
 
             if state["shape_id"] is None:
                 state["shape_id"] = easy_panel.create_polygon(
@@ -382,16 +395,48 @@ def build_home(root: ctk.CTk) -> None:
             return
         state["hover"] = value
         if state["shape_id"] is not None:
-            easy_panel.itemconfigure(
-                state["shape_id"],
-                fill=ACCENT_RED_ORANGE if value else "#181818",
-            )
+            easy_panel.itemconfigure(state["shape_id"], fill=corner_fill(name, state))
 
     def set_update_caption(text: str) -> None:
         state = corner_buttons["update"]
         state["text"] = text
         if state["text_id"] is not None:
             easy_panel.itemconfigure(state["text_id"], text=text)
+
+    def pulse_update_button() -> None:
+        state = corner_buttons["update"]
+        state["pulse_job"] = None
+        if not state.get("available", False):
+            state["pulse_on"] = False
+            if state["shape_id"] is not None and not state["hover"]:
+                easy_panel.itemconfigure(state["shape_id"], fill="#181818")
+            return
+        state["pulse_on"] = not state.get("pulse_on", False)
+        if state["shape_id"] is not None and not state["hover"]:
+            easy_panel.itemconfigure(state["shape_id"], fill=corner_fill("update", state))
+        state["pulse_job"] = root.after(550, pulse_update_button)
+
+    def mark_update_available(latest_version: str) -> None:
+        state = corner_buttons["update"]
+        state["available"] = True
+        state["text"] = "Update!"
+        if state["text_id"] is not None:
+            easy_panel.itemconfigure(state["text_id"], text=state["text"])
+        if state.get("pulse_job") is None:
+            pulse_update_button()
+        root.title(f"{home_window_title()}  ·  update {latest_version} available")
+
+    def probe_updates_in_background() -> None:
+        try:
+            _current, latest, available = probe_update_status()
+        except Exception:
+            return
+        if not available:
+            return
+        try:
+            root.after(0, lambda latest=latest: mark_update_available(latest))
+        except tk.TclError:
+            pass
 
     def corner_motion(event) -> None:
         for name in corner_buttons:
@@ -422,6 +467,11 @@ def build_home(root: ctk.CTk) -> None:
     easy_panel.bind("<Button-1>", corner_click)
     easy_panel.bind("<Configure>", draw_corner_buttons, add="+")
     easy_panel.after_idle(draw_corner_buttons)
+    threading.Thread(
+        target=probe_updates_in_background,
+        name="AMADEUS Home update probe",
+        daemon=True,
+    ).start()
     root.bind("<F1>", lambda e: open_manual("EN"))
 
     lower_panels = (
