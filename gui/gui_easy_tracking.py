@@ -955,7 +955,7 @@ class EasyTrackingGUI(ctk.CTk):
             self._render_line_chart(c, ss_vals, "Silhouette Score",
                                     "batch", "#1f8040", y_offset=half, panel_height=half)
             # Target line at 0.91
-            ml, mt, mb = 54, 22, 30
+            ml, mt, mb = 54, 22, 26
             ph_inner = half - mt - mb
             min_ss = min(ss_vals + [0.0])
             max_ss = max(ss_vals + [0.95])
@@ -1083,12 +1083,12 @@ class EasyTrackingGUI(ctk.CTk):
                 data.get("loss_x_label", ""),
                 y_offset=0,
                 panel_height=half,
-                subtitle="Lower and leveling off is generally a good sign.",
+                subtitle="A decreasing loss that levels off is generally a good sign.",
             )
         else:
             self._render_empty_chart_panel(
                 c, "Loss", 0, half,
-                "Lower and leveling off is generally a good sign.",
+                "A decreasing loss that levels off is generally a good sign.",
             )
 
         c.create_line(0, half, cw, half, fill="#2d2d2d", width=1)
@@ -1484,6 +1484,11 @@ class EasyTrackingGUI(ctk.CTk):
         stop = self._system_monitor_stop
         self._system_monitor_snapshot = {}
 
+        training_cfg = self._base_cfg.get("training", {})
+        device_text = str(training_cfg.get("DEVICE", "auto"))
+        device_match = re.search(r"\d+", device_text)
+        logical_gpu_index = int(device_match.group(0)) if device_match else 0
+
         def worker() -> None:
             psutil.cpu_percent(interval=None)
             while not stop.is_set():
@@ -1496,9 +1501,12 @@ class EasyTrackingGUI(ctk.CTk):
 
                 vm = psutil.virtual_memory()
                 swap = psutil.swap_memory()
-                gpu_util, vram_used, vram_total = query_nvidia_smi_index(0)
+                if self._training_backend_label in {"", "NVIDIA CUDA"}:
+                    gpu_util, vram_used, vram_total = query_nvidia_smi_index(logical_gpu_index)
+                else:
+                    gpu_util, vram_used, vram_total = None, None, None
                 self._system_monitor_snapshot = {
-                    "backend": self._training_backend_label or "System",
+                    "backend": self._training_backend_label or "Detecting backend...",
                     "gpu_util": gpu_util,
                     "vram_used": vram_used,
                     "vram_total": vram_total,
