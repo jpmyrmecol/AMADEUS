@@ -122,8 +122,6 @@ tools/ffmpeg_runtime.py
 tools/macos_python.sh
 tools/runtime_profiles.py
 tools/setup_environment.py
-tools/uninstall.bat
-tools/uninstall_environment.ps1
 tools/update_manifest.txt
 tools/update_worker.py
 tools/uv_bootstrap.ps1
