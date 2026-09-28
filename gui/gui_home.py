@@ -467,11 +467,17 @@ def build_home(root: ctk.CTk) -> None:
     easy_panel.bind("<Button-1>", corner_click)
     easy_panel.bind("<Configure>", draw_corner_buttons, add="+")
     easy_panel.after_idle(draw_corner_buttons)
-    threading.Thread(
-        target=probe_updates_in_background,
-        name="AMADEUS Home update probe",
-        daemon=True,
-    ).start()
+
+    def start_update_probe() -> None:
+        threading.Thread(
+            target=probe_updates_in_background,
+            name="AMADEUS Home update probe",
+            daemon=True,
+        ).start()
+
+    # Start only after Tk enters its event loop so the worker can safely
+    # schedule the UI update back onto the main thread.
+    root.after(100, start_update_probe)
     root.bind("<F1>", lambda e: open_manual("EN"))
 
     lower_panels = (
