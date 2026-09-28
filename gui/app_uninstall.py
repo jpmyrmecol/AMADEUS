@@ -102,11 +102,11 @@ def _write_external_uninstaller() -> Path:
                     raise RuntimeError("Target folder is not an AMADEUS installation.")
                 return root
 
-            def _windows_command_dir() -> Path:
+            def _windows_amadeus_dir() -> Path:
                 local_app_data = Path(
                     os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
                 )
-                return (local_app_data / "AMADEUS" / "bin").resolve()
+                return (local_app_data / "AMADEUS").resolve()
 
             def _remove_windows_user_path(command_dir: Path) -> None:
                 import winreg
@@ -165,12 +165,13 @@ def _write_external_uninstaller() -> Path:
 
             def cleanup_external_commands() -> None:
                 if os.name == "nt":
-                    command_dir = _windows_command_dir()
+                    amadeus_dir = _windows_amadeus_dir()
+                    command_dir = amadeus_dir / "bin"
                     _remove_windows_user_path(command_dir)
                     last_error = None
                     for _ in range(30):
                         try:
-                            shutil.rmtree(command_dir)
+                            shutil.rmtree(amadeus_dir)
                         except FileNotFoundError:
                             last_error = None
                             break
@@ -180,17 +181,15 @@ def _write_external_uninstaller() -> Path:
                             continue
                         last_error = None
                         break
-                    if command_dir.exists():
+                    if amadeus_dir.exists():
                         raise RuntimeError(
-                            f"Could not remove the AMADEUS command directory: "
-                            f"{command_dir} ({last_error})"
+                            f"Could not remove the AMADEUS local application directory: "
+                            f"{amadeus_dir} ({last_error})"
                         )
-                    parent = command_dir.parent
-                    try:
-                        parent.rmdir()
-                    except OSError:
-                        pass
-                    print("[AMADEUS] Removed Windows amadeus/amade commands and PATH entry.", flush=True)
+                    print(
+                        "[AMADEUS] Removed %LOCALAPPDATA%\\AMADEUS and its PATH entry.",
+                        flush=True,
+                    )
                     return
 
                 command_dir = Path.home() / ".local" / "bin"
