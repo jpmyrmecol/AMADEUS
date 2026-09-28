@@ -10,8 +10,8 @@ both CUDA and HIP and intentionally retain their existing training semantics.
 
 | Runtime backend | Current installation scope | PyTorch / YOLO device | Memory model | External telemetry | WDDM |
 | --- | --- | --- | --- | --- | --- |
-| NVIDIA CUDA | Windows, Linux | `cuda:0` / `0` | driver free / dedicated total for initial batch; allocator for monitoring | optional NVIDIA SMI | Windows only |
-| AMD ROCm | supported Linux x86_64 systems | `cuda:0` / `0` | driver free / dedicated total for initial batch; allocator for monitoring | allocator fallback; AMD SMI not required | disabled |
+| NVIDIA CUDA | Windows, Linux | `cuda:0` / `0` | reserved / dedicated total | optional NVIDIA SMI | Windows only |
+| AMD ROCm | supported Linux x86_64 systems | `cuda:0` / `0` | reserved / dedicated total | allocator fallback; AMD SMI not required | disabled |
 | Apple MPS | macOS Apple Silicon | `mps` | driver allocation / recommended working-set budget | allocator fallback | disabled |
 | CPU | CPU fallback | `cpu` | existing system-RAM batch policy | existing psutil system telemetry | disabled |
 
@@ -40,18 +40,14 @@ logical device index through `CUDA_VISIBLE_DEVICES`, so a masked or reordered
 Linux GPU is not confused with another card.
 
 Each of CUDA, ROCm, MPS and CPU has a separate batch-policy entry in
-`BATCH_POLICIES`. CUDA and ROCm use the same initial heuristic, but now budget
-from driver-reported *free* memory rather than total capacity: at most 75% of
-free memory, leaving at least 1 GiB free, and never more than 80% of device
-capacity. If the free-memory API fails, the budget is 60% of capacity. This
-accounts for other GPU processes and model/optimizer overhead, but remains a
-heuristic. The existing OOM recovery can lower the batch during training;
+`BATCH_POLICIES`. CUDA and ROCm use the established total-device-memory
+estimator, preserving the pre-`6af3f83` NVIDIA batch behavior. This does not
+assert that CUDA and ROCm have the same optimal batch. Runtime OOM, WDDM and
+MPS recovery remain responsible for correcting an unsafe automatic batch;
 fixed user-specified batches are preserved. MPS and CPU keep their separate
-policies. The one-time training batch increase now requires independent GPU
-telemetry. ROCm's allocator-only measurement, and NVIDIA when SMI is missing,
-cannot justify an increase because other processes are invisible. Resume,
-optimizer state, checkpoint selection and recovery thresholds are unchanged.
-The inactive preflight calibration module is not re-enabled by this refactor.
+policies. Resume, optimizer state, checkpoint selection and recovery
+thresholds are unchanged. The inactive preflight calibration module is not
+re-enabled.
 
 For the subsequent MPS-only training policy revision, see
 [MPS training policy](mps-training-policy.md). The historical validation below
@@ -109,11 +105,10 @@ verification latency to the former Windows timestamp-only fast path.
 
 ## Validation
 
-On 2026-09-29, 32 hardware-independent tests passed on Windows. They cover
-free-memory batch budgeting for CUDA and HIP, unavailable-memory fallback,
-explicit-device errors, NVIDIA visible-device reordering, and the requirement
-for independent telemetry before increasing a batch. Linux NVIDIA, Linux ROCm
-and Windows ROCm hardware runs remain unverified.
+The regression suite preserves the pre-`6af3f83` CUDA batch estimator while
+retaining tests for explicit-device errors, NVIDIA visible-device reordering,
+and Windows AMD profile selection. Linux NVIDIA, Linux ROCm and Windows ROCm
+hardware runs remain unverified.
 
 ### Historical validation (2026-09-25)
 

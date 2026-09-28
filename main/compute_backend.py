@@ -116,32 +116,14 @@ class Runtime:
         try:
             torch = _torch()
             if self.capabilities.memory_model == "dedicated":
-                # A missing allocator counter must not hide the device capacity.
-                try:
-                    used = float(torch.cuda.memory_reserved(self.index))
-                except Exception:
-                    used = None
-                try:
-                    total = float(torch.cuda.get_device_properties(self.index).total_memory)
-                except Exception:
-                    total = None
-                return used, total
+                return (float(torch.cuda.memory_reserved(self.index)),
+                        float(torch.cuda.get_device_properties(self.index).total_memory))
             if self.capabilities.memory_model == "unified":
                 return (float(torch.mps.driver_allocated_memory()),
                         float(torch.mps.recommended_max_memory()))
         except Exception:
             pass
         return None, None
-
-    def free_memory(self) -> float | None:
-        """Driver-reported free bytes for the selected CUDA/HIP device."""
-        if self.capabilities.memory_model != "dedicated":
-            return None
-        try:
-            free, _total = _torch().cuda.mem_get_info(self.index)
-            return max(0.0, float(free))
-        except Exception:
-            return None
 
     def allocated_memory(self) -> float | None:
         try:

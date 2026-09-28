@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Yusuke Notomi
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""MPS policy and historical CPU behavior contracts."""
+"""MPS policy and immutable c0e2483 NVIDIA/CPU behavior contracts."""
 import ast
 from contextlib import redirect_stdout
 import io
@@ -31,10 +31,10 @@ def load_class(source, name, **namespace):
     return namespace[name]
 
 class MPSPolicyTests(unittest.TestCase):
-    def test_288_cpu_golden_batch_combinations(self):
+    def test_288_cuda_and_288_cpu_golden_batch_combinations(self):
         old = dict(__name__='main.batch_golden', __package__='main')
         exec(compile(golden('main/batch_utils.py'), '<golden>', 'exec'), old)
-        for spec in ['cpu']:
+        for spec in ['0', 'cpu']:
             count = 0
             for memory, size, density, mode, cap in itertools.product(
                     [4, 8, 12, 24], [288, 576, 640, 1280], [0, 35, 200],
@@ -63,7 +63,7 @@ class MPSPolicyTests(unittest.TestCase):
             self.assertEqual(batch.auto_batch_size(576, 'mps', mode='predict'), 7)
             estimate.assert_called_once()
 
-    def test_ratio_and_ram_do_not_change_mps_or_cpu_batch(self):
+    def test_ratio_and_ram_do_not_change_mps_batch_cuda_unchanged(self):
         for path in PATHS:
             for spec in ['mps', '0', 'cpu']:
                 for fraction, ram in [(1.2, .99), (.1, .2)]:
@@ -77,25 +77,8 @@ class MPSPolicyTests(unittest.TestCase):
                             TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER=.4, TRAIN_VRAM_PRESSURE_RATIO=.95)
                         obj=cls(device=spec,sampler=sampler,batch_size=16,workers=0,allow_headroom_raise=True)
                         obj.record_batch(0);obj.finish_epoch(0);results.append(obj.verdict())
-                    if spec=='mps' or fraction < .4: self.assertIsNone(results[1])
+                    if spec=='mps': self.assertIsNone(results[1])
                     else: self.assertEqual(*results)
-
-    def test_headroom_raise_requires_external_gpu_measurement(self):
-        for path in PATHS:
-            source = Path(path).read_text()
-            for utilization, expected in [(None, None), (30., 'raise_batch')]:
-                sampler = SimpleNamespace(snapshot=lambda: (utilization, 1., 10., .1, None))
-                cls = load_class(source, '_InitialLoadCheck', time=SimpleNamespace(monotonic=lambda: 1.),
-                    _DeviceSampler=object, effective_dataloader_workers=lambda d,w: 0,
-                    _accelerator_type=lambda d: 'cuda', _query_ram_fraction=lambda: .2,
-                    TRAIN_INITIAL_RAM_TARGET=.9, TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER=.4,
-                    TRAIN_VRAM_PRESSURE_RATIO=.95)
-                obj = cls(device='0', sampler=sampler, batch_size=16, workers=0,
-                          allow_headroom_raise=True)
-                obj.record_batch(0)
-                obj.finish_epoch(0)
-                verdict = obj.verdict()
-                self.assertEqual(None if verdict is None else verdict[0], expected)
 
     def test_clear_backport_only_mps(self):
         # Extract the actual nested trainer: exercise its super call, no hardware needed.
@@ -155,8 +138,6 @@ class MPSPolicyTests(unittest.TestCase):
             evaluate = next(n for n in old.body if getattr(n, 'name', None) == '_evaluate_device_state')
             outer = next(n for n in evaluate.body if isinstance(n, ast.If))
             outer.body = [n for n in outer.body if not isinstance(n, ast.If)]
-            for cls in (old, new):
-                cls.body = [n for n in cls.body if getattr(n, 'name', None) != '_finish_starting_epoch']
             self.assertEqual(ast.dump(old), ast.dump(new), path)
 
     def test_all_other_training_definitions_and_constants_unchanged(self):
@@ -170,7 +151,7 @@ class MPSPolicyTests(unittest.TestCase):
                         cls=next(n for n in node.body if isinstance(n,ast.ClassDef))
                         cls.body=[n for n in cls.body if getattr(n,'name',None)!='_clear_memory']
                     if isinstance(node,ast.ClassDef) and node.name in ['_InitialLoadCheck','_PerformanceMonitor']:
-                        excluded={'_check_memory_pressure'} if node.name=='_PerformanceMonitor' else {'__init__','record_batch','_evaluate_device_state','_finish_starting_epoch'}
+                        excluded={'_check_memory_pressure'} if node.name=='_PerformanceMonitor' else {'__init__','record_batch','_evaluate_device_state'}
                         node.body=[n for n in node.body if getattr(n,'name',None) not in excluded]
             self.assertEqual(ast.dump(old),ast.dump(new),path)
         for path in ['tools/runtime_profiles.py','pyproject.toml','uv.lock']:

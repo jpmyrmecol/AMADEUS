@@ -149,7 +149,7 @@ class BackendTests(unittest.TestCase):
         torch = fake_torch(hip='6.3')
         torch.cuda.memory_reserved.side_effect = RuntimeError('unavailable')
         with patch.object(cb, '_torch', return_value=torch):
-            self.assertEqual(telemetry.sample_accelerator('0'), (None, None, 12.))
+            self.assertEqual(telemetry.sample_accelerator('0'), (None, None, None))
         torch.mps.empty_cache.side_effect = AttributeError('old torch')
         torch.mps.synchronize.side_effect = AttributeError('old torch')
         torch.mps.recommended_max_memory.side_effect = AttributeError('old torch')
@@ -212,8 +212,8 @@ class BackendTests(unittest.TestCase):
     def test_existing_batch_values_and_independent_dispatch(self):
         psutil = SimpleNamespace(virtual_memory=lambda: SimpleNamespace(available=64 * GIB),
                                   cpu_count=lambda logical=False: 8)
-        for backend, spec, expected in [(cb.Backend.NVIDIA_CUDA, '0', 22),
-            (cb.Backend.AMD_ROCM, '0', 22), (cb.Backend.APPLE_MPS, 'mps', 16),
+        for backend, spec, expected in [(cb.Backend.NVIDIA_CUDA, '0', 36),
+            (cb.Backend.AMD_ROCM, '0', 36), (cb.Backend.APPLE_MPS, 'mps', 16),
             (cb.Backend.CPU, 'cpu', 16)]:
             torch = fake_torch(hip='6.3' if backend == cb.Backend.AMD_ROCM else None,
                                cuda='12.8' if backend == cb.Backend.NVIDIA_CUDA else None)
@@ -224,16 +224,6 @@ class BackendTests(unittest.TestCase):
                     self.assertEqual(batch.auto_batch_size(640, spec), 13)
         self.assertEqual(len(set(batch.BATCH_POLICIES.values())), 4)
 
-    def test_gpu_batch_budget_uses_driver_free_memory_on_cuda_and_hip(self):
-        for hip, cuda in [('6.3', None), (None, '12.8')]:
-            torch = fake_torch(hip=hip, cuda=cuda)
-            with self.subTest(hip=hip), patch.object(cb, '_torch', return_value=torch), redirect_stdout(io.StringIO()):
-                self.assertEqual(batch.auto_batch_size(640, '0'), 22)
-                torch.cuda.mem_get_info.return_value = (2 * GIB, 12 * GIB)
-                self.assertEqual(batch.auto_batch_size(640, '0'), 3)
-                torch.cuda.mem_get_info.side_effect = RuntimeError('query unavailable')
-                self.assertEqual(batch.auto_batch_size(640, '0'), 21)
-                torch.cuda.mem_get_info.assert_called_with(0)
 
     def test_oom_recovery_and_non_oom_errors(self):
         torch = fake_torch(hip='6.3')
