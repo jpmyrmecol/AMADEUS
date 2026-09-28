@@ -540,10 +540,18 @@ class EasyTrackingGUI(ctk.CTk):
         self._num_objects_sb.bind("<KeyRelease>", self._on_num_objects_key_release, add="+")
         self._num_enter_button = ctk.CTkButton(row, text="Enter", width=70, command=self._confirm_num_objects)
         self._num_enter_button.pack(side="left", padx=(6, 8))
-        ctk.CTkCheckBox(row, text="Variable population [Beta]", variable=self._variable_count,
-                       command=self._on_variable_count_changed).pack(side="left", padx=6)
         self._num_confirm_hint = ctk.CTkLabel(row, text="Press Enter to confirm", text_color="gray", anchor="w")
         self._num_confirm_hint.pack(side="left")
+
+        row = ctk.CTkFrame(inner, corner_radius=0)
+        row.pack(fill="x", pady=4)
+        pack_question_label(row, "")
+        ctk.CTkCheckBox(
+            row,
+            text="Variable population [Beta]",
+            variable=self._variable_count,
+            command=self._on_variable_count_changed,
+        ).pack(side="left", padx=5)
 
         row = ctk.CTkFrame(inner, corner_radius=0)
         row.pack(fill="x", pady=4)
