@@ -280,9 +280,31 @@ def _launch_uninstaller(script: Path, project_root: Path) -> None:
     temp_dir = str(Path(tempfile.gettempdir()).resolve())
 
     if os.name == "nt":
-        quoted = subprocess.list2cmdline(command)
+        launcher = Path(tempfile.gettempdir()) / f"AMADEUS-uninstall-{uuid.uuid4().hex}.cmd"
+        command_line = subprocess.list2cmdline(command)
+        launcher.write_text(
+            "@echo off\n"
+            "setlocal\n"
+            "title AMADEUS Uninstall\n"
+            "cd /d \"%TEMP%\"\n"
+            "echo [AMADEUS] Starting uninstaller...\n"
+            f"{command_line}\n"
+            "set \"AMADEUS_UNINSTALL_EXIT=%ERRORLEVEL%\"\n"
+            "if not \"%AMADEUS_UNINSTALL_EXIT%\"==\"0\" (\n"
+            "    echo.\n"
+            "    echo [ERROR] AMADEUS uninstall failed with exit code %AMADEUS_UNINSTALL_EXIT%.\n"
+            "    echo [ERROR] Review the messages above.\n"
+            "    pause\n"
+            "    exit /b %AMADEUS_UNINSTALL_EXIT%\n"
+            ")\n"
+            "echo [AMADEUS] Closing uninstall window...\n"
+            "timeout /t 2 /nobreak >nul\n"
+            "del /f /q \"%~f0\" >nul 2>&1\n"
+            "exit /b 0\n",
+            encoding="utf-8",
+        )
         subprocess.Popen(
-            ["cmd.exe", "/c", quoted],
+            ["cmd.exe", "/c", str(launcher)],
             cwd=temp_dir,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             close_fds=True,
