@@ -419,6 +419,14 @@ def _get_epochs_obb_trainer():
     from ultralytics.models.yolo.obb import OBBTrainer
 
     class EpochsOBBTrainer(OBBTrainer):
+        def _clear_memory(self, threshold=None):
+            # Backport ultralytics/ultralytics#24038 without changing dependencies:
+            # existing pre-validation and epoch-end calls always clear on MPS.
+            # No per-batch synchronization, graph mutation, or CUDA policy change.
+            return super()._clear_memory(
+                None if self.device.type == "mps" else threshold
+            )
+
         def check_resume(self, overrides):
             overrides = overrides or {}
             requested_epochs = overrides.get("epochs")
@@ -1081,30 +1089,10 @@ class _PerformanceMonitor:
         return now
 
     def _check_memory_pressure(self, phase: str) -> None:
-        """Convert whole-run RAM/MPS pressure into an actionable recovery."""
-        if self._pressure_action is not None:
-            return
-        if _accelerator_type(self.device) != "mps":
-            return
-        ram_frac = _query_ram_fraction()
-        if ram_frac is not None and ram_frac >= TRAIN_INITIAL_RAM_TARGET:
-            self._pressure_action = "lower_batch"
-            self._pressure_reason = (
-                f"RAM usage {ram_frac:.0%} reached {TRAIN_INITIAL_RAM_TARGET:.0%} "
-                f"during {phase}; configured_workers={self.workers}, "
-                f"effective_workers={self.effective_workers}"
-            )
-            return
-
-        if str(self.device).strip().lower() == "mps":
-            _used, _total, _frac, _wddm = self.sampler.snapshot()[1:]
-            if _frac is not None and _frac >= TRAIN_VRAM_PRESSURE_RATIO:
-                self._pressure_action = "lower_batch"
-                self._pressure_reason = (
-                    f"MPS driver allocation reached {_frac:.1%} of its recommended "
-                    f"working set during {phase} "
-                    f"(threshold {TRAIN_VRAM_PRESSURE_RATIO:.1%})"
-                )
+        # MPS working-set and RAM percentages are telemetry, not capacity limits.
+        # Leave allocation enforcement to PyTorch and real OOM recovery below.
+        # This hook was already a no-op for CUDA/HIP/CPU.
+        return
 
     def pressure_verdict(self) -> tuple[str, str] | None:
         if self._pressure_action is None:
@@ -1734,6 +1722,7 @@ class _WatchdogSharedState:
                 pass
 
 
+# MPS bypasses percentage-only RAM recovery and memory-headroom batch raising.
 class _InitialLoadCheck:
     """One-shot real-load sanity check covering this training process's
     starting epoch, in full -- not a rolling watchdog for the rest of
@@ -1813,7 +1802,7 @@ class _InitialLoadCheck:
         self.batch_size = int(batch_size)
         self.workers = int(workers)
         self.effective_workers = effective_dataloader_workers(device, workers)
-        self.allow_headroom_raise = allow_headroom_raise
+        self.allow_headroom_raise = allow_headroom_raise and _accelerator_type(device) != "mps"
         self._start_epoch: int | None = None
         self._epoch_done = False
         self._verdict: tuple[str, str] | None = None
@@ -1861,7 +1850,8 @@ class _InitialLoadCheck:
         self._epoch_last_batch_time = now
 
         ram_frac = _query_ram_fraction()
-        if ram_frac is not None and ram_frac >= TRAIN_INITIAL_RAM_TARGET:
+        if (_accelerator_type(self.device) != "mps"
+                and ram_frac is not None and ram_frac >= TRAIN_INITIAL_RAM_TARGET):
             action = "lower_batch" if self.effective_workers == 0 else "lower_workers"
             self._verdict = (
                 action,
@@ -1914,19 +1904,6 @@ class _InitialLoadCheck:
             self._max_vram_frac = (
                 vram_frac if self._max_vram_frac is None else max(self._max_vram_frac, vram_frac)
             )
-
-            if (
-                str(self.device).strip().lower() == "mps"
-                and vram_frac >= TRAIN_VRAM_PRESSURE_RATIO
-            ):
-                self._verdict = (
-                    "lower_batch",
-                    f"MPS driver allocation reached {vram_frac:.1%} of its recommended "
-                    f"working set during epoch {self._start_epoch + 1} "
-                    f"(threshold {TRAIN_VRAM_PRESSURE_RATIO:.1%})",
-                )
-                self._epoch_done = True
-                return
 
         if self._wddm_non_local_baseline is None or non_local is None or vram_frac is None:
             return
@@ -2044,8 +2021,8 @@ def main(
 
     explicit_batch = not (BATCH_SIZE is None or str(BATCH_SIZE).strip().lower() in {"", "auto"})
     explicit_workers = not (NUM_WORKERS is None or str(NUM_WORKERS).strip().lower() in {"", "auto"})
-    # There is no preflight calibration: auto batch comes from the existing
-    # closed-form heuristic, workers start at TRAIN_DEFAULT_WORKERS, and real
+    # There is no preflight calibration: auto batch uses the memory estimator
+    # or the MPS upstream-compatible default; workers start at TRAIN_DEFAULT_WORKERS, and real
     # training begins immediately. Retries adjust only an automatic knob and
     # are triggered by clear evidence: OOM/GPU fallback, RAM or DataLoader
     # pressure, VRAM headroom, or a sustained throughput collapse with

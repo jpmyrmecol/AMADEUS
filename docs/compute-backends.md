@@ -42,6 +42,10 @@ constants, MPS thresholds or performance workarounds were introduced. Resume,
 optimizer state, checkpoint selection and recovery thresholds are unchanged.
 The inactive preflight calibration module is not re-enabled by this refactor.
 
+For the subsequent MPS-only training policy revision, see
+[MPS training policy](mps-training-policy.md). The historical validation below
+describes the original backend separation, before that revision.
+
 ## Installation and migration
 
 The existing `cpu`, `macos`, and `cu128` extras retain their names. New `rocm63`

@@ -405,6 +405,12 @@ def _rocm_batch_policy(**kwargs):
 
 
 def _mps_batch_policy(**kwargs):
+    # Ultralytics 8.3.185 AutoBatch does not profile MPS and falls back to 16.
+    # Recommended working set / free unified RAM do not predict throughput.
+    # Keep inference policy unchanged; explicit and checkpoint batches bypass this.
+    if str(kwargs.get("mode", "train")).strip().lower() == "train":
+        print("[INFO] auto mps batch: upstream-compatible default, selected_batch=16")
+        return 16
     return _estimate_batch_size(**kwargs)
 
 
@@ -511,8 +517,8 @@ def run_with_oom_retry(fn, initial_batch: int):
 # --- Real-training starting-epoch sanity check --------------------------------
 #
 # There is no more preflight calibration (a separate throwaway probe before
-# real training). Batch size comes from the closed-form heuristic below
-# (auto_batch_size) and dataloader workers default to a fixed count; real
+# real training). auto_batch_size dispatches to the memory estimator or the
+# upstream-compatible MPS default; workers default to a fixed count, and real
 # training then starts immediately. _InitialLoadCheck owns RAM pressure, WDDM
 # observation, and VRAM headroom during the starting epoch; the separate
 # _PerformanceMonitor watches measured training/validation throughput for the
