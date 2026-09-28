@@ -9,13 +9,7 @@ call :show_version_status
 call :environment_ready
 if defined AMADEUS_ENV_READY goto environment_prepared
 
-call :show_version_status
-set "AMADEUS_VERSION_FILE=%~dp0VERSION"
-powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; try { $currentText=(Get-Content -Raw -LiteralPath $env:AMADEUS_VERSION_FILE).Trim(); Write-Output ('[AMADEUS] Version: v' + $currentText); try { $latestText=((Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/jpmyrmecol/AMADEUS/main/VERSION' -TimeoutSec 2).Content).Trim(); $current=[version]$currentText; $latest=[version]$latestText; if ($latest -gt $current) { Write-Output ('[AMADEUS] Update available: v{0} -> v{1}' -f $currentText,$latestText) } elseif ($latest -eq $current) { Write-Output ('[AMADEUS] Latest version: v{0} (up to date)' -f $latestText) } else { Write-Output ('[AMADEUS] Latest version: v{0} (installed version is newer)' -f $latestText) } } catch { Write-Output '[AMADEUS] Latest version: unavailable (offline or update check failed)' } } catch { Write-Output '[AMADEUS] Version: unavailable' }"
-set "AMADEUS_VERSION_FILE="
-exit /b 0
-
-:setup_environment
+call :setup_environment
 if errorlevel 1 (
     echo [ERROR] AMADEUS setup or PyTorch/torchvision CUDA verification failed.
     echo [ERROR] See the diagnostic message above.
@@ -57,6 +51,12 @@ echo [AMADEUS] The GUI has closed.
 echo [AMADEUS] The AMADEUS virtual environment is active in this prompt.
 echo [AMADEUS] Type "amadeus" or "amade" to open the home GUI.
 call :keep_prompt_open
+exit /b 0
+
+:show_version_status
+set "AMADEUS_VERSION_FILE=%~dp0VERSION"
+powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; try { $currentText=(Get-Content -Raw -LiteralPath $env:AMADEUS_VERSION_FILE).Trim(); Write-Output ('[AMADEUS] Version: v' + $currentText); try { $latestText=((Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/jpmyrmecol/AMADEUS/main/VERSION' -TimeoutSec 2).Content).Trim(); $current=[version]$currentText; $latest=[version]$latestText; if ($latest -gt $current) { Write-Output ('[AMADEUS] Update available: v{0} -> v{1}' -f $currentText,$latestText) } elseif ($latest -eq $current) { Write-Output ('[AMADEUS] Latest version: v{0} (up to date)' -f $latestText) } else { Write-Output ('[AMADEUS] Latest version: v{0} (installed version is newer)' -f $latestText) } } catch { Write-Output '[AMADEUS] Latest version: unavailable (offline or update check failed)' } } catch { Write-Output '[AMADEUS] Version: unavailable' }"
+set "AMADEUS_VERSION_FILE="
 exit /b 0
 
 :setup_environment
