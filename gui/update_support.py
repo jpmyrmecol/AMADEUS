@@ -135,14 +135,19 @@ def find_other_amadeus_processes(
 ) -> list[tuple[int, str]]:
     """Return other Python/AMADEUS processes associated with this installation."""
     root = project_root.resolve()
-    current_pid = os.getpid() if current_pid is None else current_pid
+    current_pid = os.getpid() if current_pid is None else int(current_pid)
+    protected_pids = {current_pid}
+    try:
+        protected_pids.update(parent.pid for parent in psutil.Process(current_pid).parents())
+    except psutil.Error:
+        pass
     matches: list[tuple[int, str]] = []
 
     for process in psutil.process_iter(["pid", "name", "exe", "cwd", "cmdline"]):
         try:
             info = process.info
             pid = int(info.get("pid") or 0)
-            if pid <= 0 or pid == current_pid:
+            if pid <= 0 or pid in protected_pids:
                 continue
             name = str(info.get("name") or "process")
             executable = info.get("exe")
@@ -153,11 +158,16 @@ def find_other_amadeus_processes(
 
         if not _is_amadeus_runtime_process(name, executable, cmdline):
             continue
-        if (
-            _path_within(executable, root)
-            or any(_path_within(argument, root) for argument in cmdline)
-            or _path_within(cwd, root)
-        ):
+        command_path_match = any(_path_within(argument, root) for argument in cmdline)
+        module_from_project = (
+            _path_within(cwd, root)
+            and any(
+                argument == "amadeus"
+                or argument.startswith(("gui.", "main.", "tools."))
+                for argument in cmdline
+            )
+        )
+        if _path_within(executable, root) or command_path_match or module_from_project:
             matches.append((pid, name))
 
     matches.sort()

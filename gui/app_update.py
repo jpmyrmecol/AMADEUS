@@ -24,13 +24,13 @@ try:
         acquire_update_lock,
         release_update_lock,
         terminate_other_amadeus_processes,
-        terminate_other_amadeus_processes,
     )
 except ImportError:  # Preserve direct execution with: python gui/gui_home.py
     from project_paths import PROJECT_ROOT
     from update_support import (
         acquire_update_lock,
         release_update_lock,
+        terminate_other_amadeus_processes,
     )
 
 

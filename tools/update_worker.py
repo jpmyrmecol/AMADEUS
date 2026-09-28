@@ -367,16 +367,50 @@ def _setup_environment(root: Path, python: str, log) -> None:
 
 
 def _restart(root: Path, python: str) -> None:
+    if os.name == "nt":
+        # A fresh launcher must prepare the environment only after this updater
+        # process (which itself runs from .venv) has exited. The detached
+        # PowerShell window waits for the update lock to disappear, then starts
+        # the updated AMADEUS.bat.
+        root_literal = str(root).replace("'", "''")
+        script = (
+            f"$root='{root_literal}'; "
+            "$lock=Join-Path $root '.amadeus-update.lock'; "
+            "Write-Host '[AMADEUS] Source update completed. Waiting to restart...'; "
+            "$deadline=(Get-Date).AddMinutes(10); "
+            "while ((Test-Path -LiteralPath $lock) -and ((Get-Date) -lt $deadline)) "
+            "{ Start-Sleep -Milliseconds 250 }; "
+            "if (Test-Path -LiteralPath $lock) { "
+            "Write-Host '[ERROR] The updater did not finish within 10 minutes.'; "
+            "Read-Host 'Press Enter to close'; exit 1 }; "
+            "Write-Host '[AMADEUS] Restarting updated AMADEUS...'; "
+            "& (Join-Path $root 'AMADEUS.bat'); exit $LASTEXITCODE"
+        )
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            cwd=root,
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            close_fds=True,
+        )
+        return
+
     environment = os.environ.copy()
     environment.pop("AMADEUS_SPLASH_TOKEN", None)
     environment.pop("AMADEUS_SPLASH_SECONDS", None)
-    kwargs: dict[str, object] = {"cwd": str(root), "env": environment, "close_fds": True}
-    if os.name == "nt":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    else:
-        kwargs["start_new_session"] = True
+    kwargs: dict[str, object] = {
+        "cwd": str(root),
+        "env": environment,
+        "close_fds": True,
+        "start_new_session": True,
+    }
     subprocess.Popen([python, "-m", "gui.gui_home"], **kwargs)
-
 
 def _show_error(message: str) -> None:
     try:
@@ -441,8 +475,15 @@ def run(args: argparse.Namespace) -> int:
             if installed_version != expected:
                 raise RuntimeError("The installed source version does not match the version approved for installation.")
 
-            environment_attempted = True
-            _setup_environment(root, args.python, log)
+            if os.name == "nt":
+                _log(
+                    log,
+                    "[AMADEUS] Source update installed. The fresh Windows launcher will "
+                    "prepare the updated environment after this updater exits.",
+                )
+            else:
+                environment_attempted = True
+                _setup_environment(root, args.python, log)
         except Exception as exc:
             failure = exc
             _log(log, f"[ERROR] Update failed: {exc}")
@@ -500,7 +541,10 @@ def run(args: argparse.Namespace) -> int:
                     )
             return 1
 
-        _log(log, f"[AMADEUS] Updated to {_version_label(expected)}; restarting AMADEUS.")
+        if os.name == "nt":
+            _log(log, f"[AMADEUS] Source updated to {_version_label(expected)}; handing off to the launcher.")
+        else:
+            _log(log, f"[AMADEUS] Updated to {_version_label(expected)}; restarting AMADEUS.")
 
     try:
         _restart(root, args.python)

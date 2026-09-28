@@ -484,10 +484,14 @@ def build_home(root: ctk.CTk) -> None:
                 if name == "help":
                     open_manual("EN")
                 else:
+                    def close_for_update() -> None:
+                        root._amadeus_update_requested = True
+                        root.destroy()
+
                     start_update_check(
                         root,
                         on_status=set_update_caption,
-                        on_update_start=root.destroy,
+                        on_update_start=close_for_update,
                     )
                 return "break"
         launch_easy_tracking()
@@ -523,11 +527,12 @@ def build_home(root: ctk.CTk) -> None:
         panel.grid(row=1, column=col, sticky="nsew")
 
 
-def main() -> None:
+def main() -> int:
     configure_taskbar_identity()
     splash_shown_at = time.monotonic()
     has_external_splash = ensure_external_splash()
     root = ctk.CTk()
+    root._amadeus_update_requested = False
     configure_dpi_scaling(root)
     root.withdraw()
     root.title(home_window_title())
@@ -586,7 +591,8 @@ def main() -> None:
         splash.AMADEUS_SPLASH_CANVAS.bind("<ButtonPress>", reveal_main_window, add="+")
     reveal_job = root.after(remaining_ms, reveal_main_window)
     root.mainloop()
+    return 42 if getattr(root, "_amadeus_update_requested", False) else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

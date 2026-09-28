@@ -4,10 +4,18 @@
 @echo off
 cd /d "%~dp0"
 
+call :show_version_status
+
 call :environment_ready
 if defined AMADEUS_ENV_READY goto environment_prepared
 
-call :setup_environment
+call :show_version_status
+set "AMADEUS_VERSION_FILE=%~dp0VERSION"
+powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; try { $currentText=(Get-Content -Raw -LiteralPath $env:AMADEUS_VERSION_FILE).Trim(); Write-Output ('[AMADEUS] Version: v' + $currentText); try { $latestText=((Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/jpmyrmecol/AMADEUS/main/VERSION' -TimeoutSec 2).Content).Trim(); $current=[version]$currentText; $latest=[version]$latestText; if ($latest -gt $current) { Write-Output ('[AMADEUS] Update available: v{0} -> v{1}' -f $currentText,$latestText) } elseif ($latest -eq $current) { Write-Output ('[AMADEUS] Latest version: v{0} (up to date)' -f $latestText) } else { Write-Output ('[AMADEUS] Latest version: v{0} (installed version is newer)' -f $latestText) } } catch { Write-Output '[AMADEUS] Latest version: unavailable (offline or update check failed)' } } catch { Write-Output '[AMADEUS] Version: unavailable' }"
+set "AMADEUS_VERSION_FILE="
+exit /b 0
+
+:setup_environment
 if errorlevel 1 (
     echo [ERROR] AMADEUS setup or PyTorch/torchvision CUDA verification failed.
     echo [ERROR] See the diagnostic message above.
@@ -34,10 +42,15 @@ set "AMADEUS_SPLASH_SECONDS=4"
 start "AMADEUS Splash" /min ".venv\Scripts\python.exe" "gui\splash_standalone.py" "%AMADEUS_SPLASH_TOKEN%" "%AMADEUS_SPLASH_SECONDS%"
 
 ".venv\Scripts\amadeus.exe"
-if errorlevel 1 (
+set "AMADEUS_GUI_EXIT=%ERRORLEVEL%"
+if "%AMADEUS_GUI_EXIT%"=="42" (
+    echo [AMADEUS] Update accepted. The updater will restart AMADEUS automatically.
+    exit /b 0
+)
+if not "%AMADEUS_GUI_EXIT%"=="0" (
     echo [ERROR] AMADEUS exited with an error.
     call :keep_prompt_open
-    exit /b 1
+    exit /b %AMADEUS_GUI_EXIT%
 )
 
 echo [AMADEUS] The GUI has closed.
