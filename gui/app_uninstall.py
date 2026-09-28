@@ -150,6 +150,7 @@ def _write_external_uninstaller() -> Path:
                 try:
                     from ctypes import wintypes
                     user32 = ctypes.windll.user32
+                    result = ctypes.c_size_t()
                     user32.SendMessageTimeoutW(
                         0xFFFF,
                         0x001A,
@@ -157,7 +158,7 @@ def _write_external_uninstaller() -> Path:
                         "Environment",
                         0x0002,
                         5000,
-                        ctypes.byref(wintypes.DWORD_PTR()),
+                        ctypes.byref(result),
                     )
                 except Exception:
                     pass
