@@ -54,10 +54,23 @@ def _validate_project_root(root: Path) -> Path:
 
 
 def _base_python() -> str:
-    candidate = Path(getattr(sys, "_base_executable", "") or "")
-    if candidate.is_file():
-        return str(candidate)
-    return sys.executable
+    project_root = PROJECT_ROOT.resolve()
+    candidates = [
+        Path(getattr(sys, "_base_executable", "") or ""),
+        Path(shutil.which("python3") or ""),
+        Path(shutil.which("python") or ""),
+    ]
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(project_root)
+        except ValueError:
+            return str(resolved)
+    raise RuntimeError(
+        "No Python interpreter outside the AMADEUS folder is available to complete uninstall."
+    )
 
 
 def _write_external_uninstaller() -> Path:
@@ -169,7 +182,7 @@ def _launch_uninstaller(script: Path, project_root: Path) -> None:
     if os.name == "nt":
         quoted = subprocess.list2cmdline(command)
         subprocess.Popen(
-            ["cmd.exe", "/k", quoted],
+            ["cmd.exe", "/c", quoted],
             cwd=temp_dir,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             close_fds=True,
@@ -180,9 +193,11 @@ def _launch_uninstaller(script: Path, project_root: Path) -> None:
         launcher = Path(tempfile.gettempdir()) / f"AMADEUS-uninstall-{uuid.uuid4().hex}.command"
         launcher.write_text(
             "#!/usr/bin/env bash\n"
-            + "exec "
+            + "status=0\n"
             + " ".join(shlex.quote(part) for part in command)
-            + "\n",
+            + " || status=$?\n"
+            + 'rm -f -- "$0"\n'
+            + 'exit "$status"\n',
             encoding="utf-8",
         )
         launcher.chmod(0o700)
