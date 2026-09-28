@@ -11,7 +11,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
 import uuid
 from pathlib import Path
 from tkinter import messagebox
@@ -51,227 +50,6 @@ def _validate_project_root(root: Path) -> Path:
             "The selected folder does not identify itself as the AMADEUS project."
         )
     return root
-
-
-def _base_python() -> str:
-    project_root = PROJECT_ROOT.resolve()
-    candidates = [
-        Path(getattr(sys, "_base_executable", "") or ""),
-        Path(shutil.which("python3") or ""),
-        Path(shutil.which("python") or ""),
-    ]
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
-        resolved = candidate.resolve()
-        try:
-            resolved.relative_to(project_root)
-        except ValueError:
-            return str(resolved)
-    raise RuntimeError(
-        "No Python interpreter outside the AMADEUS folder is available to complete uninstall."
-    )
-
-
-def _write_external_uninstaller() -> Path:
-    script = Path(tempfile.gettempdir()) / f"AMADEUS-uninstall-{uuid.uuid4().hex}.py"
-    script.write_text(
-        textwrap.dedent(
-            r'''
-            import ctypes
-            import os
-            import shutil
-            import sys
-            import time
-            from pathlib import Path
-
-            def validate(root: Path) -> Path:
-                root = root.resolve()
-                if root == root.parent or root == Path.home().resolve():
-                    raise RuntimeError(f"Unsafe uninstall path: {root}")
-                required = (
-                    root / "VERSION",
-                    root / "pyproject.toml",
-                    root / "gui" / "gui_home.py",
-                    root / "main",
-                )
-                if not all(path.exists() for path in required):
-                    raise RuntimeError("AMADEUS installation markers are missing.")
-                pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-                if 'name = "amadeus"' not in pyproject:
-                    raise RuntimeError("Target folder is not an AMADEUS installation.")
-                return root
-
-            def _windows_amadeus_dir() -> Path:
-                local_app_data = Path(
-                    os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
-                )
-                return (local_app_data / "AMADEUS").resolve()
-
-            def _remove_windows_user_path(command_dir: Path) -> None:
-                import winreg
-
-                with winreg.CreateKeyEx(
-                    winreg.HKEY_CURRENT_USER,
-                    "Environment",
-                    0,
-                    winreg.KEY_READ | winreg.KEY_SET_VALUE,
-                ) as key:
-                    try:
-                        current, value_type = winreg.QueryValueEx(key, "Path")
-                    except FileNotFoundError:
-                        return
-
-                    target = os.path.normcase(os.path.abspath(str(command_dir)))
-                    kept = []
-                    changed = False
-                    for raw_entry in str(current).split(";"):
-                        entry = raw_entry.strip()
-                        if not entry:
-                            continue
-                        try:
-                            normalized = os.path.normcase(
-                                os.path.abspath(os.path.expandvars(entry))
-                            )
-                        except OSError:
-                            normalized = os.path.normcase(entry)
-                        if normalized == target:
-                            changed = True
-                            continue
-                        kept.append(entry)
-
-                    if not changed:
-                        return
-                    new_value = ";".join(kept)
-                    if new_value:
-                        new_value += ";"
-                    winreg.SetValueEx(key, "Path", 0, value_type, new_value)
-
-                try:
-                    from ctypes import wintypes
-                    user32 = ctypes.windll.user32
-                    result = ctypes.c_size_t()
-                    user32.SendMessageTimeoutW(
-                        0xFFFF,
-                        0x001A,
-                        0,
-                        "Environment",
-                        0x0002,
-                        5000,
-                        ctypes.byref(result),
-                    )
-                except Exception:
-                    pass
-
-            def cleanup_external_commands() -> None:
-                if os.name == "nt":
-                    amadeus_dir = _windows_amadeus_dir()
-                    command_dir = amadeus_dir / "bin"
-                    _remove_windows_user_path(command_dir)
-                    last_error = None
-                    for _ in range(30):
-                        try:
-                            shutil.rmtree(amadeus_dir)
-                        except FileNotFoundError:
-                            last_error = None
-                            break
-                        except OSError as exc:
-                            last_error = exc
-                            time.sleep(0.5)
-                            continue
-                        last_error = None
-                        break
-                    if amadeus_dir.exists():
-                        raise RuntimeError(
-                            f"Could not remove the AMADEUS local application directory: "
-                            f"{amadeus_dir} ({last_error})"
-                        )
-                    print(
-                        "[AMADEUS] Removed %LOCALAPPDATA%\\AMADEUS and its PATH entry.",
-                        flush=True,
-                    )
-                    return
-
-                command_dir = Path.home() / ".local" / "bin"
-                for name in ("amadeus", "amade"):
-                    path = command_dir / name
-                    try:
-                        path.unlink()
-                    except FileNotFoundError:
-                        pass
-                print("[AMADEUS] Removed ~/.local/bin/amadeus and ~/.local/bin/amade.", flush=True)
-
-            def wait_for_pid(pid: int) -> None:
-                if os.name == "nt":
-                    from ctypes import wintypes
-                    kernel32 = ctypes.windll.kernel32
-                    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-                    kernel32.OpenProcess.restype = wintypes.HANDLE
-                    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-                    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-                    handle = kernel32.OpenProcess(0x00100000, False, pid)
-                    if handle:
-                        try:
-                            kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
-                            return
-                        finally:
-                            kernel32.CloseHandle(handle)
-                while True:
-                    try:
-                        os.kill(pid, 0)
-                    except OSError:
-                        return
-                    time.sleep(0.25)
-
-            def main() -> int:
-                root = validate(Path(sys.argv[1]))
-                parent_pid = int(sys.argv[2])
-                print("[AMADEUS] Waiting for AMADEUS to close...", flush=True)
-                wait_for_pid(parent_pid)
-                time.sleep(0.75)
-                cleanup_external_commands()
-                print(f"[AMADEUS] Removing {root}", flush=True)
-
-                last_error = None
-                for _ in range(90):
-                    try:
-                        shutil.rmtree(root)
-                    except FileNotFoundError:
-                        last_error = None
-                        break
-                    except OSError as exc:
-                        last_error = exc
-                        time.sleep(1.0)
-                        continue
-                    last_error = None
-                    break
-
-                if root.exists():
-                    print("", flush=True)
-                    print("[ERROR] AMADEUS could not be completely removed.", flush=True)
-                    print(f"[ERROR] Close any program or terminal still using: {root}", flush=True)
-                    if last_error is not None:
-                        print(f"[ERROR] {last_error}", flush=True)
-                    input("Press Enter to close...")
-                    return 1
-
-                print("", flush=True)
-                print("[AMADEUS] Uninstall complete.", flush=True)
-                print("[AMADEUS] The AMADEUS folder and its contents were removed.", flush=True)
-                try:
-                    Path(__file__).unlink()
-                except OSError:
-                    pass
-                time.sleep(3.0)
-                return 0
-
-            if __name__ == "__main__":
-                raise SystemExit(main())
-            '''
-        ).lstrip(),
-        encoding="utf-8",
-    )
-    return script
 
 
 def _write_windows_uninstaller(project_root: Path) -> Path:
@@ -403,7 +181,71 @@ try {
     return script
 
 
-def _launch_uninstaller(script: Path, project_root: Path) -> None:
+def _write_posix_uninstaller(project_root: Path) -> Path:
+    script = Path(tempfile.gettempdir()) / f"AMADEUS-uninstall-{uuid.uuid4().hex}.sh"
+    root_literal = shlex.quote(str(project_root))
+    script.write_text(
+        """#!/usr/bin/env bash
+set -u
+
+PROJECT_ROOT=__AMADEUS_PROJECT_ROOT__
+PARENT_PID="$1"
+
+fail() {
+    echo
+    echo "[ERROR] AMADEUS uninstall failed."
+    echo "[ERROR] $1"
+    echo
+    if [ -t 0 ]; then
+        printf "Press Enter to close..."
+        read -r _unused
+    fi
+    exit 1
+}
+
+echo "[AMADEUS] Waiting for AMADEUS to close..."
+while kill -0 "$PARENT_PID" 2>/dev/null; do
+    sleep 0.25
+done
+sleep 0.75
+
+case "$PROJECT_ROOT" in
+    ""|"/"|"$HOME")
+        fail "Refusing to uninstall an unsafe path: $PROJECT_ROOT"
+        ;;
+esac
+
+[ -f "$PROJECT_ROOT/VERSION" ] || fail "AMADEUS VERSION marker is missing."
+[ -f "$PROJECT_ROOT/pyproject.toml" ] || fail "AMADEUS pyproject.toml is missing."
+[ -f "$PROJECT_ROOT/gui/gui_home.py" ] || fail "AMADEUS Home GUI marker is missing."
+[ -d "$PROJECT_ROOT/main" ] || fail "AMADEUS main directory is missing."
+grep -Eq '^name[[:space:]]*=[[:space:]]*"amadeus"[[:space:]]*$' "$PROJECT_ROOT/pyproject.toml" \
+    || fail "Target folder is not an AMADEUS installation."
+
+echo "[AMADEUS] Removing installed amadeus/amade commands..."
+rm -f -- "$HOME/.local/bin/amadeus" "$HOME/.local/bin/amade" \
+    || fail "Could not remove the installed command files."
+
+echo "[AMADEUS] Removing $PROJECT_ROOT ..."
+chmod -R u+w "$PROJECT_ROOT" 2>/dev/null || true
+rm -rf -- "$PROJECT_ROOT"
+[ ! -e "$PROJECT_ROOT" ] || fail "Could not completely remove $PROJECT_ROOT."
+
+echo
+echo "[AMADEUS] Uninstall complete."
+echo "[AMADEUS] The AMADEUS folder and installed command files were removed."
+SELF="$0"
+rm -f -- "$SELF" 2>/dev/null || true
+sleep 3
+exit 0
+""".replace("__AMADEUS_PROJECT_ROOT__", root_literal),
+        encoding="utf-8",
+    )
+    script.chmod(0o700)
+    return script
+
+
+def _launch_uninstaller(project_root: Path) -> None:
     temp_dir = str(Path(tempfile.gettempdir()).resolve())
 
     if os.name == "nt":
@@ -423,24 +265,18 @@ def _launch_uninstaller(script: Path, project_root: Path) -> None:
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             close_fds=True,
         )
-        try:
-            script.unlink(missing_ok=True)
-        except OSError:
-            pass
         return
 
-    python = _base_python()
-    command = [python, str(script), str(project_root), str(os.getpid())]
+    shell_script = _write_posix_uninstaller(project_root)
+    command = ["/bin/bash", str(shell_script), str(os.getpid())]
 
     if sys.platform == "darwin":
-        launcher = Path(tempfile.gettempdir()) / f"AMADEUS-uninstall-{uuid.uuid4().hex}.command"
+        launcher = Path(tempfile.gettempdir()) / f"AMADEUS-uninstall-launch-{uuid.uuid4().hex}.command"
         launcher.write_text(
             "#!/usr/bin/env bash\n"
-            + "status=0\n"
+            + "exec "
             + " ".join(shlex.quote(part) for part in command)
-            + " || status=$?\n"
-            + 'rm -f -- "$0"\n'
-            + 'exit "$status"\n',
+            + "\n",
             encoding="utf-8",
         )
         launcher.chmod(0o700)
@@ -460,14 +296,15 @@ def _launch_uninstaller(script: Path, project_root: Path) -> None:
     )
     for executable, prefix in terminals:
         resolved = shutil.which(executable)
-        if resolved:
-            subprocess.Popen(
-                [resolved, *prefix, *command],
-                cwd=temp_dir,
-                start_new_session=True,
-                close_fds=True,
-            )
-            return
+        if not resolved:
+            continue
+        subprocess.Popen(
+            [resolved, *prefix, *command],
+            cwd=temp_dir,
+            start_new_session=True,
+            close_fds=True,
+        )
+        return
 
     subprocess.Popen(
         command,
@@ -526,21 +363,14 @@ def start_uninstall(root, *, on_uninstall_start: Callable[[], None]) -> None:
         )
         return
 
-    script = None
     try:
-        script = _write_external_uninstaller()
-        _launch_uninstaller(script, project_root)
+        _launch_uninstaller(project_root)
     except Exception as exc:
         messagebox.showerror(
             "Uninstall AMADEUS",
             f"Could not start the uninstaller. Nothing was deleted.\n\n{exc}",
             parent=root,
         )
-        if script is not None:
-            try:
-                script.unlink(missing_ok=True)
-            except OSError:
-                pass
         return
 
     on_uninstall_start()
