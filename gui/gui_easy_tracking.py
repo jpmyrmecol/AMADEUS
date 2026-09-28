@@ -82,6 +82,11 @@ _YOLO_TRAIN_DESC_PAT = re.compile(
 # Field separator in the training status line; wide enough to read at a glance.
 _TRAIN_FIELD_GAP = "   "
 
+# Keep all Visual Progress text close to the size of the Easy Tracking controls.
+_VISUAL_PROGRESS_FONT_SIZE = 13
+_VISUAL_PROGRESS_FONT = ("TkDefaultFont", _VISUAL_PROGRESS_FONT_SIZE)
+_VISUAL_PROGRESS_TITLE_FONT = ("TkDefaultFont", _VISUAL_PROGRESS_FONT_SIZE, "bold")
+
 # Both halves of the VRAM field are shown in GiB so they share one unit.
 # Ultralytics prints reserved memory as bytes / 1e9, nvidia-smi reports MiB, and
 # GiB is what nvidia-smi, Task Manager and the card's own advertised capacity
@@ -145,7 +150,7 @@ CTK_THEME = str(gui_asset("deep_green.json"))
 
 if MAIN_DIR not in sys.path:
     sys.path.insert(0, MAIN_DIR)
-from compute_telemetry import query_nvidia_smi_index
+from compute_telemetry import query_nvidia_smi_index_with_temperature
 from experiment_utils import DEFAULT_LR0, DEFAULT_LRF
 from path_utils import relativize_config_paths
 from segmentation_metadata import (
@@ -292,6 +297,10 @@ class EasyTrackingGUI(ctk.CTk):
         self._refine_losses: list[float] = []  # live per-batch box_loss from direction_class_filtering
         self._reset_training_progress()
         self._system_monitor_snapshot: dict[str, float | str | None] = {}
+        self._system_monitor_canvas: tk.Canvas | None = None
+        self._system_monitor_canvas_size: tuple[int, int] | None = None
+        self._system_monitor_meter_items: dict[str, dict[str, int | float]] = {}
+        self._system_monitor_backend_item: int | None = None
         self._system_monitor_stop = threading.Event()
         self._system_monitor_thread: threading.Thread | None = None
 
@@ -693,7 +702,7 @@ class EasyTrackingGUI(ctk.CTk):
         hdr = tk.Frame(parent, bg="#222222")
         hdr.grid(row=0, column=0, sticky="ew")
         tk.Label(hdr, text="Visual Progress", bg="#222222", fg="#cccccc",
-                 font=("TkDefaultFont", 10, "bold")).pack(side="left", padx=10, pady=5)
+                 font=_VISUAL_PROGRESS_TITLE_FONT).pack(side="left", padx=10, pady=5)
 
         self._display_canvas = tk.Canvas(parent, bg="#1a1a1a", highlightthickness=0)
         self._display_canvas.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
@@ -701,7 +710,7 @@ class EasyTrackingGUI(ctk.CTk):
 
         self._canvas_status = tk.Label(
             parent, text="Waiting for processing to start...",
-            bg="#181818", fg="#666666", font=("TkDefaultFont", 8),
+            bg="#181818", fg="#aaaaaa", font=_VISUAL_PROGRESS_FONT,
             wraplength=600, justify="center",
         )
         self._canvas_status.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
@@ -734,8 +743,8 @@ class EasyTrackingGUI(ctk.CTk):
         w = max(c.winfo_width(), 100)
         h = max(c.winfo_height(), 100)
         c.create_rectangle(0, 0, w, h, fill="#1a1a1a", outline="")
-        c.create_text(w // 2, h // 2, text=msg, fill="#555555",
-                      font=("TkDefaultFont", 10), justify="center",
+        c.create_text(w // 2, h // 2, text=msg, fill="#999999",
+                      font=_VISUAL_PROGRESS_FONT, justify="center",
                       width=w - 40, anchor="center")
 
     def _show_image_on_canvas(self, path: str, caption: str = "") -> None:
@@ -778,12 +787,13 @@ class EasyTrackingGUI(ctk.CTk):
         x_label: str, color: str,
         y_offset: int = 0, panel_height: int = 0,
         x_offset: int = 0, panel_width: int = 0,
+        tick_decimals: int | None = None,
     ) -> None:
         full_width = max(canvas.winfo_width(), 100)
         cw = panel_width or full_width
         ph = panel_height or max(canvas.winfo_height(), 100)
 
-        ml, mr, mt, mb = 54, 8, 22, 26
+        ml, mr, mt, mb = 64, 8, 28, 36
         plot_left = x_offset + ml
         pw = cw - ml - mr
         ph_inner = ph - mt - mb
@@ -808,17 +818,20 @@ class EasyTrackingGUI(ctk.CTk):
         )
         canvas.create_text(
             x_offset + cw // 2, y_offset + 11, text=title,
-            fill="#cccccc", font=("TkDefaultFont", 9, "bold"), anchor="center",
+            fill="#cccccc", font=_VISUAL_PROGRESS_TITLE_FONT, anchor="center",
         )
 
         for frac in (0.0, 0.5, 1.0):
             v = min_v + frac * rng
             y = py(v)
             canvas.create_line(plot_left, y, plot_left + pw, y, fill="#272727", dash=(3, 5))
-            lbl = f"{v:.4g}" if abs(v) < 1e4 else f"{v:.2e}"
+            if tick_decimals is not None:
+                lbl = f"{v:.{tick_decimals}f}"
+            else:
+                lbl = f"{v:.3g}" if abs(v) < 1e4 else f"{v:.2e}"
             canvas.create_text(
                 plot_left - 3, y, text=lbl,
-                fill="#666", font=("TkDefaultFont", 7), anchor="e",
+                fill="#888888", font=_VISUAL_PROGRESS_FONT, anchor="e",
             )
 
         axis_y = y_offset + mt + ph_inner
@@ -826,16 +839,16 @@ class EasyTrackingGUI(ctk.CTk):
         canvas.create_line(plot_left, axis_y, plot_left + pw, axis_y, fill="#555", width=1)
         canvas.create_text(
             plot_left, axis_y + 4, text="0",
-            fill="#666", font=("TkDefaultFont", 7), anchor="n",
+            fill="#888888", font=_VISUAL_PROGRESS_FONT, anchor="n",
         )
         canvas.create_text(
             plot_left + pw, axis_y + 4, text=str(n - 1),
-            fill="#666", font=("TkDefaultFont", 7), anchor="n",
+            fill="#888888", font=_VISUAL_PROGRESS_FONT, anchor="n",
         )
         if x_label:
             canvas.create_text(
                 plot_left + pw // 2, axis_y + 14,
-                text=x_label, fill="#888", font=("TkDefaultFont", 7), anchor="n",
+                text=x_label, fill="#aaaaaa", font=_VISUAL_PROGRESS_FONT, anchor="n",
             )
 
         if n >= 2:
@@ -853,14 +866,15 @@ class EasyTrackingGUI(ctk.CTk):
         x_label: str = "",
         y_offset: int = 0, panel_height: int = 0,
         subtitle: str = "",
+        tick_decimals: int | None = None,
     ) -> None:
         """Draw multiple series on the same axes. series: [(values, color, label), ...]"""
         cw = max(canvas.winfo_width(), 100)
         ph = panel_height or max(canvas.winfo_height(), 100)
 
-        ml, mr = 54, 8
-        mt = 34 if subtitle else 22
-        mb = 26
+        ml, mr = 64, 8
+        mt = 48 if subtitle else 28
+        mb = 36
         pw = cw - ml - mr
         ph_inner = ph - mt - mb
 
@@ -883,33 +897,42 @@ class EasyTrackingGUI(ctk.CTk):
         canvas.create_rectangle(0, y_offset, cw, y_offset + ph, fill="#1a1a1a", outline="")
         canvas.create_text(
             cw // 2, y_offset + 11, text=title,
-            fill="#cccccc", font=("TkDefaultFont", 9, "bold"), anchor="center",
+            fill="#cccccc", font=_VISUAL_PROGRESS_TITLE_FONT, anchor="center",
         )
         if subtitle:
             canvas.create_text(
-                cw // 2, y_offset + 24, text=subtitle,
-                fill="#777777", font=("TkDefaultFont", 7), anchor="center",
+                cw // 2, y_offset + 29, text=subtitle,
+                fill="#999999", font=_VISUAL_PROGRESS_FONT, anchor="center",
             )
 
         for frac in (0.0, 0.5, 1.0):
             v = min_v + frac * rng
             y = py(v)
             canvas.create_line(ml, y, ml + pw, y, fill="#272727", dash=(3, 5))
-            lbl = f"{v:.4g}" if abs(v) < 1e4 else f"{v:.2e}"
-            canvas.create_text(ml - 3, y, text=lbl, fill="#666", font=("TkDefaultFont", 7), anchor="e")
+            if tick_decimals is not None:
+                lbl = f"{v:.{tick_decimals}f}"
+            else:
+                lbl = f"{v:.3g}" if abs(v) < 1e4 else f"{v:.2e}"
+            canvas.create_text(
+                ml - 3, y, text=lbl, fill="#888888",
+                font=_VISUAL_PROGRESS_FONT, anchor="e",
+            )
 
         axis_y = y_offset + mt + ph_inner
         canvas.create_line(ml, y_offset + mt, ml, axis_y, fill="#555", width=1)
         canvas.create_line(ml, axis_y, ml + pw, axis_y, fill="#555", width=1)
-        canvas.create_text(ml, axis_y + 4, text="0", fill="#666", font=("TkDefaultFont", 7), anchor="n")
+        canvas.create_text(
+            ml, axis_y + 4, text="0", fill="#888888",
+            font=_VISUAL_PROGRESS_FONT, anchor="n",
+        )
         canvas.create_text(
             ml + pw, axis_y + 4, text=str(n_max - 1),
-            fill="#666", font=("TkDefaultFont", 7), anchor="n",
+            fill="#888888", font=_VISUAL_PROGRESS_FONT, anchor="n",
         )
         if x_label:
             canvas.create_text(
                 ml + pw // 2, axis_y + 14,
-                text=x_label, fill="#888", font=("TkDefaultFont", 7), anchor="n",
+                text=x_label, fill="#aaaaaa", font=_VISUAL_PROGRESS_FONT, anchor="n",
             )
 
         for vals, color, label in valid_series:
@@ -932,9 +955,9 @@ class EasyTrackingGUI(ctk.CTk):
             canvas.create_line(lx - 18, ly + 4, lx - 4, ly + 4, fill=color, width=3)
             canvas.create_text(
                 lx - 22, ly + 4, text=label, fill=color,
-                font=("TkDefaultFont", 7), anchor="e",
+                font=_VISUAL_PROGRESS_FONT, anchor="e",
             )
-            ly += 14
+            ly += 18
 
     def _render_dual_chart(self, data: dict) -> None:
         """Two stacked charts: embedding loss (top) + silhouette score (bottom)."""
@@ -955,7 +978,7 @@ class EasyTrackingGUI(ctk.CTk):
             self._render_line_chart(c, ss_vals, "Silhouette Score",
                                     "batch", "#1f8040", y_offset=half, panel_height=half)
             # Target line at 0.91
-            ml, mt, mb = 54, 22, 26
+            ml, mt, mb = 64, 28, 36
             ph_inner = half - mt - mb
             min_ss = min(ss_vals + [0.0])
             max_ss = max(ss_vals + [0.95])
@@ -965,7 +988,7 @@ class EasyTrackingGUI(ctk.CTk):
                 c.create_line(ml, y_tgt, cw - 8, y_tgt,
                               fill="#cc4444", dash=(4, 4), width=1)
                 c.create_text(cw - 10, y_tgt - 6, text="0.91",
-                              fill="#cc4444", font=("TkDefaultFont", 7), anchor="e")
+                              fill="#cc4444", font=_VISUAL_PROGRESS_FONT, anchor="e")
 
     def _draw_training_monitor(self, data: dict) -> None:
         self._canvas_content = {"type": "training_monitor", "data": data}
@@ -991,12 +1014,12 @@ class EasyTrackingGUI(ctk.CTk):
         )
         canvas.create_text(
             x_offset + cw // 2, y_offset + 11, text=title,
-            fill="#cccccc", font=("TkDefaultFont", 9, "bold"), anchor="center",
+            fill="#cccccc", font=_VISUAL_PROGRESS_TITLE_FONT, anchor="center",
         )
         if msg:
             canvas.create_text(
                 x_offset + cw // 2, y_offset + ph // 2, text=msg,
-                fill="#555555", font=("TkDefaultFont", 9),
+                fill="#888888", font=_VISUAL_PROGRESS_FONT,
                 justify="center", width=max(80, cw - 24), anchor="center",
             )
 
@@ -1009,58 +1032,177 @@ class EasyTrackingGUI(ctk.CTk):
         panel_width: int,
         panel_height: int,
     ) -> None:
-        snapshot = dict(self._system_monitor_snapshot)
-        canvas.create_rectangle(
-            x_offset, y_offset, x_offset + panel_width, y_offset + panel_height,
-            fill="#171717", outline="",
+        width = max(1, int(panel_width))
+        height = max(1, int(panel_height))
+        meter_canvas = self._system_monitor_canvas
+        if meter_canvas is None:
+            meter_canvas = tk.Canvas(canvas, bg="#171717", highlightthickness=0, bd=0)
+            self._system_monitor_canvas = meter_canvas
+
+        meter_canvas.configure(width=width, height=height)
+        canvas.create_window(
+            x_offset, y_offset, anchor="nw", width=width, height=height,
+            window=meter_canvas,
         )
+
+        if self._system_monitor_canvas_size != (width, height):
+            self._draw_system_monitor_meter_static(meter_canvas, width, height)
+            self._system_monitor_canvas_size = (width, height)
+        self._update_system_monitor_meter_values(meter_canvas)
+
+    def _draw_system_monitor_meter_static(
+        self,
+        canvas: tk.Canvas,
+        width: int,
+        height: int,
+    ) -> None:
+        """Draw meter arcs, ticks and labels once for the current panel size."""
+        canvas.delete("all")
+        canvas.create_rectangle(0, 0, width, height, fill="#171717", outline="")
         canvas.create_text(
-            x_offset + panel_width // 2, y_offset + 11,
-            text="System Monitor", fill="#cccccc",
-            font=("TkDefaultFont", 9, "bold"), anchor="center",
+            width // 2, 10, text="System Monitor", fill="#cccccc",
+            font=_VISUAL_PROGRESS_TITLE_FONT, anchor="center",
+        )
+        self._system_monitor_backend_item = canvas.create_text(
+            width // 2, 28, text="Waiting for metrics...", fill="#999999",
+            font=_VISUAL_PROGRESS_FONT, anchor="center", width=max(1, width - 8),
+            justify="center",
         )
 
-        def gib_text(used, total) -> str:
-            if used is None:
-                return "n/a"
-            if total:
-                return f"{used:.1f}/{total:.1f} GiB"
-            return f"{used:.1f} GiB"
+        gauge_top = 40
+        row_height = max(1.0, (height - gauge_top) / 2.0)
+        cell_width = width / 3.0
+        canvas.create_line(0, gauge_top + row_height, width, gauge_top + row_height,
+                           fill="#282d29", width=1)
 
-        if not snapshot:
+        self._system_monitor_meter_items = {}
+        for index, name in enumerate(("GPU", "VRAM", "GPU Temp", "CPU", "RAM", "Swap")):
+            column = index % 3
+            row = index // 3
+            x0 = column * cell_width
+            y0 = gauge_top + row * row_height
+            if column:
+                canvas.create_line(x0, y0, x0, y0 + row_height,
+                                   fill="#282d29", width=1)
+
+            center_x = x0 + cell_width / 2.0
+            radius = max(2.0, min((cell_width - 8.0) / 2.0, row_height * 0.34))
+            center_y = y0 + row_height * 0.60
             canvas.create_text(
-                x_offset + panel_width // 2,
-                y_offset + panel_height // 2,
-                text="Waiting for metrics...",
-                fill="#555555", font=("TkDefaultFont", 8),
-                width=max(60, panel_width - 18), justify="center",
+                center_x, y0 + 8, text=name, fill="#c7d0ca",
+                font=_VISUAL_PROGRESS_FONT, anchor="center",
             )
-            return
 
-        gpu_util = snapshot.get("gpu_util")
-        lines = [
-            f"GPU  {gpu_util:.0f}%" if isinstance(gpu_util, (int, float)) else "GPU  n/a",
-            f"VRAM  {gib_text(snapshot.get('vram_used'), snapshot.get('vram_total'))}",
-            f"CPU  {snapshot.get('cpu', 0.0):.0f}%",
-            f"RAM  {gib_text(snapshot.get('ram_used'), snapshot.get('ram_total'))}",
-            f"Swap  {gib_text(snapshot.get('swap_used'), snapshot.get('swap_total'))}",
-        ]
-        if snapshot.get("backend"):
-            lines.insert(0, str(snapshot["backend"]))
-
-        start_y = y_offset + 34
-        available_h = max(20, panel_height - 42)
-        step = max(15, min(22, available_h // max(1, len(lines))))
-        for index, line in enumerate(lines):
-            canvas.create_text(
-                x_offset + 10,
-                start_y + index * step,
-                text=line,
-                fill="#9a9a9a" if index else "#bbbbbb",
-                font=("TkDefaultFont", 7 if panel_width < 170 else 8),
-                anchor="nw",
-                width=max(50, panel_width - 16),
+            arc_points = []
+            for step in range(37):
+                theta = math.pi - step * math.pi / 36.0
+                arc_points.extend((
+                    center_x + radius * math.cos(theta),
+                    center_y - radius * math.sin(theta),
+                ))
+            canvas.create_line(
+                *arc_points, fill="#46534a", width=3, smooth=True,
             )
+
+            for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+                theta = math.pi * (1.0 - fraction)
+                outer = radius - 1.0
+                inner = radius - 8.0
+                canvas.create_line(
+                    center_x + inner * math.cos(theta),
+                    center_y - inner * math.sin(theta),
+                    center_x + outer * math.cos(theta),
+                    center_y - outer * math.sin(theta),
+                    fill="#829087", width=1,
+                )
+
+            needle = canvas.create_line(
+                center_x, center_y, center_x, center_y,
+                fill="#58a977", width=2.5, state="hidden",
+            )
+            hub_radius = 3.0
+            hub = canvas.create_oval(
+                center_x - hub_radius, center_y - hub_radius,
+                center_x + hub_radius, center_y + hub_radius,
+                fill="#9ba99e", outline="",
+            )
+            value = canvas.create_text(
+                center_x, y0 + row_height - 18, text="N/A", fill="#aab4ad",
+                font=_VISUAL_PROGRESS_FONT, anchor="center",
+                width=max(1, int(cell_width - 4)), justify="center",
+            )
+            self._system_monitor_meter_items[name] = {
+                "needle": needle,
+                "value": value,
+                "center_x": center_x,
+                "center_y": center_y,
+                "needle_length": int(max(1.0, radius - 9.0)),
+            }
+
+    def _update_system_monitor_meter_values(self, canvas: tk.Canvas) -> None:
+        snapshot = dict(self._system_monitor_snapshot)
+        width = self._system_monitor_canvas_size[0]
+        backend = snapshot.get("backend") or self._training_backend_label
+        canvas.itemconfigure(
+            self._system_monitor_backend_item,
+            text=str(backend) if backend else "Waiting for metrics...",
+        )
+
+        def finite_number(value) -> bool:
+            return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+        def pair_label(current: float, maximum: float, unit: str) -> str:
+            if width / 3.0 < 112.0:
+                return f"{current:.1f}\n/ {maximum:.1f} {unit}"
+            return f"{current:.1f} / {maximum:.1f}\n{unit}"
+
+        def fixed_scale(value, maximum: float, unit: str) -> tuple[str, float | None]:
+            if not finite_number(value):
+                return "N/A", None
+            numeric = float(value)
+            return pair_label(numeric, maximum, unit), min(1.0, max(0.0, numeric / maximum))
+
+        def measured_scale(used, total, unit: str) -> tuple[str, float | None]:
+            if not finite_number(used) or not finite_number(total) or float(total) <= 0:
+                return "N/A", None
+            used_value = float(used)
+            total_value = float(total)
+            return (
+                pair_label(used_value, total_value, unit),
+                min(1.0, max(0.0, used_value / total_value)),
+            )
+
+        measurements = {
+            "GPU": fixed_scale(snapshot.get("gpu_util"), 100.0, "%"),
+            "VRAM": measured_scale(
+                snapshot.get("vram_used"), snapshot.get("vram_total"), "GB",
+            ),
+            "GPU Temp": fixed_scale(snapshot.get("gpu_temp_c"), 100.0, "°C"),
+            "CPU": fixed_scale(snapshot.get("cpu"), 100.0, "%"),
+            "RAM": measured_scale(
+                snapshot.get("ram_used"), snapshot.get("ram_total"), "GB",
+            ),
+            "Swap": measured_scale(
+                snapshot.get("swap_used"), snapshot.get("swap_total"), "GB",
+            ),
+        }
+
+        for name, (label, fraction) in measurements.items():
+            items = self._system_monitor_meter_items[name]
+            canvas.itemconfigure(items["value"], text=label)
+            if fraction is None:
+                canvas.itemconfigure(items["needle"], state="hidden")
+                continue
+            angle = math.pi * (1.0 - fraction)
+            center_x = items["center_x"]
+            center_y = items["center_y"]
+            needle_length = items["needle_length"]
+            canvas.coords(
+                items["needle"], center_x, center_y,
+                center_x + needle_length * math.cos(angle),
+                center_y - needle_length * math.sin(angle),
+            )
+            canvas.itemconfigure(items["needle"], state="normal")
 
     def _render_training_monitor(self, data: dict) -> None:
         """Training view: full-width loss above 3:1 mAP fitness/system monitor."""
@@ -1084,6 +1226,7 @@ class EasyTrackingGUI(ctk.CTk):
                 y_offset=0,
                 panel_height=half,
                 subtitle="A decreasing loss that levels off is generally a good sign.",
+                tick_decimals=3,
             )
         else:
             self._render_empty_chart_panel(
@@ -1106,6 +1249,7 @@ class EasyTrackingGUI(ctk.CTk):
                 panel_height=ch - half,
                 x_offset=0,
                 panel_width=fitness_width,
+                tick_decimals=3,
             )
         else:
             self._render_empty_chart_panel(
@@ -1350,9 +1494,9 @@ class EasyTrackingGUI(ctk.CTk):
                     "fitness": fitness,
                 }
             )
-            status = f"Batch {n}  |  train/box_loss = {self._batch_losses[-1]:.4f}"
+            status = f"Batch {n}  |  train/box_loss = {self._batch_losses[-1]:.3f}"
             if fitness:
-                status += f"  |  fitness(0.1*mAP50+0.9*mAP50-95) = {fitness[-1]:.4f}"
+                status += f"  |  fitness(0.1*mAP50+0.9*mAP50-95) = {fitness[-1]:.3f}"
             self._canvas_status.configure(text=status)
             return
 
@@ -1377,11 +1521,11 @@ class EasyTrackingGUI(ctk.CTk):
                 }
             )
             n = len(train_losses)
-            status = f"Epoch {n}  |  train/box_loss = {train_losses[-1]:.4f}"
+            status = f"Epoch {n}  |  train/box_loss = {train_losses[-1]:.3f}"
             if val_losses:
-                status += f"  |  val/box_loss = {val_losses[-1]:.4f}"
+                status += f"  |  val/box_loss = {val_losses[-1]:.3f}"
             if fitness:
-                status += f"  |  fitness(0.1*mAP50+0.9*mAP50-95) = {fitness[-1]:.4f}"
+                status += f"  |  fitness(0.1*mAP50+0.9*mAP50-95) = {fitness[-1]:.3f}"
             self._canvas_status.configure(text=status)
         else:
             self._draw_placeholder("Training in progress...")
@@ -1393,7 +1537,7 @@ class EasyTrackingGUI(ctk.CTk):
             self._refine_losses, "Refine Blobs: Training Loss (batch)", "batch", "#4dbbd5"
         )
         self._canvas_status.configure(
-            text=f"Batch {n}  |  train/box_loss = {self._refine_losses[-1]:.4f}"
+            text=f"Batch {n}  |  train/box_loss = {self._refine_losses[-1]:.3f}"
         )
 
     def _show_embedding_loss(self, session: str) -> None:
@@ -1419,7 +1563,7 @@ class EasyTrackingGUI(ctk.CTk):
             n = len(losses)
             last_ss = ss_vals[-1] if ss_vals else float("nan")
             self._canvas_status.configure(
-                text=f"Batch {n}  |  loss = {losses[-1]:.4f}  |  SS = {last_ss:.3f}"
+                text=f"Batch {n}  |  loss = {losses[-1]:.3f}  |  SS = {last_ss:.3f}"
                 if losses else "Embedding training starting..."
             )
         else:
@@ -1502,14 +1646,17 @@ class EasyTrackingGUI(ctk.CTk):
                 vm = psutil.virtual_memory()
                 swap = psutil.swap_memory()
                 if self._training_backend_label in {"", "NVIDIA CUDA"}:
-                    gpu_util, vram_used, vram_total = query_nvidia_smi_index(logical_gpu_index)
+                    gpu_util, vram_used, vram_total, gpu_temp_c = (
+                        query_nvidia_smi_index_with_temperature(logical_gpu_index)
+                    )
                 else:
-                    gpu_util, vram_used, vram_total = None, None, None
+                    gpu_util, vram_used, vram_total, gpu_temp_c = None, None, None, None
                 self._system_monitor_snapshot = {
                     "backend": self._training_backend_label or "Detecting backend...",
                     "gpu_util": gpu_util,
                     "vram_used": vram_used,
                     "vram_total": vram_total,
+                    "gpu_temp_c": gpu_temp_c,
                     "cpu": psutil.cpu_percent(interval=None),
                     "ram_used": vm.used / (1024.0 ** 3),
                     "ram_total": vm.total / (1024.0 ** 3),

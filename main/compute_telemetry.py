@@ -6,6 +6,7 @@
 AMD currently uses allocator measurements. An AMD SMI provider can be added
 here without changing training or making its installation mandatory.
 """
+import math
 import os
 import shutil
 import subprocess
@@ -103,15 +104,25 @@ def query_nvidia_driver_info() -> tuple[str, str, str] | None:
     return None
 
 
-def query_nvidia_smi_index(logical_index: int = 0) -> tuple[float | None, float | None, float | None]:
-    """Return NVIDIA utilization/VRAM for a logical CUDA index without importing torch."""
+def _parse_nvidia_smi_number(value: str) -> float | None:
+    try:
+        parsed = float(value.strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def query_nvidia_smi_index_with_temperature(
+    logical_index: int = 0,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Return NVIDIA utilization, VRAM and temperature without importing torch."""
     for executable in nvidia_smi_candidates():
         try:
             out = subprocess.check_output(
                 [
                     executable,
                     f"--id={_nvidia_smi_id(int(logical_index))}",
-                    "--query-gpu=utilization.gpu,memory.used,memory.total",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
                     "--format=csv,noheader,nounits",
                 ],
                 stderr=subprocess.DEVNULL,
@@ -120,12 +131,49 @@ def query_nvidia_smi_index(logical_index: int = 0) -> tuple[float | None, float 
                 errors="replace",
                 timeout=2.0,
             ).strip()
+        except Exception:
+            # Older drivers may reject temperature.gpu. Retry the established
+            # three-field query so temperature support cannot disable telemetry.
+            try:
+                out = subprocess.check_output(
+                    [
+                        executable,
+                        f"--id={_nvidia_smi_id(int(logical_index))}",
+                        "--query-gpu=utilization.gpu,memory.used,memory.total",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=2.0,
+                ).strip()
+            except Exception:
+                continue
+
+        try:
             first = out.splitlines()[0]
-            util_s, used_s, total_s = [x.strip() for x in first.split(",")[:3]]
-            return float(util_s), float(used_s) / 1024.0, float(total_s) / 1024.0
+            fields = [x.strip() for x in first.split(",")]
+            if len(fields) < 3:
+                continue
+            util = _parse_nvidia_smi_number(fields[0])
+            used_mib = _parse_nvidia_smi_number(fields[1])
+            total_mib = _parse_nvidia_smi_number(fields[2])
+            temperature = _parse_nvidia_smi_number(fields[3]) if len(fields) > 3 else None
+            used_gib = None if used_mib is None else used_mib / 1024.0
+            total_gib = None if total_mib is None else total_mib / 1024.0
+            return util, used_gib, total_gib, temperature
         except Exception:
             continue
-    return None, None, None
+    return None, None, None, None
+
+
+def query_nvidia_smi_index(logical_index: int = 0) -> tuple[float | None, float | None, float | None]:
+    """Return NVIDIA utilization/VRAM for a logical CUDA index without importing torch."""
+    util, used, total, _temperature = query_nvidia_smi_index_with_temperature(logical_index)
+    if util is None or used is None or total is None:
+        return None, None, None
+    return util, used, total
 
 
 def query_nvidia_smi(device) -> tuple[float | None, float | None, float | None]:
