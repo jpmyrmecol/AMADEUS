@@ -102,6 +102,105 @@ def _write_external_uninstaller() -> Path:
                     raise RuntimeError("Target folder is not an AMADEUS installation.")
                 return root
 
+            def _windows_command_dir() -> Path:
+                local_app_data = Path(
+                    os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+                )
+                return (local_app_data / "AMADEUS" / "bin").resolve()
+
+            def _remove_windows_user_path(command_dir: Path) -> None:
+                import winreg
+
+                with winreg.CreateKeyEx(
+                    winreg.HKEY_CURRENT_USER,
+                    "Environment",
+                    0,
+                    winreg.KEY_READ | winreg.KEY_SET_VALUE,
+                ) as key:
+                    try:
+                        current, value_type = winreg.QueryValueEx(key, "Path")
+                    except FileNotFoundError:
+                        return
+
+                    target = os.path.normcase(os.path.abspath(str(command_dir)))
+                    kept = []
+                    changed = False
+                    for raw_entry in str(current).split(";"):
+                        entry = raw_entry.strip()
+                        if not entry:
+                            continue
+                        try:
+                            normalized = os.path.normcase(
+                                os.path.abspath(os.path.expandvars(entry))
+                            )
+                        except OSError:
+                            normalized = os.path.normcase(entry)
+                        if normalized == target:
+                            changed = True
+                            continue
+                        kept.append(entry)
+
+                    if not changed:
+                        return
+                    new_value = ";".join(kept)
+                    if new_value:
+                        new_value += ";"
+                    winreg.SetValueEx(key, "Path", 0, value_type, new_value)
+
+                try:
+                    from ctypes import wintypes
+                    user32 = ctypes.windll.user32
+                    user32.SendMessageTimeoutW(
+                        0xFFFF,
+                        0x001A,
+                        0,
+                        "Environment",
+                        0x0002,
+                        5000,
+                        ctypes.byref(wintypes.DWORD_PTR()),
+                    )
+                except Exception:
+                    pass
+
+            def cleanup_external_commands() -> None:
+                if os.name == "nt":
+                    command_dir = _windows_command_dir()
+                    _remove_windows_user_path(command_dir)
+                    last_error = None
+                    for _ in range(30):
+                        try:
+                            shutil.rmtree(command_dir)
+                        except FileNotFoundError:
+                            last_error = None
+                            break
+                        except OSError as exc:
+                            last_error = exc
+                            time.sleep(0.5)
+                            continue
+                        last_error = None
+                        break
+                    if command_dir.exists():
+                        raise RuntimeError(
+                            f"Could not remove the AMADEUS command directory: "
+                            f"{command_dir} ({last_error})"
+                        )
+                    parent = command_dir.parent
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        pass
+                    print("[AMADEUS] Removed Windows amadeus/amade commands and PATH entry.", flush=True)
+                    return
+
+                command_dir = Path.home() / ".local" / "bin"
+                for name in ("amadeus", "amade"):
+                    path = command_dir / name
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+                print("[AMADEUS] Removed ~/.local/bin/amadeus and ~/.local/bin/amade.", flush=True)
+
             def wait_for_pid(pid: int) -> None:
                 if os.name == "nt":
                     from ctypes import wintypes
@@ -130,6 +229,7 @@ def _write_external_uninstaller() -> Path:
                 print("[AMADEUS] Waiting for AMADEUS to close...", flush=True)
                 wait_for_pid(parent_pid)
                 time.sleep(0.75)
+                cleanup_external_commands()
                 print(f"[AMADEUS] Removing {root}", flush=True)
 
                 last_error = None
