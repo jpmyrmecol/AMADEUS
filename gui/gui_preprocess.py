@@ -1138,6 +1138,8 @@ class PreprocessApp(ctk.CTk):
         self.canvas.bind("<Leave>", self._on_canvas_leave, add="+")
         self.frame_slider.bind("<Double-Button-1>", self._on_frame_slider_double_click, add="+")
         self.trim_canvas.bind("<Configure>", lambda _event: self._draw_trim_markers(), add="+")
+        self.bind_all("<Left>", self._on_frame_navigation_key, add="+")
+        self.bind_all("<Right>", self._on_frame_navigation_key, add="+")
 
     def _last_frame_index(self) -> int:
         if self.reader is None:
@@ -1790,6 +1792,30 @@ class PreprocessApp(ctk.CTk):
         if self.reader is None:
             return
         self.set_frame(int(round(float(value))))
+
+    def _on_frame_navigation_key(self, event) -> str | None:
+        if self.reader is None or self.export_running:
+            return None
+
+        widget = event.widget
+        try:
+            widget_class = widget.winfo_class()
+        except (AttributeError, tk.TclError):
+            widget_class = ""
+        if isinstance(widget, (tk.Entry, tk.Spinbox, tk.Text)) or widget_class in {
+            "Entry",
+            "TEntry",
+            "Spinbox",
+            "TSpinbox",
+            "Text",
+        }:
+            return None
+
+        delta = {"Left": -1, "Right": 1}.get(str(getattr(event, "keysym", "")))
+        if delta is None:
+            return None
+        self.step_frame(delta)
+        return "break"
 
     def _on_frame_slider_double_click(self, _event=None) -> None:
         if self.reader is None or self.export_running:
