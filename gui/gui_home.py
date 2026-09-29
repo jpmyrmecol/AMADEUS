@@ -136,7 +136,7 @@ def show_splash(root: ctk.CTk, reveal: bool = False) -> tk.Toplevel:
             w, h = photo.width(), photo.height()
             reveal_from_left(canvas, cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, SPLASH_BG)
     else:
-        canvas.create_text(screen_w / 2, screen_h / 2, text=APP_TITLE, font=tk_font_spec("Arial", 32, "bold"), fill="white")
+        canvas.create_text(screen_w / 2, screen_h / 2, text=APP_TITLE, font=tk_font_spec(splash, "Arial", 32, "bold"), fill="white")
 
     splash.lift()
     return splash
@@ -215,7 +215,8 @@ def make_panel(
         cursor="hand2",
         takefocus=1,
     )
-    font = tk_font_spec("Arial", font_size, "bold")
+    font = tk_font_spec(root, "Arial", font_size, "bold")
+    canvas.AMADEUS_PANEL_FONT = font
     shadow = canvas.create_text(0, 0, text=text, fill=SHADOW_COLOR, font=font, anchor="center", justify="center")
     label = canvas.create_text(0, 0, text=text, fill=TEXT_COLOR, font=font, anchor="center", justify="center")
     state = {"hover": 0.0, "target": 0.0, "phase": 0.0, "flow": 0.0, "job_id": None}
@@ -379,6 +380,9 @@ def build_home(root: ctk.CTk) -> None:
     def corner_outline(name: str, state: dict) -> str:
         return "#333333"
 
+    corner_font = tk_font_spec(root, "Arial", 13)
+    easy_panel.AMADEUS_CORNER_FONT = corner_font
+
     def draw_corner_buttons(_event=None) -> None:
         radius = 8
         for name, state in corner_buttons.items():
@@ -404,7 +408,7 @@ def build_home(root: ctk.CTk) -> None:
                     (y0 + y1) / 2,
                     text=state["text"],
                     fill=TEXT_COLOR,
-                    font=tk_font_spec("Arial", 13),
+                    font=corner_font,
                     tags=("corner_button", name),
                 )
                 continue
