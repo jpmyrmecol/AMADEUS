@@ -1240,7 +1240,7 @@ def write_rotation_dataset_previews(
         if key in stems_by_group:
             stems_by_group[key].append(stem)
 
-    limit = max(0, int(num_preview_frames))
+    limit = min(20, max(0, int(num_preview_frames)))
     if limit <= 0:
         print(f"[PREVIEW] written=0 dir={preview_dir}")
         return 0
