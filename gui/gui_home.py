@@ -128,11 +128,15 @@ def show_splash(root: ctk.CTk, reveal: bool = False) -> tk.Toplevel:
     """Show a fullscreen black window with the AMADEUS logo centered on it."""
     splash = tk.Toplevel(root)
     splash.configure(bg=SPLASH_BG)
-    splash.attributes("-fullscreen", True)
-    splash.attributes("-topmost", True)
-
     screen_w = splash.winfo_screenwidth()
     screen_h = splash.winfo_screenheight()
+    if sys.platform.startswith("linux"):
+        splash.overrideredirect(True)
+        splash.geometry(f"{screen_w}x{screen_h}+0+0")
+    else:
+        splash.attributes("-fullscreen", True)
+    splash.attributes("-topmost", True)
+
     canvas = tk.Canvas(splash, width=screen_w, height=screen_h, bg=SPLASH_BG, highlightthickness=0, bd=0)
     canvas.pack(fill="both", expand=True)
     splash.AMADEUS_SPLASH_CANVAS = canvas
