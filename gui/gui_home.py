@@ -22,14 +22,26 @@ try:
     from .app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
     from .app_update import probe_update_status, start_update_check
     from .project_paths import PROJECT_ROOT, gui_asset, gui_script
-    from .splash_ipc import TOKEN_ENV_VAR, external_started_at, signal_stop
+    from .splash_ipc import (
+        TOKEN_ENV_VAR,
+        external_closed,
+        external_dismissed,
+        external_started_at,
+        signal_stop,
+    )
     from .splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon, tk_font_spec
 except ImportError:  # Preserve direct execution with: python gui/gui_home.py
     from app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
     from app_update import probe_update_status, start_update_check
     from project_paths import PROJECT_ROOT, gui_asset, gui_script
-    from splash_ipc import TOKEN_ENV_VAR, external_started_at, signal_stop
+    from splash_ipc import (
+        TOKEN_ENV_VAR,
+        external_closed,
+        external_dismissed,
+        external_started_at,
+        signal_stop,
+    )
     from splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon, tk_font_spec
 
@@ -592,19 +604,55 @@ def main() -> int:
         elapsed_ms = max(0, int((time.time() - external_start) * 1000))
     remaining_ms = max(0, min(reveal_total_ms(), MAX_DISPLAY_MS) - elapsed_ms)
     reveal_job: str | None = None
+    dismiss_poll_job: str | None = None
+    close_poll_job: str | None = None
+    reveal_requested = False
     main_revealed = False
 
-    def reveal_main_window(_event=None) -> None:
-        nonlocal main_revealed, reveal_job
+    def finish_reveal() -> None:
+        nonlocal main_revealed, dismiss_poll_job, close_poll_job
         if main_revealed:
             return
         main_revealed = True
+        dismiss_poll_job = None
+        close_poll_job = None
+        root.deiconify()
+        install_window_icon(root)
+        if os.name == "nt":
+            # Windows can leave the owner window stuck with the topmost style
+            # inherited from its topmost splash child; force-clear it.
+            root.attributes("-topmost", True)
+            root.attributes("-topmost", False)
+
+    def wait_for_external_splash_close() -> None:
+        nonlocal close_poll_job
+        close_poll_job = None
+        if external_closed():
+            finish_reveal()
+            return
+        close_poll_job = root.after(20, wait_for_external_splash_close)
+
+    def reveal_main_window(_event=None) -> None:
+        nonlocal reveal_requested, reveal_job, dismiss_poll_job
+        if reveal_requested:
+            return
+        reveal_requested = True
         if reveal_job is not None:
             try:
                 root.after_cancel(reveal_job)
             except tk.TclError:
                 pass
             reveal_job = None
+        if dismiss_poll_job is not None:
+            try:
+                root.after_cancel(dismiss_poll_job)
+            except tk.TclError:
+                pass
+            dismiss_poll_job = None
+        if has_external_splash:
+            signal_stop()
+            wait_for_external_splash_close()
+            return
         if splash is not None:
             try:
                 splash.attributes("-fullscreen", False)
@@ -612,17 +660,23 @@ def main() -> int:
                 splash.destroy()
             except tk.TclError:
                 pass
-        signal_stop()
-        root.deiconify()
-        install_window_icon(root)
-        # Windows can leave the owner window (root) stuck with the topmost
-        # style inherited from its topmost splash child; force-clear it.
-        root.attributes("-topmost", True)
-        root.attributes("-topmost", False)
+        finish_reveal()
+
+    def poll_external_splash_dismissal() -> None:
+        nonlocal dismiss_poll_job
+        dismiss_poll_job = None
+        if reveal_requested:
+            return
+        if external_dismissed():
+            reveal_main_window()
+            return
+        dismiss_poll_job = root.after(25, poll_external_splash_dismissal)
 
     if splash is not None:
         splash.bind("<ButtonPress>", reveal_main_window, add="+")
         splash.AMADEUS_SPLASH_CANVAS.bind("<ButtonPress>", reveal_main_window, add="+")
+    elif has_external_splash:
+        dismiss_poll_job = root.after(25, poll_external_splash_dismissal)
     reveal_job = root.after(remaining_ms, reveal_main_window)
     root.mainloop()
     if getattr(root, "_amadeus_uninstall_requested", False):
