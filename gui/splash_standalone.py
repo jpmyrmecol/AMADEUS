@@ -16,7 +16,7 @@ from splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
 POLL_MS = 100
 SAFETY_TIMEOUT_MS = 120_000
 SPLASH_BG = "black"
-SPLASH_LOGO_WIDTH_RATIO = 0.48  # logo width as a fraction of screen width
+SPLASH_LOGO_WIDTH_RATIO = 0.40  # logo width as a fraction of screen width
 
 
 def main() -> None:
