@@ -1148,7 +1148,7 @@ def rewrite_frame_assets(
         edge_blur_ksize += 1
 
     conf_thresh = float(cfg.get("REFINE_CONF", 0.2))
-    num_preview_frames = int(cfg.get("NUM_PREVIEW_FRAMES", 20))
+    num_preview_frames = min(20, max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20))))
     frame_interval = int(cfg.get("FRAME_INTERVAL", 5))
     selected_preview_frames = select_preview_frame_ids(
         [parse_frame_id_from_name(name) for name in frame_names],
