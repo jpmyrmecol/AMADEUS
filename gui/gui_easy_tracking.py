@@ -260,6 +260,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._batch_proc: subprocess.Popen | None = None
         self._batch_log_path: str = ""
         self._stop_requested = False
+        self._last_run_state = "idle"
         self._base_cfg: dict = {}
         self._loaded_cfg: dict = {}
         self._loaded_config_path: str = ""
@@ -450,6 +451,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._seg_proc = subprocess.Popen(cmd)
         self._seg_status.configure(text="Running...", text_color="#f0a000")
         self._seg_btn.configure(state="disabled")
+        self._update_next_action()
         threading.Thread(target=self._watch_seg, daemon=True).start()
 
     def _watch_seg(self) -> None:
@@ -487,6 +489,7 @@ class EasyTrackingGUI(ctk.CTk):
             self._seg_status.configure(text="Done", text_color="#1f8040")
         else:
             self._seg_status.configure(text="Not started", text_color="gray")
+        self._update_next_action()
 
     # Step 2: Questions
     def _build_questions_section(self, parent: ctk.CTkScrollableFrame) -> None:
@@ -857,12 +860,62 @@ class EasyTrackingGUI(ctk.CTk):
         self._display_canvas.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
         self._display_canvas.bind("<Configure>", lambda _e: self._on_canvas_resize())
 
+        self._next_action_label = tk.Label(
+            parent,
+            text="",
+            bg="#202820",
+            fg="#d7eadc",
+            font=_VISUAL_PROGRESS_FONT,
+            wraplength=600,
+            justify="left",
+            anchor="w",
+            padx=10,
+            pady=8,
+        )
+        self._next_action_label.grid(row=1, column=0, sticky="ew", padx=4, pady=(4, 0))
+
+        self._display_canvas.grid_configure(row=2)
+
         self._canvas_status = tk.Label(
             parent, text="Waiting for processing to start...",
             bg="#181818", fg="#aaaaaa", font=_VISUAL_PROGRESS_FONT,
             wraplength=600, justify="center",
         )
-        self._canvas_status.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
+        self._canvas_status.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 6))
+        self.after_idle(self._update_next_action)
+
+    def _update_next_action(self) -> None:
+        if not hasattr(self, "_next_action_label"):
+            return
+
+        batch_running = self._batch_proc is not None and self._batch_proc.poll() is None
+        if batch_running or self._last_run_state == "running":
+            message = "Processing is running. No action is required. Please wait."
+        elif not self._video_entry.get().strip():
+            message = "1. Select a video file."
+        elif self._seg_proc is not None and self._seg_proc.poll() is None:
+            message = "2. Complete segmentation, then return to Easy Tracking."
+        elif not self._segmentation_outputs_exist():
+            message = "2. Click Launch Segmentation and complete segmentation."
+        elif not self._variable_count.get() and not self._num_confirmed:
+            message = "3. Set the number of animals and press Enter."
+        elif self._last_run_state == "complete":
+            message = "Processing is complete. Click Open results to inspect the output."
+        elif self._last_run_state == "failed":
+            message = "Processing failed. Review the error and log, then click Processing to retry."
+        elif self._last_run_state == "stopped":
+            message = "Processing was stopped. Click Processing when you are ready to run it again."
+        elif self._single_animal_skips_paste():
+            message = "4. Click Processing. No further setup is required for a single animal."
+        elif self._without_direction.get():
+            message = "4. Answer how severe the overlap is, then click Processing."
+        else:
+            message = (
+                "4. Answer the overlap and backward-movement questions, "
+                "then click Processing."
+            )
+
+        self._next_action_label.configure(text=f"Next action\n{message}")
 
     def _on_canvas_resize(self) -> None:
         cc = self._canvas_content
@@ -2118,6 +2171,7 @@ class EasyTrackingGUI(ctk.CTk):
 
         if hasattr(self, "_blocks_wrap"):
             self._refresh_block_colors()
+        self._update_next_action()
 
     def _warn_individual_count_inconsistency(self, message: str) -> None:
         print(f"[WARN] Easy Tracking individual count state: {message}", flush=True)
@@ -2144,6 +2198,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._skip_flags["skip_refine_blobs_through_tracking"] = not answered_yes
         if hasattr(self, "_blocks_wrap"):
             self._refresh_block_colors()
+        self._update_next_action()
 
     def _step_is_skipped(self, step_i: int) -> bool:
         if step_i < 0 or step_i >= len(STEPS):
@@ -2739,6 +2794,9 @@ class EasyTrackingGUI(ctk.CTk):
         self._batch_log_path = ""
         self._stop_requested = False
 
+        self._last_run_state = "running"
+        self._update_next_action()
+
         self._run_btn.configure(state="disabled")
         self._switch_btn.configure(state="disabled")
         self._direction_mode_checkbox.configure(state="disabled")
@@ -2958,12 +3016,15 @@ class EasyTrackingGUI(ctk.CTk):
         self._load_btn.configure(state="normal")
         self._stop_btn.configure(state="disabled")
         if returncode == 0:
+            self._last_run_state = "complete"
             self._set_progress(1.0, "Complete!")
             self._canvas_status.configure(text="Processing complete!")
         elif stopped_by_user:
+            self._last_run_state = "stopped"
             self._set_progress(0.0, "Stopped")
             self._canvas_status.configure(text=f"Stopped (exit {returncode})")
         else:
+            self._last_run_state = "failed"
             self._set_progress(0.0, "Processing failed")
             log_path = self._batch_log_path or "unavailable"
             self._canvas_status.configure(text=f"Processing failed (exit {returncode})")
@@ -2972,6 +3033,7 @@ class EasyTrackingGUI(ctk.CTk):
                 f"Processing failed with exit code {returncode}.\n\n"
                 f"Full log:\n{log_path}",
             )
+        self._update_next_action()
 
     def _stop_batch(self) -> None:
         if self._batch_proc and self._batch_proc.poll() is None:
