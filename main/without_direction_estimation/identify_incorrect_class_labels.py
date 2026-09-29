@@ -938,7 +938,7 @@ def main() -> None:
     image_size = int(cfg["TRAIN_IMG_SIZE"])
     background_path = str(cfg["BACKGROUND_PATH"])
     img_ext = str(cfg.get("IMG_EXT", ".png") or ".png")
-    num_preview_frames = int(cfg.get("NUM_PREVIEW_FRAMES", 20))
+    num_preview_frames = min(20, max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20))))
     preview_interval = int(cfg.get("PREVIEW_INTERVAL", 100))
     num_crops_per_img = int(cfg.get("NUM_CROPS", 1))
     random_seed = normalize_seed(cfg.get("RANDOM_SEED", 0))
