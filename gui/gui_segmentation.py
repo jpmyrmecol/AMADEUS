@@ -1788,7 +1788,9 @@ class CrossingReviewApp(ctk.CTk):
     def _update_analysis_dependent_buttons(self):
         # Processing stays clickable in every state so that pressing it explains
         # the missing step instead of silently doing nothing.
-        ready = bool(self.analysis_iqr_stats) or not self._needs_area_analysis()
+        ready = self.outlier_section_revealed and (
+            bool(self.analysis_iqr_stats) or not self._needs_area_analysis()
+        )
         state = "normal" if ready else "disabled"
         if hasattr(self, "export_button") and self.export_button is not None:
             self.export_button.configure(state=state)
@@ -6243,6 +6245,12 @@ class CrossingReviewApp(ctk.CTk):
         if self._segmentation_needs_background() and self.background_bgr is None:
             messagebox.showerror("Error", "In this mode, please compute the background first.")
             return
+        if not self.outlier_section_revealed:
+            messagebox.showwarning(
+                "Outlier Extraction",
+                "Run Analyze before Processing.",
+            )
+            return
         if self._needs_area_analysis() and not self.analysis_iqr_stats:
             messagebox.showwarning(
                 "Outlier Extraction",
@@ -6560,6 +6568,9 @@ class CrossingReviewApp(ctk.CTk):
             return
         if self._segmentation_needs_background() and self.background_bgr is None:
             messagebox.showerror("Error", "In this mode, please compute the background first.")
+            return
+        if not self.outlier_section_revealed:
+            messagebox.showerror("Error", "Please run Analyze first.")
             return
         if self._needs_area_analysis() and not self.analysis_iqr_stats:
             messagebox.showerror("Error", "Please run Analyze sampled frames first.")
