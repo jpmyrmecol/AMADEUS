@@ -27,7 +27,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from batch_utils import tqdm
+from batch_utils import evenly_sample_frame_ids, tqdm
 from typing import Iterable, List, Tuple, Dict, Optional
 from batch_utils import resolve_num_workers as _resolve_num_workers_bt
 from gui.color import OBB_COLOR
@@ -77,19 +77,9 @@ def parse_frame_id_from_stem(stem: str) -> Optional[int]:
         return None
 
 
-def select_frame_ids_by_interval(frame_ids: Iterable[int], interval: int) -> set:
-    """Frame ids at least `interval` apart (by actual video frame id, not list
-    position), walking ascending order starting from the first available id."""
-    step = max(0, int(interval))
-    if step <= 0:
-        return set()
-    selected = []
-    last = None
-    for fid in sorted(set(int(f) for f in frame_ids)):
-        if last is None or fid - last >= step:
-            selected.append(fid)
-            last = fid
-    return set(selected)
+def select_frame_ids_evenly(frame_ids: Iterable[int], max_count: int) -> set:
+    """Select at most max_count source frames evenly across the available ids."""
+    return set(evenly_sample_frame_ids(frame_ids, max_count))
 
 
 def box_iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> float:
@@ -799,6 +789,7 @@ def main(
     CROP_SIZE: int,
     IMG_EXT: str,
     PREVIEW_INTERVAL: int,
+    NUM_PREVIEW_FRAMES: int = 20,
     NUM_CROPS: int = 1,
     BACKGROUND_PATH: str = "",
     EDGE_BLUR_KSIZE: int = 7,
@@ -849,7 +840,7 @@ def main(
         img_paths = sorted(glob.glob(os.path.join(IMG_DIR, f"frame_*{IMG_EXT}")))
 
         effective_crops_per_img = 1 if LOCALIZED and int(NUM_CROPS) > 0 else NUM_CROPS
-        preview_interval = max(0, int(PREVIEW_INTERVAL))
+        preview_count = max(0, int(NUM_PREVIEW_FRAMES))
 
         valid_entries: List[Tuple[str, str, str, Optional[int]]] = []
         for img_path in img_paths:
@@ -862,11 +853,10 @@ def main(
                 continue
             valid_entries.append((img_path, stem, lbl_path, parse_frame_id_from_stem(stem)))
 
-        # Preview every PREVIEW_INTERVAL-th *video* frame by actual frame id, not by
-        # position in this list (which is already thinned by the upstream frame
-        # interval, so indexing by position would compound the two intervals).
-        preview_fids = select_frame_ids_by_interval(
-            (fid for _, _, _, fid in valid_entries if fid is not None), preview_interval
+        # Preview at most NUM_PREVIEW_FRAMES source frames, distributed
+        # evenly over the available video frame ids.
+        preview_fids = select_frame_ids_evenly(
+            (fid for _, _, _, fid in valid_entries if fid is not None), preview_count
         )
 
         tasks: List[dict] = []
@@ -892,7 +882,7 @@ def main(
                 "EDGE_BLUR_SIGMA": EDGE_BLUR_SIGMA,
                 "LOCALIZED": LOCALIZED,
                 "obb_fit_mode": obb_fit_mode,
-                "preview_budget": effective_crops_per_img if (fid is not None and fid in preview_fids) else 0,
+                "preview_budget": 1 if (fid is not None and fid in preview_fids) else 0,
             })
 
         actual_workers = max(1, min(num_workers, len(tasks))) if tasks else 1
@@ -921,6 +911,7 @@ def cli() -> None:
     SESSION_PATH = cfg["SESSION_PATH"]
     CROP_SIZE = cfg["TRAIN_IMG_SIZE"]
     PREVIEW_INTERVAL = cfg["PREVIEW_INTERVAL"]
+    NUM_PREVIEW_FRAMES = int(cfg.get("NUM_PREVIEW_FRAMES", 20))
     BACKGROUND_PATH = cfg["BACKGROUND_PATH"]
     EDGE_BLUR_KSIZE = cfg.get("EDGE_BLUR_KSIZE", 7)
     EDGE_BLUR_SIGMA = float(cfg.get("EDGE_BLUR_SIGMA", 11))
@@ -988,6 +979,7 @@ def cli() -> None:
         CROP_SIZE=CROP_SIZE,
         IMG_EXT=IMG_EXT,
         PREVIEW_INTERVAL=PREVIEW_INTERVAL,
+        NUM_PREVIEW_FRAMES=NUM_PREVIEW_FRAMES,
         NUM_CROPS=NUM_CROPS,
         BACKGROUND_PATH=BACKGROUND_PATH,
         EDGE_BLUR_KSIZE=EDGE_BLUR_KSIZE,
