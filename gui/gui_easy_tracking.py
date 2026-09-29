@@ -1059,17 +1059,20 @@ class EasyTrackingGUI(ctk.CTk):
         """Draw meter arcs, ticks and labels once for the current panel size."""
         canvas.delete("all")
         canvas.create_rectangle(0, 0, width, height, fill="#171717", outline="")
+        # Keep the monitor title, backend label, and first meter row visually
+        # distinct.  These use the same font size as the rest of Visual Progress,
+        # so explicit vertical spacing is needed to avoid crowding.
         canvas.create_text(
-            width // 2, 10, text="System Monitor", fill="#cccccc",
+            width // 2, 12, text="System Monitor", fill="#cccccc",
             font=_VISUAL_PROGRESS_TITLE_FONT, anchor="center",
         )
         self._system_monitor_backend_item = canvas.create_text(
-            width // 2, 28, text="Waiting for metrics...", fill="#999999",
+            width // 2, 38, text="Waiting for metrics...", fill="#999999",
             font=_VISUAL_PROGRESS_FONT, anchor="center", width=max(1, width - 8),
             justify="center",
         )
 
-        gauge_top = 40
+        gauge_top = 62
         row_height = max(1.0, (height - gauge_top) / 2.0)
         cell_width = width / 3.0
         canvas.create_line(0, gauge_top + row_height, width, gauge_top + row_height,
@@ -1088,8 +1091,14 @@ class EasyTrackingGUI(ctk.CTk):
             center_x = x0 + cell_width / 2.0
             radius = max(2.0, min((cell_width - 8.0) / 2.0, row_height * 0.34))
             center_y = y0 + row_height * 0.60
+
+            # Position the meter name relative to the actual arc instead of the
+            # top of the cell.  This keeps labels such as VRAM close to their
+            # meters at every panel size while preserving a small readable gap.
+            arc_top = center_y - radius
+            label_y = max(y0 + 9.0, arc_top - 12.0)
             canvas.create_text(
-                center_x, y0 + 8, text=name, fill="#c7d0ca",
+                center_x, label_y, text=name, fill="#c7d0ca",
                 font=_VISUAL_PROGRESS_FONT, anchor="center",
             )
 
