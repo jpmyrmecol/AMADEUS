@@ -178,18 +178,43 @@ if [ ! -x "$AMADEUS_VENV/bin/amadeus" ]; then
     exit 1
 fi
 
-case ":${PATH}:" in
-    *":$HOME/.local/bin:"*) ;;
-    *)
-        case "${SHELL:-}" in
-            */zsh) rc_file="~/.zshrc" ;;
-            *) rc_file="~/.bashrc" ;;
-        esac
-        echo "[AMADEUS] NOTE: $HOME/.local/bin is not on your PATH."
-        echo "[AMADEUS] Add it to use the \"amadeus\"/\"amade\" commands directly next time, e.g.:"
-        echo "[AMADEUS]   echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> $rc_file && source $rc_file"
-        ;;
-esac
+ensure_linux_command_path() {
+    [ "$(uname -s)" = Linux ] || return 0
+
+    command_dir="$HOME/.local/bin"
+    case ":${PATH}:" in
+        *":$command_dir:"*) return 0 ;;
+    esac
+
+    case "${SHELL:-}" in
+        */zsh) rc_file="$HOME/.zshrc" ;;
+        *) rc_file="$HOME/.bashrc" ;;
+    esac
+    path_line='export PATH="$HOME/.local/bin:$PATH"'
+
+    if [ ! -f "$rc_file" ] || ! grep -Fqx "$path_line" "$rc_file"; then
+        {
+            printf '\n# AMADEUS user commands\n'
+            printf '%s\n' "$path_line"
+        } >> "$rc_file"
+        echo "[AMADEUS] Added $HOME/.local/bin to PATH in $rc_file."
+    fi
+
+    # Make the commands available to the remainder of this launcher too.
+    export PATH="$command_dir:$PATH"
+}
+
+if [ "$(uname -s)" = Linux ]; then
+    ensure_linux_command_path
+else
+    case ":${PATH}:" in
+        *":$HOME/.local/bin:"*) ;;
+        *)
+            echo "[AMADEUS] NOTE: $HOME/.local/bin is not on your PATH."
+            echo "[AMADEUS] Add it to use the \"amadeus\"/\"amade\" commands directly next time."
+            ;;
+    esac
+fi
 
 echo "[AMADEUS] Environment is ready. Starting the GUI..."
 set +e
