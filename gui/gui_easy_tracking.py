@@ -848,7 +848,7 @@ class EasyTrackingGUI(ctk.CTk):
 
     # Canvas panel - visual progress
     def _build_canvas_panel(self, parent: tk.Frame) -> None:
-        parent.grid_rowconfigure(1, weight=1)
+        parent.grid_rowconfigure(2, weight=1)
         parent.grid_columnconfigure(0, weight=1)
 
         hdr = tk.Frame(parent, bg="#222222")
@@ -857,7 +857,7 @@ class EasyTrackingGUI(ctk.CTk):
                  font=_VISUAL_PROGRESS_TITLE_FONT).pack(side="left", padx=10, pady=5)
 
         self._display_canvas = tk.Canvas(parent, bg="#1a1a1a", highlightthickness=0)
-        self._display_canvas.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        self._display_canvas.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
         self._display_canvas.bind("<Configure>", lambda _e: self._on_canvas_resize())
 
         self._next_action_label = tk.Label(
@@ -873,8 +873,6 @@ class EasyTrackingGUI(ctk.CTk):
             pady=8,
         )
         self._next_action_label.grid(row=1, column=0, sticky="ew", padx=4, pady=(4, 0))
-
-        self._display_canvas.grid_configure(row=2)
 
         self._canvas_status = tk.Label(
             parent, text="Waiting for processing to start...",
