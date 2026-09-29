@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import cv2
 import numpy as np
 import yaml
-from batch_utils import tqdm
+from batch_utils import evenly_sample_frame_ids, tqdm
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -321,23 +321,13 @@ def parse_frame_id_from_name(name: str) -> int:
     return int(m.group(1))
 
 
-def select_preview_frame_ids(frame_ids: Sequence[int], num_preview_frames: int, frame_interval: int) -> Set[int]:
-    ordered = sorted(dict.fromkeys(int(frame_id) for frame_id in frame_ids))
-    if num_preview_frames <= 0 or not ordered:
-        return set()
-
-    interval = max(1, int(frame_interval))
-    selected: List[int] = []
-    last_selected: Optional[int] = None
-
-    for frame_id in ordered:
-        if last_selected is None or frame_id - last_selected >= interval:
-            selected.append(frame_id)
-            last_selected = frame_id
-            if len(selected) >= num_preview_frames:
-                break
-
-    return set(selected)
+def select_preview_frame_ids(
+    frame_ids: Sequence[int],
+    num_preview_frames: int,
+    frame_interval: int | None = None,
+) -> Set[int]:
+    """Select preview frames evenly; frame_interval is retained for compatibility."""
+    return set(evenly_sample_frame_ids(frame_ids, num_preview_frames))
 
 
 def read_manifest_rows(path: str) -> List[dict]:
@@ -1211,7 +1201,7 @@ def rewrite_frame_assets(
         edge_blur_ksize += 1
 
     conf_thresh = float(cfg.get("REFINE_CONF", 0.2))
-    num_preview_frames = int(cfg.get("NUM_PREVIEW_FRAMES", 100))
+    num_preview_frames = int(cfg.get("NUM_PREVIEW_FRAMES", 20))
     frame_interval = int(cfg.get("FRAME_INTERVAL", 5))
     selected_preview_frames = select_preview_frame_ids(
         [parse_frame_id_from_name(name) for name in frame_names],
