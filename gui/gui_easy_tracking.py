@@ -2498,7 +2498,7 @@ class EasyTrackingGUI(ctk.CTk):
         # that are absent, or provide the complete config for a new Easy run.
         default_cfg.update({
             "NUM_WORKERS":             "auto",
-            "NUM_PREVIEW_FRAMES":      10,
+            "NUM_PREVIEW_FRAMES":      20,
             "PREVIEW_INTERVAL":        100,
             "FRAME_INTERVAL":          meta_frame_interval,
             "NUM_IMAGES":              10000,
@@ -2629,6 +2629,7 @@ class EasyTrackingGUI(ctk.CTk):
         cfg["DIR_MIN_DISP"] = 1.0
         cfg["REFINE_FRAME_RATIO"] = 1.0
         cfg["RUN_DELETE_RATIO"] = 0.4
+        cfg["NUM_PREVIEW_FRAMES"] = 20
         # Always refresh, regardless of whether the video/session answers
         # changed: these are pure derived lookups, never user-customized, and
         # a stale value (e.g. relativized against a since-changed SESSION_PATH)
