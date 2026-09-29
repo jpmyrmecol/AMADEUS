@@ -1270,7 +1270,7 @@ class CrossingReviewApp(ctk.CTk):
         self.training_frame_end_var = tk.IntVar(value=-1)
         self.training_frame_interval_var = tk.IntVar(value=5)
 
-        self.area_outlier_method_var = tk.StringVar(value="absolute")
+        self.area_outlier_method_var = tk.StringVar(value="iqr")
         self.area_iqr_min_var = tk.DoubleVar(value=1.5)
         self.area_iqr_max_var = tk.DoubleVar(value=1.5)
         self.area_absolute_min_var = tk.DoubleVar(value=0.0)
