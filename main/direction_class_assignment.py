@@ -1601,7 +1601,7 @@ def save_without_crossing_dataset(
     # with a single global cap shared by the Easy Tracking preview folders.
     preview_ids = evenly_sample_frame_ids(
         (fid for fid, _ in frame_tasks),
-        int(cfg.get("NUM_PREVIEW_FRAMES", 20)),
+        min(20, max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20)))),
     )
 
     workers = _resolve_without_crossing_writer_workers(cfg)
