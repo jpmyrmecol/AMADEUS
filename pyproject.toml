@@ -52,7 +52,7 @@ rocm63 = [
 ]
 
 [project.scripts]
-amadeus = "gui.gui_home:main"
+amadeus = "gui.runtime:main"
 
 [tool.setuptools]
 packages = [

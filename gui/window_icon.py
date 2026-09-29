@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 import sys
 import tempfile
 import tkinter as tk
@@ -34,47 +32,27 @@ def tk_font_spec(
     point_size: int,
     weight: str = "normal",
 ):
-    """Return a Tk font matching the Windows 96-DPI visual size.
+    """Return a Linux font whose measured size and weight match the Home baseline.
 
-    On Windows/macOS, keep the existing tuple behavior. On Linux/Tk 9, create
-    an explicit named font and calibrate it against Tk's measured line height.
-    This avoids relying on WSLg DPI reporting or on Linux pixel-size tuple
-    handling, both of which can yield tiny fonts even when the requested size
-    is large.
+    Windows and macOS keep their existing tuple behavior. On Linux, use the
+    Roboto family bundled with CustomTkinter when available; its Xft metrics
+    closely match the Windows Arial Home text. Keep Tk's native point sizing,
+    except for the measured 13-point corner text, where Roboto 12 matches the
+    Windows 19-pixel line height and 51-pixel "Update" width.
     """
     if not sys.platform.startswith("linux"):
         return family, point_size, weight
 
-    target_px = max(1, round(point_size * 96.0 / 72.0))
-    font = tkfont.Font(root=root, family=family, size=point_size, weight=weight)
+    linux_family = family
+    linux_size = point_size
+    if family.casefold() == "arial":
+        families = {name.casefold(): name for name in tkfont.families(root)}
+        if "roboto" in families:
+            linux_family = families["roboto"]
+            if point_size == 13 and weight == "normal":
+                linux_size = 12
 
-    # Find the point size whose *actual rendered* Tk line height most closely
-    # matches the Windows 96-DPI baseline. Use a bounded binary search, then
-    # compare nearby sizes to avoid rounding artifacts.
-    low, high = 1, max(256, point_size * 8)
-    while low < high:
-        mid = (low + high) // 2
-        font.configure(size=mid)
-        measured = int(font.metrics("linespace"))
-        if measured < target_px:
-            low = mid + 1
-        else:
-            high = mid
-
-    candidates = range(max(1, low - 3), low + 4)
-    best_size = low
-    best_error = None
-    for candidate in candidates:
-        font.configure(size=candidate)
-        measured = int(font.metrics("linespace"))
-        error = abs(measured - target_px)
-        if best_error is None or error < best_error:
-            best_error = error
-            best_size = candidate
-
-    font.configure(size=best_size)
-    return font
-
+    return tkfont.Font(root=root, family=linux_family, size=linux_size, weight=weight)
 
 def configure_taskbar_identity() -> None:
     if os.name != "nt":
@@ -87,143 +65,20 @@ def configure_taskbar_identity() -> None:
         pass
 
 
-def _is_wsl() -> bool:
-    """Return whether this Linux process is running under WSL/WSLg."""
-    if not sys.platform.startswith("linux"):
-        return False
-    if os.environ.get("WSL_INTEROP") or os.environ.get("WSL_DISTRO_NAME"):
-        return True
-    try:
-        release = Path("/proc/sys/kernel/osrelease").read_text(
-            encoding="utf-8", errors="ignore"
-        )
-    except OSError:
-        return False
-    return "microsoft" in release.lower() or "wsl" in release.lower()
-
-
-def _windows_host_dpi() -> float | None:
-    """Read the Windows system DPI from WSL in a DPI-aware thread context.
-
-    PowerShell itself can already be initialized as DPI-unaware, in which case
-    process-level DPI-awareness calls are too late and Windows virtualizes DPI
-    queries to 96. Set the current thread to PER_MONITOR_AWARE_V2 temporarily,
-    query GetDpiForSystem(), then restore the previous thread context.
-    """
-    if not _is_wsl():
-        return None
-
-    powershell = shutil.which("powershell.exe")
-    if not powershell:
-        candidate = Path(
-            "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-        )
-        powershell = str(candidate) if candidate.is_file() else None
-    if not powershell:
-        return None
-
-    command = r"""
-$source = @'
-using System;
-using System.Runtime.InteropServices;
-
-public static class AmadeusDpi {
-    [DllImport("User32.dll")]
-    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
-
-    [DllImport("User32.dll")]
-    private static extern uint GetDpiForSystem();
-
-    public static uint QuerySystemDpi() {
-        // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4.
-        IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
-        try {
-            return GetDpiForSystem();
-        }
-        finally {
-            if (previous != IntPtr.Zero) {
-                SetThreadDpiAwarenessContext(previous);
-            }
-        }
-    }
-}
-'@
-
-Add-Type -TypeDefinition $source -ErrorAction Stop
-[Console]::Write([AmadeusDpi]::QuerySystemDpi())
-"""
-
-    try:
-        completed = subprocess.run(
-            [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5.0,
-            check=False,
-        )
-        if completed.returncode == 0:
-            dpi = float((completed.stdout or "").strip())
-            if 48.0 <= dpi <= 768.0:
-                return dpi
-    except (OSError, subprocess.SubprocessError, ValueError):
-        pass
-
-    # Last-resort compatibility fallback for hosts where the native query
-    # cannot run. This value may remain 96 on WSL even at higher host scaling.
-    registry_command = (
-        "$v=(Get-ItemProperty -LiteralPath "
-        "'HKCU:\\Control Panel\\Desktop\\WindowMetrics' "
-        "-Name AppliedDPI -ErrorAction SilentlyContinue).AppliedDPI; "
-        "if ($null -ne $v) { [Console]::Write([int]$v) }"
-    )
-    try:
-        completed = subprocess.run(
-            [
-                powershell,
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                registry_command,
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=3.0,
-            check=False,
-        )
-        if completed.returncode != 0:
-            return None
-        dpi = float((completed.stdout or "").strip())
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
-
-    return dpi if 48.0 <= dpi <= 768.0 else None
-
-
 def configure_dpi_scaling(window: tk.Misc) -> None:
-    """Match Linux GUI scaling to the effective display DPI.
+    """Apply the display's reported DPI to CustomTkinter and Tk on Linux.
 
-    CustomTkinter does not perform its Windows-style per-monitor DPI handling
-    on Linux. Under WSL/WSLg, XWayland can report 96 DPI even when the Windows
-    host uses 125%, 150%, 200%, or another display scale. Prefer the Windows
-    user's AppliedDPI in WSL, and fall back to Tk's display DPI on native Linux.
-
-    Apply the same DPI to both CustomTkinter and Tk itself. The Tk scaling is
-    required for AMADEUS widgets drawn with tkinter.Canvas.create_text(), which
-    are not affected by CustomTkinter's widget scaling.
+    WSLg reports the effective X display DPI through Tk. Query it directly;
+    launching Windows PowerShell to infer the host DPI adds startup work and
+    cannot correct Tk's font backend or missing fontconfig support.
     """
     if not sys.platform.startswith("linux"):
         return
 
-    dpi = _windows_host_dpi()
-    if dpi is None:
-        try:
-            dpi = float(window.winfo_fpixels("1i"))
-        except (tk.TclError, TypeError, ValueError):
-            return
+    try:
+        dpi = float(window.winfo_fpixels("1i"))
+    except (tk.TclError, TypeError, ValueError):
+        return
 
     if not dpi or dpi <= 0:
         return
@@ -232,14 +87,10 @@ def configure_dpi_scaling(window: tk.Misc) -> None:
     ctk.set_widget_scaling(factor)
     ctk.set_window_scaling(factor)
 
-    # Tk font sizes expressed as positive numbers are point sizes. Match Tk's
-    # point-to-pixel conversion to the same DPI so plain Tk/Canvas text scales
-    # with the CustomTkinter controls.
     try:
         window.tk.call("tk", "scaling", dpi / 72.0)
     except tk.TclError:
         pass
-
 
 def install_window_icon(window: tk.Misc) -> None:
     """Apply AMADEUS's icon now, and again shortly after, once the window
