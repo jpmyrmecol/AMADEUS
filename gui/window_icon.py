@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from typing import Any, List
 
@@ -28,22 +29,51 @@ WINDOW_ICON_REFRESH_DELAYS_MS = (50, 250, 500, 1000, 2000)
 
 
 def tk_font_spec(
+    root: tk.Misc,
     family: str,
     point_size: int,
     weight: str = "normal",
-) -> tuple[str, int, str]:
-    """Return a Tk font tuple with stable Windows-equivalent sizing on Linux.
+):
+    """Return a Tk font matching the Windows 96-DPI visual size.
 
-    Tk uses positive font sizes as points and negative sizes as pixels. On the
-    current Linux/Tk 9 path used by WSLg, requested positive sizes can collapse
-    to nearly the same small bitmap size. Windows at the 96-DPI baseline maps
-    points to pixels by 96/72, so use that mapping explicitly on Linux while
-    leaving Windows and macOS unchanged.
+    On Windows/macOS, keep the existing tuple behavior. On Linux/Tk 9, create
+    an explicit named font and calibrate it against Tk's measured line height.
+    This avoids relying on WSLg DPI reporting or on Linux pixel-size tuple
+    handling, both of which can yield tiny fonts even when the requested size
+    is large.
     """
-    if sys.platform.startswith("linux"):
-        pixel_size = max(1, round(point_size * 96.0 / 72.0))
-        return family, -pixel_size, weight
-    return family, point_size, weight
+    if not sys.platform.startswith("linux"):
+        return family, point_size, weight
+
+    target_px = max(1, round(point_size * 96.0 / 72.0))
+    font = tkfont.Font(root=root, family=family, size=point_size, weight=weight)
+
+    # Find the point size whose *actual rendered* Tk line height most closely
+    # matches the Windows 96-DPI baseline. Use a bounded binary search, then
+    # compare nearby sizes to avoid rounding artifacts.
+    low, high = 1, max(256, point_size * 8)
+    while low < high:
+        mid = (low + high) // 2
+        font.configure(size=mid)
+        measured = int(font.metrics("linespace"))
+        if measured < target_px:
+            low = mid + 1
+        else:
+            high = mid
+
+    candidates = range(max(1, low - 3), low + 4)
+    best_size = low
+    best_error = None
+    for candidate in candidates:
+        font.configure(size=candidate)
+        measured = int(font.metrics("linespace"))
+        error = abs(measured - target_px)
+        if best_error is None or error < best_error:
+            best_error = error
+            best_size = candidate
+
+    font.configure(size=best_size)
+    return font
 
 
 def configure_taskbar_identity() -> None:
