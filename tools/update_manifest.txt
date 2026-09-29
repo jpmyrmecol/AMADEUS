@@ -35,6 +35,7 @@ gui/project_paths.py
 gui/splash_ipc.py
 gui/splash_reveal.py
 gui/splash_standalone.py
+gui/tk_compat.py
 gui/update_support.py
 gui/video_input.py
 gui/window_icon.py
