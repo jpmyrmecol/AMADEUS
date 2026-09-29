@@ -1093,10 +1093,10 @@ class EasyTrackingGUI(ctk.CTk):
             center_y = y0 + row_height * 0.60
 
             # Position the meter name relative to the actual arc instead of the
-            # top of the cell.  This keeps labels such as VRAM close to their
-            # meters at every panel size while preserving a small readable gap.
+            # top of the cell.  Leave roughly one character of visible space
+            # between the label and the meter arc.
             arc_top = center_y - radius
-            label_y = max(y0 + 9.0, arc_top - 12.0)
+            label_y = max(y0 + 9.0, arc_top - 20.0)
             canvas.create_text(
                 center_x, label_y, text=name, fill="#c7d0ca",
                 font=_VISUAL_PROGRESS_FONT, anchor="center",
@@ -1161,9 +1161,11 @@ class EasyTrackingGUI(ctk.CTk):
             return isinstance(value, (int, float)) and math.isfinite(float(value))
 
         def pair_label(current: float, maximum: float, unit: str) -> str:
+            unit_suffix = unit if unit == "%" else f" {unit}"
+            compact_value = f"{current:.1f}/{maximum:.1f}"
             if width / 3.0 < 112.0:
-                return f"{current:.1f}\n/ {maximum:.1f} {unit}"
-            return f"{current:.1f} / {maximum:.1f}\n{unit}"
+                return f"{compact_value}\n{unit}"
+            return f"{compact_value}{unit_suffix}"
 
         def fixed_scale(value, maximum: float, unit: str) -> tuple[str, float | None]:
             if not finite_number(value):
