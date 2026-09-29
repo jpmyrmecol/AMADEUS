@@ -178,45 +178,7 @@ if [ ! -x "$AMADEUS_VENV/bin/amadeus" ]; then
     exit 1
 fi
 
-ensure_linux_command_path() {
-    [ "$(uname -s)" = Linux ] || return 0
-
-    command_dir="$HOME/.local/bin"
-    case ":${PATH}:" in
-        *":$command_dir:"*) return 0 ;;
-    esac
-
-    case "${SHELL:-}" in
-        */zsh) rc_file="$HOME/.zshrc" ;;
-        *) rc_file="$HOME/.bashrc" ;;
-    esac
-    path_line='export PATH="$HOME/.local/bin:$PATH"'
-
-    if [ ! -f "$rc_file" ] || ! grep -Fqx "$path_line" "$rc_file"; then
-        {
-            printf '\n# AMADEUS user commands\n'
-            printf '%s\n' "$path_line"
-        } >> "$rc_file"
-        echo "[AMADEUS] Added $HOME/.local/bin to PATH in $rc_file."
-    fi
-
-    # Make the commands available to the remainder of this launcher too.
-    export PATH="$command_dir:$PATH"
-}
-
-if [ "$(uname -s)" = Linux ]; then
-    ensure_linux_command_path
-else
-    case ":${PATH}:" in
-        *":$HOME/.local/bin:"*) ;;
-        *)
-            echo "[AMADEUS] NOTE: $HOME/.local/bin is not on your PATH."
-            echo "[AMADEUS] Add it to use the \"amadeus\"/\"amade\" commands directly next time."
-            ;;
-    esac
-fi
-
-echo "[AMADEUS] Environment is ready. Starting the GUI..."
+ensure_posix_command_path() {\n    system="$(uname -s)"\n    case "$system" in\n        Darwin|Linux) ;;\n        *) return 0 ;;\n    esac\n\n    command_dir="$HOME/.local/bin"\n    case ":${PATH}:" in\n        *":$command_dir:"*) return 0 ;;\n    esac\n\n    case "${SHELL:-}" in\n        */zsh) rc_file="$HOME/.zshrc" ;;\n        */bash)\n            if [ "$system" = Darwin ]; then\n                rc_file="$HOME/.bash_profile"\n            else\n                rc_file="$HOME/.bashrc"\n            fi\n            ;;\n        *)\n            if [ "$system" = Darwin ]; then\n                rc_file="$HOME/.zshrc"\n            else\n                rc_file="$HOME/.profile"\n            fi\n            ;;\n    esac\n    path_line='export PATH="$HOME/.local/bin:$PATH"'\n\n    if [ ! -f "$rc_file" ] || ! grep -Fqx "$path_line" "$rc_file"; then\n        {\n            printf '\n# AMADEUS user commands\n'\n            printf '%s\n' "$path_line"\n        } >> "$rc_file"\n        echo "[AMADEUS] Added $HOME/.local/bin to PATH in $rc_file."\n    fi\n\n    # Make the commands available to the remainder of this launcher too.\n    export PATH="$command_dir:$PATH"\n}\n\nensure_posix_command_path\necho "[AMADEUS] Environment is ready. Starting the GUI..."
 set +e
 "$AMADEUS_VENV/bin/amadeus" "$@"
 status=$?
