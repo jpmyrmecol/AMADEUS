@@ -393,8 +393,7 @@ class ConfigGUI(ctk.CTk):
         preview_row = _layout_frame(basic)
         preview_row.pack(fill="x", pady=4)
         ctk.CTkLabel(preview_row, text="Max Preview Frames", width=130, anchor="w").pack(side="left", padx=(6, 0))
-        num_preview = tk.Spinbox(preview_row, from_=0, to=100000, increment=1, width=6, **_SPIN_CFG)
-        num_preview.delete(0, tk.END)
+        num_preview = ctk.CTkEntry(preview_row, width=60)
         num_preview.insert(0, "20")
         num_preview.pack(side="left", padx=5)
         self.basic_entries["NUM_PREVIEW_FRAMES"] = num_preview
