@@ -876,7 +876,7 @@ def main(
         img_paths = sorted(glob.glob(os.path.join(IMG_DIR, f"frame_*{IMG_EXT}")))
 
         effective_crops_per_img = 1 if LOCALIZED and int(NUM_CROPS) > 0 else NUM_CROPS
-        preview_count = min(20, max(0, int(NUM_PREVIEW_FRAMES)))
+        preview_count = max(0, int(NUM_PREVIEW_FRAMES))
 
         valid_entries: List[Tuple[str, str, str, Optional[int]]] = []
         for img_path in img_paths:
