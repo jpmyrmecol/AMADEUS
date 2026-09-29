@@ -10,9 +10,11 @@ import re
 import sys
 import copy
 import argparse
+import queue
 import subprocess
 import threading
 import time
+import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -259,6 +261,8 @@ class EasyTrackingGUI(ctk.CTk):
         self._seg_proc: subprocess.Popen | None = None
         self._seg_poll_id: str | None = None
         self._seg_launch_pickle_signature: tuple[int, int] | None = None
+        self._ui_event_queue: queue.SimpleQueue[tuple[object, tuple]] = queue.SimpleQueue()
+        self._ui_event_poll_id: str | None = None
         self._batch_proc: subprocess.Popen | None = None
         self._batch_log_path: str = ""
         self._stop_requested = False
@@ -314,11 +318,34 @@ class EasyTrackingGUI(ctk.CTk):
         self._preview_folder_poll_id: str | None = None
 
         self._build_ui()
+        self._ui_event_poll_id = self.after(50, self._drain_ui_events)
         self._refresh_preview_folder_buttons()
         self._set_skip_flags(self._default_skip_flags(), render=True)
         self._sync_refine_skip_from_backward_question()
         self._remember_easy_answers()
         _start_maximized(self)
+
+    def _post_ui_event(self, callback, *args) -> None:
+        """Queue one GUI callback for execution by Tk's main thread."""
+        self._ui_event_queue.put((callback, args))
+
+    def _drain_ui_events(self) -> None:
+        """Run worker-thread GUI callbacks only from Tk's main thread."""
+        self._ui_event_poll_id = None
+        while True:
+            try:
+                callback, args = self._ui_event_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback(*args)
+            except Exception:
+                traceback.print_exc()
+        try:
+            if self.winfo_exists():
+                self._ui_event_poll_id = self.after(50, self._drain_ui_events)
+        except tk.TclError:
+            self._ui_event_poll_id = None
 
     # UI construction
     def _build_ui(self) -> None:
@@ -506,7 +533,7 @@ class EasyTrackingGUI(ctk.CTk):
         if proc is None:
             return
         proc.wait()
-        self.after(0, lambda p=proc: self._on_seg_done(p))
+        self._post_ui_event(self._on_seg_done, proc)
 
     def _on_seg_done(self, proc: subprocess.Popen) -> None:
         if self._seg_proc is proc:
@@ -2915,7 +2942,7 @@ class EasyTrackingGUI(ctk.CTk):
                 pct, text = training
             else:
                 text = f"{desc}  {n}/{tot}" if desc else f"{n}/{tot}"
-            self.after(0, lambda p=pct, t=text: self._on_tqdm_progress(p, t))
+            self._post_ui_event(self._on_tqdm_progress, pct, text)
 
             # Extract per-batch box_loss from YOLO tqdm lines (training and refine_blobs)
             if self._active_step in (7, 2):
@@ -2948,15 +2975,14 @@ class EasyTrackingGUI(ctk.CTk):
             step_i = SCRIPT_TO_IDX.get(script, -1)
             if step_i >= 0 and step_i in self._vis_indices:
                 vi = self._vis_indices.index(step_i)
-                self.after(0, lambda vi=vi, s=script: self._on_step_start(vi, s))
+                self._post_ui_event(self._on_step_start, vi, script)
         elif "] END:   " in line:
             script = line.split("] END:   ", 1)[-1].split("  (")[0].strip()
             step_i = SCRIPT_TO_IDX.get(script, -1)
             if step_i >= 0 and step_i in self._vis_indices:
                 vi = self._vis_indices.index(step_i)
                 state["done_count"] = int(state.get("done_count", 0)) + 1
-                self.after(0, lambda vi=vi, si=step_i, s=script:
-                           self._on_step_done(vi, si, s))
+                self._post_ui_event(self._on_step_done, vi, step_i, script)
 
     def _monitor_batch(self) -> None:
         state = {"done_count": 0, "last_was_tqdm": False, "last_tqdm_len": 0}
@@ -3004,9 +3030,12 @@ class EasyTrackingGUI(ctk.CTk):
 
         if state.get("last_was_tqdm", False) and _stdout_supports_overwrite():
             _safe_stdout_write("\n")
-        self._batch_proc.wait()
-        rc = self._batch_proc.returncode
-        self.after(0, lambda: self._on_batch_finished(rc))
+        proc = self._batch_proc
+        if proc is None:
+            return
+        proc.wait()
+        rc = proc.returncode
+        self._post_ui_event(self._on_batch_finished, rc, proc)
 
     def _on_tqdm_progress(self, pct: float, text: str) -> None:
         self._set_progress(pct, text)
@@ -3040,7 +3069,13 @@ class EasyTrackingGUI(ctk.CTk):
         self._display_step = -2         # force re-render on next poll
         self._update_canvas_for_step(step_i, session)
 
-    def _on_batch_finished(self, returncode: int) -> None:
+    def _on_batch_finished(
+        self,
+        returncode: int,
+        proc: subprocess.Popen | None = None,
+    ) -> None:
+        if proc is not None and self._batch_proc is not proc:
+            return
         stopped_by_user = self._stop_requested
         self._stop_requested = False
         # Cancel canvas polling
