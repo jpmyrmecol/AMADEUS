@@ -392,19 +392,12 @@ class ConfigGUI(ctk.CTk):
 
         preview_row = _layout_frame(basic)
         preview_row.pack(fill="x", pady=4)
-        ctk.CTkLabel(preview_row, text="Num Preview Frames", width=130, anchor="w").pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(preview_row, text="Max Preview Frames", width=130, anchor="w").pack(side="left", padx=(6, 0))
         num_preview = tk.Spinbox(preview_row, from_=0, to=100000, increment=1, width=6, **_SPIN_CFG)
         num_preview.delete(0, tk.END)
-        num_preview.insert(0, "10")
+        num_preview.insert(0, "20")
         num_preview.pack(side="left", padx=5)
         self.basic_entries["NUM_PREVIEW_FRAMES"] = num_preview
-
-        ctk.CTkLabel(preview_row, text="Preview Interval", width=105, anchor="w").pack(side="left", padx=(20, 0))
-        preview_interval = tk.Spinbox(preview_row, from_=0, to=1000000, increment=1, width=6, **_SPIN_CFG)
-        preview_interval.delete(0, tk.END)
-        preview_interval.insert(0, "100")
-        preview_interval.pack(side="left", padx=5)
-        self.basic_entries["PREVIEW_INTERVAL"] = preview_interval
 
         ctk.CTkLabel(preview_row, text="Frame Interval", width=105, anchor="w").pack(side="left", padx=(10, 0))
         frame_interval_sb = tk.Spinbox(preview_row, from_=1, to=1000, increment=1, width=5, **_SPIN_CFG)
@@ -1513,7 +1506,7 @@ class ConfigGUI(ctk.CTk):
                         except Exception:
                             pass
 
-        for key in ("SESSION_PATH", "TRACKING_VIDEO_PATH", "TRAINING_VIDEO_PATH", "NUM_OBJECTS", "TRAIN_IMG_SIZE", "NUM_WORKERS", "NUM_PREVIEW_FRAMES", "PREVIEW_INTERVAL", "FRAME_INTERVAL", "NUM_IMAGES", "RANDOM_SEED"):
+        for key in ("SESSION_PATH", "TRACKING_VIDEO_PATH", "TRAINING_VIDEO_PATH", "NUM_OBJECTS", "TRAIN_IMG_SIZE", "NUM_WORKERS", "NUM_PREVIEW_FRAMES", "FRAME_INTERVAL", "NUM_IMAGES", "RANDOM_SEED"):
             val = cfg.get(key)
             if val is not None and key in self.basic_entries:
                 _set_widget_value(self.basic_entries[key], val)
@@ -1644,8 +1637,8 @@ class ConfigGUI(ctk.CTk):
                     messagebox.showerror("Error", "Training Image Size (px) must be a positive multiple of 32.")
                     return
                 cfg[k] = training_image_size
-            elif k in ("NUM_PREVIEW_FRAMES", "PREVIEW_INTERVAL", "FRAME_INTERVAL", "NUM_IMAGES", "RANDOM_SEED"):
-                defaults = {"NUM_PREVIEW_FRAMES": 10, "PREVIEW_INTERVAL": 100, "FRAME_INTERVAL": 5, "NUM_IMAGES": 10000, "RANDOM_SEED": 0}
+            elif k in ("NUM_PREVIEW_FRAMES", "FRAME_INTERVAL", "NUM_IMAGES", "RANDOM_SEED"):
+                defaults = {"NUM_PREVIEW_FRAMES": 20, "FRAME_INTERVAL": 5, "NUM_IMAGES": 10000, "RANDOM_SEED": 0}
                 try:
                     cfg[k] = int(val_str) if val_str else defaults[k]
                 except ValueError:
