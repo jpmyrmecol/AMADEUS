@@ -261,7 +261,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._seg_proc: subprocess.Popen | None = None
         self._seg_poll_id: str | None = None
         self._seg_launch_pickle_signature: tuple[int, int] | None = None
-        self._ui_event_queue: queue.SimpleQueue[tuple[object, tuple]] = queue.SimpleQueue()
+        self._ui_event_queue = queue.SimpleQueue()
         self._ui_event_poll_id: str | None = None
         self._batch_proc: subprocess.Popen | None = None
         self._batch_log_path: str = ""
