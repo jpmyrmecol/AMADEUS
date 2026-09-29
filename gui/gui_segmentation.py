@@ -1280,6 +1280,8 @@ class CrossingReviewApp(ctk.CTk):
         self.area_iqr_frame = None
         self.area_absolute_frame = None
         self.area_iqr_boxplot = None
+        self.analysis_gate_frame = None
+        self.outlier_section_revealed = False
 
         self.optional_configurations_var = tk.BooleanVar(value=False)
         self.show_overlay_var = tk.BooleanVar(value=True)
@@ -1419,6 +1421,18 @@ class CrossingReviewApp(ctk.CTk):
         self.roi_section = section("ROI (Optional)")
         self.region_expansion_section = section("Region Expansion (Optional)")
         self.ana_section = section("Outlier Extraction", expanded=True)
+        self.analysis_gate_frame = ctk.CTkFrame(parent, corner_radius=0)
+        ctk.CTkLabel(
+            self.analysis_gate_frame,
+            text="│\n│\n│\n│\n▼",
+            anchor="center",
+            justify="center",
+        ).pack(fill="x", pady=(0, 4))
+        ctk.CTkButton(
+            self.analysis_gate_frame,
+            text="Analyze",
+            command=self.analyze_sample_frames,
+        ).pack(fill="x", padx=6, pady=(0, 6))
         self.result_section = section("Result OBB Import (Optional)")
         self.additional_outlier_section = section("Additional Outlier (Optional)")
         self.single_blob_smoothing_section = section("Single-animal Smoothing (Optional)")
@@ -1752,6 +1766,8 @@ class CrossingReviewApp(ctk.CTk):
 
         # Reset the pack order before restoring visible sections. This keeps
         # optional sections in their original positions after toggling them on.
+        if self.analysis_gate_frame is not None:
+            self.analysis_gate_frame.pack_forget()
         for section, _optional in sections:
             if section is None:
                 continue
@@ -1761,6 +1777,10 @@ class CrossingReviewApp(ctk.CTk):
 
         for section, optional in sections:
             if section is None or (optional and not show_optional):
+                continue
+            if section is self.ana_section and not self.outlier_section_revealed:
+                if self.analysis_gate_frame is not None:
+                    self.analysis_gate_frame.pack(fill="x", padx=8, pady=6)
                 continue
             self._pack_sidebar_section(section)
         self._update_analysis_dependent_buttons()
@@ -2149,6 +2169,8 @@ class CrossingReviewApp(ctk.CTk):
             self.analysis_iqr_stats = {}
             self.analysis_is_stale = True
             self.analysis_ready_var.set("analysis: not computed")
+
+        self.outlier_section_revealed = bool(self.analysis_iqr_stats)
 
         # background.png always lives next to this JSON config itself (see
         # _default_background_path()), so no separate stored path is needed.
@@ -2981,7 +3003,7 @@ class CrossingReviewApp(ctk.CTk):
             stat = self.analysis_iqr_stats.get("area", self._area_reference_stats)
             q1, median, q3, iqr = self._normalized_area_stat(stat)
             if iqr > 1e-9:
-                upper = max(10.0, float(math.ceil(max(q1, cap - q3) / iqr)))
+                upper = 10.0
                 # Round each median endpoint outward to a 0.1 step. The slider then
                 # still reaches the median, which _current_area_bounds holds.
                 lower_min = math.floor((q1 - median) / iqr * 10.0) / 10.0
@@ -3415,6 +3437,7 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_bounds = {}
         self.analysis_iqr_stats = {}
         self.analysis_is_stale = True
+        self.outlier_section_revealed = False
         self.background_ready_var.set("background: not computed")
         self.analysis_ready_var.set("analysis: not computed")
         if self.bg_preview_button is not None:
@@ -5143,6 +5166,7 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_bounds = bounds
         self.analysis_is_stale = False
         self.analysis_ready_var.set(f"analysis: ready ({scope_text}, blobs={total}, outliers={outliers})")
+        self.outlier_section_revealed = True
         self._set_workflow_stage("processing")
         self._redraw_area_iqr_boxplot()
         self.redraw_current_frame()
