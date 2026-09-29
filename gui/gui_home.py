@@ -23,14 +23,14 @@ try:
     from .project_paths import PROJECT_ROOT, gui_asset, gui_script
     from .splash_ipc import TOKEN_ENV_VAR, external_started_at, signal_stop
     from .splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
-    from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon, tk_font_spec
 except ImportError:  # Preserve direct execution with: python gui/gui_home.py
     from app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
     from app_update import probe_update_status, start_update_check
     from project_paths import PROJECT_ROOT, gui_asset, gui_script
     from splash_ipc import TOKEN_ENV_VAR, external_started_at, signal_stop
     from splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
-    from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon, tk_font_spec
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")
@@ -136,7 +136,7 @@ def show_splash(root: ctk.CTk, reveal: bool = False) -> tk.Toplevel:
             w, h = photo.width(), photo.height()
             reveal_from_left(canvas, cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, SPLASH_BG)
     else:
-        canvas.create_text(screen_w / 2, screen_h / 2, text=APP_TITLE, font=("Arial", 32, "bold"), fill="white")
+        canvas.create_text(screen_w / 2, screen_h / 2, text=APP_TITLE, font=tk_font_spec("Arial", 32, "bold"), fill="white")
 
     splash.lift()
     return splash
@@ -215,7 +215,7 @@ def make_panel(
         cursor="hand2",
         takefocus=1,
     )
-    font = ("Arial", font_size, "bold")
+    font = tk_font_spec("Arial", font_size, "bold")
     shadow = canvas.create_text(0, 0, text=text, fill=SHADOW_COLOR, font=font, anchor="center", justify="center")
     label = canvas.create_text(0, 0, text=text, fill=TEXT_COLOR, font=font, anchor="center", justify="center")
     state = {"hover": 0.0, "target": 0.0, "phase": 0.0, "flow": 0.0, "job_id": None}
@@ -404,7 +404,7 @@ def build_home(root: ctk.CTk) -> None:
                     (y0 + y1) / 2,
                     text=state["text"],
                     fill=TEXT_COLOR,
-                    font=("Arial", 13),
+                    font=tk_font_spec("Arial", 13),
                     tags=("corner_button", name),
                 )
                 continue
