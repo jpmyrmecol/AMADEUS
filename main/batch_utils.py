@@ -22,6 +22,27 @@ from __future__ import annotations
 
 import os
 
+def evenly_sample_sequence(items, max_count: int):
+    """Return at most max_count items sampled evenly across the input order."""
+    seq = list(items)
+    n = len(seq)
+    k = max(0, int(max_count))
+    if k <= 0 or n == 0:
+        return []
+    if n <= k:
+        return seq
+    if k == 1:
+        return [seq[(n - 1) // 2]]
+    indices = [round(i * (n - 1) / (k - 1)) for i in range(k)]
+    return [seq[i] for i in indices]
+
+
+def evenly_sample_frame_ids(frame_ids, max_count: int):
+    """Return unique frame ids, sorted and evenly sampled to max_count."""
+    ordered = sorted({int(frame_id) for frame_id in frame_ids})
+    return evenly_sample_sequence(ordered, max_count)
+
+
 TQDM_BAR_FORMAT = "{l_bar}{bar:20}{r_bar}"
 
 
