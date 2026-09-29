@@ -1616,10 +1616,9 @@ class EasyTrackingGUI(ctk.CTk):
         count = len(all_entries)
 
         # Prefer the most recent OBB+triangle preview image over a plain output
-        # image. Plain images are written far more often than previews (every
-        # frame vs. every PREVIEW_INTERVAL-th), so picking the single most
-        # recent file overall would almost always be a plain image and the
-        # preview would effectively never be shown.
+        # image. Plain images are written far more often than the capped preview
+        # sample, so picking the single most recent file overall would usually
+        # hide the annotated preview.
         if preview_entries:
             preview_entries.sort(key=lambda item: (item[0], item[1].lower()))
             chosen_path = preview_entries[-1][1]
