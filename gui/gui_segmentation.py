@@ -1196,6 +1196,7 @@ class CrossingReviewApp(ctk.CTk):
         configure_dpi_scaling(self)
         install_window_icon(self)
         self._no_launch_tracking = no_launch_tracking
+        self._closing = False
         self.title(APP_TITLE)
         self.geometry(f"{WINDOW_W}x{WINDOW_H}")
         self.minsize(WINDOW_MIN_W, WINDOW_MIN_H)
@@ -3504,6 +3505,9 @@ class CrossingReviewApp(ctk.CTk):
         _start_maximized(self)
 
     def on_close(self):
+        if self._closing:
+            return
+        self._closing = True
         self.stop_playback(update_button=False)
         if self.background_rebuild_job is not None:
             try:
@@ -3527,6 +3531,8 @@ class CrossingReviewApp(ctk.CTk):
         self.destroy()
 
     def on_window_configure(self, _event=None):
+        if self._closing:
+            return
         if self.frame_bgr_cache is not None:
             self._draw_canvas(preserve_view=True)
 
@@ -6386,7 +6392,7 @@ class CrossingReviewApp(ctk.CTk):
 
         def _show_done():
             messagebox.showinfo("Completed", msg)
-            self.destroy()
+            self.on_close()
 
         self.after(1200, _show_done)
 
