@@ -1529,14 +1529,14 @@ def main() -> None:
         )
         paste_jobs = [(fid, 1, repeat_index) for fid, repeat_index in additional_jobs]
         preview_ids = preview_additional_frame_jobs(
-            additional_jobs, max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20))),
+            additional_jobs, min(20, max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20)))),
         )
         attempted_jobs = set(additional_jobs)
     else:
         paste_jobs = build_even_frame_jobs(
             frame_ids, cluster_num_frames, normalize_seed(cfg.get("RANDOM_SEED", 0)),
         )
-        preview_count = max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20)))
+        preview_count = min(20, max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20))))
         preview_ids = preview_frame_set_ids_evenly(paste_jobs, preview_count)
         attempted_jobs = set()
 
