@@ -257,6 +257,8 @@ class EasyTrackingGUI(ctk.CTk):
         self.minsize(900, 600)
 
         self._seg_proc: subprocess.Popen | None = None
+        self._seg_poll_id: str | None = None
+        self._seg_launch_pickle_signature: tuple[int, int] | None = None
         self._batch_proc: subprocess.Popen | None = None
         self._batch_log_path: str = ""
         self._stop_requested = False
@@ -436,11 +438,50 @@ class EasyTrackingGUI(ctk.CTk):
             self._update_session_label()
         self._sync_segmentation_status_from_outputs()
 
+    @staticmethod
+    def _file_signature(path: str) -> tuple[int, int] | None:
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _segmentation_output_paths(self, cfg: dict | None = None) -> tuple[str, str]:
+        cfg = cfg or {}
+        video = str(cfg.get("TRAINING_VIDEO_PATH", "") or "").strip()
+        if not video:
+            video = self._video_entry.get().strip()
+        session = str(cfg.get("SESSION_PATH", "") or "").strip()
+        if not session:
+            session = self._get_session()
+        return segmentation_paths_for_session(session, video)
+
+    def _segmentation_finished_for_current_launch(self) -> bool:
+        if self._seg_proc is None or self._seg_proc.poll() is not None:
+            return self._segmentation_outputs_exist()
+        pickle_path, _background_path = self._segmentation_output_paths()
+        current_signature = self._file_signature(pickle_path)
+        return bool(
+            current_signature is not None
+            and current_signature != self._seg_launch_pickle_signature
+            and self._segmentation_outputs_exist()
+        )
+
+    def _poll_segmentation_status(self) -> None:
+        self._seg_poll_id = None
+        if self._seg_proc is None:
+            return
+        self._sync_segmentation_status_from_outputs()
+        if self._seg_proc.poll() is None:
+            self._seg_poll_id = self.after(300, self._poll_segmentation_status)
+
     def _launch_segmentation(self) -> None:
         video = self._video_entry.get().strip()
         if not video:
             messagebox.showwarning("No video", "Please select a video file first.")
             return
+        pickle_path, _background_path = self._segmentation_output_paths()
+        self._seg_launch_pickle_signature = self._file_signature(pickle_path)
         seg_script = str(gui_script("gui_segmentation.py"))
         cmd = [sys.executable, "-u", seg_script, "--return-to-easy"]
         if video:
@@ -452,27 +493,37 @@ class EasyTrackingGUI(ctk.CTk):
         self._seg_status.configure(text="Running...", text_color="#f0a000")
         self._seg_btn.configure(state="disabled")
         self._update_next_action()
+        if self._seg_poll_id is not None:
+            try:
+                self.after_cancel(self._seg_poll_id)
+            except Exception:
+                pass
+        self._seg_poll_id = self.after(300, self._poll_segmentation_status)
         threading.Thread(target=self._watch_seg, daemon=True).start()
 
     def _watch_seg(self) -> None:
-        self._seg_proc.wait()
-        self.after(0, self._on_seg_done)
+        proc = self._seg_proc
+        if proc is None:
+            return
+        proc.wait()
+        self.after(0, lambda p=proc: self._on_seg_done(p))
 
-    def _on_seg_done(self) -> None:
+    def _on_seg_done(self, proc: subprocess.Popen) -> None:
+        if self._seg_proc is proc:
+            self._seg_proc = None
+        if self._seg_poll_id is not None:
+            try:
+                self.after_cancel(self._seg_poll_id)
+            except Exception:
+                pass
+            self._seg_poll_id = None
         self._sync_segmentation_status_from_outputs()
         self._seg_btn.configure(state="normal")
         self.lift()
         self.focus_force()
 
     def _segmentation_outputs_exist(self, cfg: dict | None = None) -> bool:
-        cfg = cfg or {}
-        video = str(cfg.get("TRAINING_VIDEO_PATH", "") or "").strip()
-        if not video:
-            video = self._video_entry.get().strip()
-        session = str(cfg.get("SESSION_PATH", "") or "").strip()
-        if not session:
-            session = self._get_session()
-        pickle_path, background_path = segmentation_paths_for_session(session, video)
+        pickle_path, background_path = self._segmentation_output_paths(cfg)
         return bool(
             pickle_path
             and background_path
@@ -483,9 +534,10 @@ class EasyTrackingGUI(ctk.CTk):
     def _sync_segmentation_status_from_outputs(self, cfg: dict | None = None) -> None:
         if not hasattr(self, "_seg_status"):
             return
-        if self._seg_proc is not None and self._seg_proc.poll() is None:
-            return
-        if self._segmentation_outputs_exist(cfg):
+        running = self._seg_proc is not None and self._seg_proc.poll() is None
+        if running and not self._segmentation_finished_for_current_launch():
+            self._seg_status.configure(text="Running...", text_color="#f0a000")
+        elif self._segmentation_outputs_exist(cfg):
             self._seg_status.configure(text="Done", text_color="#1f8040")
         else:
             self._seg_status.configure(text="Not started", text_color="gray")
@@ -891,7 +943,11 @@ class EasyTrackingGUI(ctk.CTk):
             message = "Processing is running. No action is required. Please wait."
         elif not self._video_entry.get().strip():
             message = "1. Select a video file."
-        elif self._seg_proc is not None and self._seg_proc.poll() is None:
+        elif (
+            self._seg_proc is not None
+            and self._seg_proc.poll() is None
+            and not self._segmentation_finished_for_current_launch()
+        ):
             message = "2. Complete segmentation, then return to Easy Tracking."
         elif not self._segmentation_outputs_exist():
             message = "2. Click Launch Segmentation and complete segmentation."
