@@ -54,12 +54,12 @@ def _is_wsl() -> bool:
 
 
 def _windows_host_dpi() -> float | None:
-    """Read the Windows primary display's effective DPI from WSL.
+    """Read the Windows system DPI from WSL in a DPI-aware thread context.
 
-    The registry's AppliedDPI can remain 96 even when Windows is using a
-    higher display scale. Query the native monitor DPI instead. The helper
-    first requests per-monitor DPI awareness because Windows returns 96 to
-    DPI-unaware callers.
+    PowerShell itself can already be initialized as DPI-unaware, in which case
+    process-level DPI-awareness calls are too late and Windows virtualizes DPI
+    queries to 96. Set the current thread to PER_MONITOR_AWARE_V2 temporarily,
+    query GetDpiForSystem(), then restore the previous thread context.
     """
     if not _is_wsl():
         return None
@@ -79,53 +79,29 @@ using System;
 using System.Runtime.InteropServices;
 
 public static class AmadeusDpi {
-    [StructLayout(LayoutKind.Sequential)]
-    public struct POINT {
-        public int X;
-        public int Y;
-    }
-
-    [DllImport("Shcore.dll")]
-    public static extern int SetProcessDpiAwareness(int value);
+    [DllImport("User32.dll")]
+    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
 
     [DllImport("User32.dll")]
-    public static extern IntPtr MonitorFromPoint(POINT pt, uint flags);
+    private static extern uint GetDpiForSystem();
 
-    [DllImport("Shcore.dll")]
-    public static extern int GetDpiForMonitor(
-        IntPtr hmonitor,
-        int dpiType,
-        out uint dpiX,
-        out uint dpiY
-    );
+    public static uint QuerySystemDpi() {
+        // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4.
+        IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+        try {
+            return GetDpiForSystem();
+        }
+        finally {
+            if (previous != IntPtr.Zero) {
+                SetThreadDpiAwarenessContext(previous);
+            }
+        }
+    }
 }
 '@
 
 Add-Type -TypeDefinition $source -ErrorAction Stop
-
-# PROCESS_PER_MONITOR_DPI_AWARE = 2. If PowerShell already has a DPI
-# awareness context this can return an error HRESULT; the subsequent query
-# is still valid for that existing context, so the return value is ignored.
-[void][AmadeusDpi]::SetProcessDpiAwareness(2)
-
-$point = New-Object AmadeusDpi+POINT
-$point.X = 0
-$point.Y = 0
-
-# MONITOR_DEFAULTTOPRIMARY = 1, MDT_EFFECTIVE_DPI = 0.
-$monitor = [AmadeusDpi]::MonitorFromPoint($point, 1)
-[uint32]$dpiX = 0
-[uint32]$dpiY = 0
-$result = [AmadeusDpi]::GetDpiForMonitor(
-    $monitor,
-    0,
-    [ref]$dpiX,
-    [ref]$dpiY
-)
-
-if ($result -eq 0 -and $dpiX -gt 0) {
-    [Console]::Write([int]$dpiX)
-}
+[Console]::Write([AmadeusDpi]::QuerySystemDpi())
 """
 
     try:
@@ -146,7 +122,7 @@ if ($result -eq 0 -and $dpiX -gt 0) {
         pass
 
     # Last-resort compatibility fallback for hosts where the native query
-    # cannot run. This value is known to be insufficient on some WSL hosts.
+    # cannot run. This value may remain 96 on WSL even at higher host scaling.
     registry_command = (
         "$v=(Get-ItemProperty -LiteralPath "
         "'HKCU:\\Control Panel\\Desktop\\WindowMetrics' "
