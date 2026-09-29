@@ -1240,7 +1240,7 @@ def write_rotation_dataset_previews(
         if key in stems_by_group:
             stems_by_group[key].append(stem)
 
-    limit = min(20, max(0, int(num_preview_frames)))
+    limit = max(0, int(num_preview_frames))
     if limit <= 0:
         print(f"[PREVIEW] written=0 dir={preview_dir}")
         return 0
@@ -1901,7 +1901,7 @@ def main() -> None:
     rotation_angles = normalize_rotation_angles(
         cfg.get("CREATE_DATASET_ROTATION_ANGLES", list(ALLOWED_ROTATION_ANGLES))
     )
-    num_preview_frames = min(20, max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20))))
+    num_preview_frames = max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20)))
 
     output_root = resolve_yolo_dataset_dir(cfg, session_path)
     img_ext = str(cfg.get("IMG_EXT", ".png"))
