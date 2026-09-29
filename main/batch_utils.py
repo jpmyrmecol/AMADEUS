@@ -43,6 +43,24 @@ def evenly_sample_frame_ids(frame_ids, max_count: int):
     return evenly_sample_sequence(ordered, max_count)
 
 
+def evenly_sample_frame_range(first_frame: int, last_frame: int, max_count: int):
+    """Return at most max_count frame ids evenly across an inclusive range."""
+    first = int(first_frame)
+    last = int(last_frame)
+    k = max(0, int(max_count))
+    if k <= 0 or last < first:
+        return []
+    n = last - first + 1
+    if n <= k:
+        return list(range(first, last + 1))
+    if k == 1:
+        return [first + (n - 1) // 2]
+    return [
+        first + round(i * (n - 1) / (k - 1))
+        for i in range(k)
+    ]
+
+
 TQDM_BAR_FORMAT = "{l_bar}{bar:20}{r_bar}"
 
 
