@@ -208,12 +208,14 @@ def select_python(requested: str | None) -> str:
 
 
 def verify_gui_environment() -> None:
-    """Exercise the dropdown that failed in the macOS report, not just Tk()."""
+    """Exercise CustomTkinter dropdowns under the supported Tk runtime."""
     code = """
 import sys
 import tkinter as tk
 import customtkinter as ctk
 import cv2
+from gui.tk_compat import apply_tk_compatibility
+apply_tk_compatibility()
 print('[AMADEUS] Python:', sys.version, sys.executable)
 print('[AMADEUS] Tcl/Tk:', tk.TclVersion, tk.TkVersion)
 if sys.platform == 'darwin' and (tk.TclVersion != 8.6 or tk.TkVersion != 8.6):
@@ -557,7 +559,7 @@ def check_uv_version(uv_executable: str) -> str:
 
 def ready_identity(profile: str) -> dict:
     inputs = ("pyproject.toml", "uv.lock", "VERSION", "tools/setup_environment.py",
-              "tools/runtime_profiles.py", "main/compute_backend.py")
+              "tools/runtime_profiles.py", "main/compute_backend.py", "gui/tk_compat.py")
     digest = hashlib.sha256()
     for name in inputs:
         digest.update((PROJECT_ROOT / name).read_bytes())
