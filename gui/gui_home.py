@@ -3,6 +3,7 @@
 
 import math
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -468,17 +469,27 @@ def build_home(root: ctk.CTk) -> None:
             pulse_update_button()
         root.title(f"{home_window_title()}  ·  update {latest_version} available")
 
+    update_probe_results = queue.Queue()
+
     def probe_updates_in_background() -> None:
         try:
             _current, latest, available = probe_update_status()
         except Exception:
+            update_probe_results.put((None, False))
             return
-        if not available:
-            return
+        update_probe_results.put((latest, available))
+
+    def poll_update_probe() -> None:
         try:
-            root.after(0, lambda latest=latest: mark_update_available(latest))
-        except tk.TclError:
-            pass
+            latest, available = update_probe_results.get_nowait()
+        except queue.Empty:
+            try:
+                root.after(50, poll_update_probe)
+            except tk.TclError:
+                pass
+            return
+        if available and latest is not None:
+            mark_update_available(latest)
 
     def corner_motion(event) -> None:
         for name in corner_buttons:
@@ -526,9 +537,10 @@ def build_home(root: ctk.CTk) -> None:
             name="AMADEUS Home update probe",
             daemon=True,
         ).start()
+        poll_update_probe()
 
-    # Start only after Tk enters its event loop so the worker can safely
-    # schedule the UI update back onto the main thread.
+    # Start only after Tk enters its event loop. Background work reports through
+    # a queue, and only this Tk main thread schedules or performs GUI updates.
     root.after(100, start_update_probe)
     root.bind("<F1>", lambda e: open_manual("EN"))
 
