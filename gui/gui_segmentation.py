@@ -109,9 +109,8 @@ ANALYSIS_FORWARD_MAX_FRAMES = 512
 PROCESSING_BATCH_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_TRAINING_MAX_FRAME_INDEX = 19999
 LONG_VIDEO_FRAME_COUNT_THRESHOLD = DEFAULT_TRAINING_MAX_FRAME_INDEX + 1
-# The area IQR sliders cover the usual working range. The spinbox keeps the
-# wider data-derived limit, so a larger multiplier can still be typed or stepped.
-AREA_IQR_SLIDER_MAX = 5.0
+# Lower and upper IQR multiplier controls share the same maximum.
+AREA_IQR_SLIDER_MAX = 10.0
 # Geometry sliders span the loaded image; the spinbox keeps a far wider limit so a
 # value outside the frame can still be typed. Radii reach twice the long edge,
 # which covers a circle centred anywhere in the image (diagonal < 1.5 x long edge).
