@@ -412,7 +412,7 @@ def build_training_dataset(
     background_path: str | None,
     *,
     img_ext: str = ".png",
-    num_preview_frames: int = 100,
+    num_preview_frames: int = 20,
     preview_interval: int = 100,
     num_crops_per_img: int = 1,
     random_seed: int = 0,
@@ -499,6 +499,7 @@ def build_training_dataset(
             CROP_SIZE=image_size,
             IMG_EXT=img_ext,
             PREVIEW_INTERVAL=int(preview_interval),
+            NUM_PREVIEW_FRAMES=int(num_preview_frames),
             NUM_CROPS=num_crops_per_img,
             BACKGROUND_PATH=str(background_path or ""),
             EDGE_BLUR_KSIZE=int(edge_blur_ksize),
@@ -1014,7 +1015,7 @@ def main() -> None:
     image_size = int(cfg["TRAIN_IMG_SIZE"])
     background_path = str(cfg["BACKGROUND_PATH"])
     img_ext = str(cfg.get("IMG_EXT", ".png") or ".png")
-    num_preview_frames = int(cfg.get("NUM_PREVIEW_FRAMES", 100))
+    num_preview_frames = int(cfg.get("NUM_PREVIEW_FRAMES", 20))
     preview_interval = int(cfg.get("PREVIEW_INTERVAL", 100))
     num_crops_per_img = int(cfg.get("NUM_CROPS", 1))
     random_seed = normalize_seed(cfg.get("RANDOM_SEED", 0))
