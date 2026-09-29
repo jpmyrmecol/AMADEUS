@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 import yaml
 from animal_noise import apply_animal_noise, load_noise_background
-from batch_utils import auto_num_workers as _auto_num_workers, tqdm
+from batch_utils import auto_num_workers as _auto_num_workers, evenly_sample_sequence, tqdm
 import shutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -1160,28 +1160,14 @@ def build_even_frame_jobs(frame_ids: List[int], requested_num_sets: int, seed: i
     return jobs
 
 
-def preview_frame_set_ids_by_interval(frame_jobs: List[Tuple[int, int]], interval: int) -> List[Tuple[int, int]]:
-    """One (frame_id, 0) pair per frame selected by actual frame id, at least
-    `interval` video frames apart, starting at the first available frame id.
-
-    Selecting by frame id (not by position in `frame_jobs`) matters because that
-    list is already thinned by the upstream frame interval; indexing by position
-    would compound the two intervals instead of spacing previews by `interval`
-    video frames.
-    """
-    step = max(0, int(interval))
-    if step <= 0:
-        return []
-    out: List[Tuple[int, int]] = []
-    last = None
-    for fid, set_count in sorted(frame_jobs, key=lambda job: job[0]):
-        if int(set_count) <= 0:
-            continue
-        fid = int(fid)
-        if last is None or fid - last >= step:
-            out.append((fid, 0))
-            last = fid
-    return out
+def preview_frame_set_ids_evenly(frame_jobs: List[Tuple[int, int]], max_count: int) -> List[Tuple[int, int]]:
+    """Select at most max_count source frames evenly across the paste jobs."""
+    candidates = [
+        (int(fid), 0)
+        for fid, set_count in sorted(frame_jobs, key=lambda job: job[0])
+        if int(set_count) > 0
+    ]
+    return evenly_sample_sequence(candidates, max_count)
 
 
 def output_stem_for_frame_set(frame_id: int, repeat_index: int) -> str:
@@ -1257,20 +1243,11 @@ def build_additional_frame_jobs(
 
 def preview_additional_frame_jobs(
     jobs: List[Tuple[int, int]],
-    interval: int,
+    max_count: int,
 ) -> List[Tuple[int, int]]:
-    """Select previews from supplemental jobs using source-frame spacing."""
-    step = max(0, int(interval))
-    if step <= 0:
-        return []
-    selected: List[Tuple[int, int]] = []
-    last_frame_id = None
-    for fid, repeat_index in sorted(jobs):
-        fid = int(fid)
-        if last_frame_id is None or fid - last_frame_id >= step:
-            selected.append((fid, int(repeat_index)))
-            last_frame_id = fid
-    return selected
+    """Select at most max_count supplemental jobs evenly across their order."""
+    ordered = [(int(fid), int(repeat_index)) for fid, repeat_index in sorted(jobs)]
+    return evenly_sample_sequence(ordered, max_count)
 
 
 def paste_mask_into_full(full: np.ndarray, mask: np.ndarray, x: int, y: int) -> None:
@@ -2180,18 +2157,18 @@ def main() -> None:
         requested_num_sets = -1  # all frames once
 
 
-    preview_interval = int(cfg.get("PREVIEW_INTERVAL", 0))
+    preview_count = max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20)))
     frame_ids = sorted(objects_by_frame.keys())
     seed = normalize_seed(cfg.get("RANDOM_SEED", 0))
     if append_mode:
         all_jobs = build_additional_frame_jobs(
             frame_ids, dirs["images"], requested_num_sets, seed,
         )
-        preview_jobs = preview_additional_frame_jobs(all_jobs, preview_interval)
+        preview_jobs = preview_additional_frame_jobs(all_jobs, preview_count)
         print(f"paste_blobs: adding {requested_num_sets} randomly selected frame sets")
     else:
         paste_jobs = build_even_frame_jobs(frame_ids, requested_num_sets, seed)
-        preview_jobs = preview_frame_set_ids_by_interval(paste_jobs, preview_interval)
+        preview_jobs = preview_frame_set_ids_evenly(paste_jobs, preview_count)
         all_jobs = [(fid, rep) for fid, set_count in paste_jobs for rep in range(set_count)]
 
     workers_cfg = resolve_num_workers(cfg, "paste_blobs", default=None)
