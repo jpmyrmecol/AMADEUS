@@ -2214,7 +2214,7 @@ def main() -> None:
         requested_num_sets = -1  # all frames once
 
 
-    preview_count = min(20, max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20))))
+    preview_count = max(0, int(cfg.get("NUM_PREVIEW_FRAMES", 20)))
     frame_ids = sorted(objects_by_frame.keys())
     seed = normalize_seed(cfg.get("RANDOM_SEED", 0))
     if append_mode:
