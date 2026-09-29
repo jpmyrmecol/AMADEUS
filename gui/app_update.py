@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 import shutil
 import stat
@@ -201,11 +202,27 @@ def start_update_check(
         except tk.TclError:
             pass
 
+    dispatch_queue: queue.Queue[Callable[[], None]] = queue.Queue()
+
     def schedule(callback: Callable[[], None]) -> None:
-        try:
-            root.after(0, callback)
-        except tk.TclError:
-            pass
+        dispatch_queue.put(callback)
+
+    def poll_dispatch_queue() -> None:
+        while True:
+            try:
+                callback = dispatch_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except tk.TclError:
+                return
+
+        if getattr(root, "_amadeus_update_busy", False):
+            try:
+                root.after(50, poll_dispatch_queue)
+            except tk.TclError:
+                pass
 
     def stop_other_amadeus_processes() -> bool:
         status("Stopping...")
@@ -416,4 +433,7 @@ def start_update_check(
 
         on_update_start()
 
+    # Begin polling from the Tk main thread before background work starts.
+    # Worker threads only enqueue callbacks and never call Tk APIs directly.
+    poll_dispatch_queue()
     threading.Thread(target=check_worker, name="AMADEUS update check", daemon=True).start()
