@@ -621,7 +621,7 @@ def main() -> None:
     device = resolve_device(analysis.get('DEVICE', 'auto'), purpose='detection')
     orig_first_frame = int(analysis.get('FIRST_FRAME', 0))
     orig_last_frame = int(analysis.get('LAST_FRAME', -1))
-    preview_count = max(0, int(cfg.get('NUM_PREVIEW_FRAMES', 20)))
+    preview_count = min(20, max(0, int(cfg.get('NUM_PREVIEW_FRAMES', 20))))
     skip_pose_preview_frames = bool(analysis.get('SKIP_DETECT_PREVIEW', False))
     batch_size_config = analysis.get('BATCH_SIZE', 'auto')
     num_objects = int(cfg.get('NUM_OBJECTS', 0))
