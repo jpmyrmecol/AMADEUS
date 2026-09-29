@@ -3137,19 +3137,32 @@ class EasyTrackingGUI(ctk.CTk):
         self._update_next_action()
 
     def _stop_batch(self) -> None:
-        if self._batch_proc and self._batch_proc.poll() is None:
-            self._stop_requested = True
-            try:
-                if sys.platform == "win32":
-                    subprocess.run(
-                        ["taskkill", "/PID", str(self._batch_proc.pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-                else:
-                    import signal
-                    os.killpg(os.getpgid(self._batch_proc.pid), signal.SIGTERM)
-            except Exception:
-                pass
+        proc = self._batch_proc
+        if proc is None or proc.poll() is not None:
+            self._stop_btn.configure(state="disabled")
+            return
+
+        self._stop_requested = True
+        self._set_progress(self._progress_pct, "Stopping...")
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            else:
+                import signal
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception as exc:
+            self._stop_requested = False
+            self._stop_btn.configure(state="normal")
+            messagebox.showerror(
+                "Stop failed",
+                f"Failed to stop processing.\n\n{exc}",
+                parent=self,
+            )
+            return
         self._stop_btn.configure(state="disabled")
 
     # Load / apply config
