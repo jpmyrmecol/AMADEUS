@@ -27,6 +27,25 @@ WINDOW_ICON_SIZES = (16, 32, 48, 256)
 WINDOW_ICON_REFRESH_DELAYS_MS = (50, 250, 500, 1000, 2000)
 
 
+def tk_font_spec(
+    family: str,
+    point_size: int,
+    weight: str = "normal",
+) -> tuple[str, int, str]:
+    """Return a Tk font tuple with stable Windows-equivalent sizing on Linux.
+
+    Tk uses positive font sizes as points and negative sizes as pixels. On the
+    current Linux/Tk 9 path used by WSLg, requested positive sizes can collapse
+    to nearly the same small bitmap size. Windows at the 96-DPI baseline maps
+    points to pixels by 96/72, so use that mapping explicitly on Linux while
+    leaving Windows and macOS unchanged.
+    """
+    if sys.platform.startswith("linux"):
+        pixel_size = max(1, round(point_size * 96.0 / 72.0))
+        return family, -pixel_size, weight
+    return family, point_size, weight
+
+
 def configure_taskbar_identity() -> None:
     if os.name != "nt":
         return
