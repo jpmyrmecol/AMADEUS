@@ -10,6 +10,13 @@ import sys
 from pathlib import Path
 from typing import MutableMapping
 
+try:
+    from .tk_compat import apply_tk_compatibility
+except ImportError:  # Preserve direct execution of GUI scripts.
+    from tk_compat import apply_tk_compatibility
+
+apply_tk_compatibility()
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 GUI_DIR = PROJECT_ROOT / "gui"
