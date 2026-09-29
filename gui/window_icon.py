@@ -54,7 +54,13 @@ def _is_wsl() -> bool:
 
 
 def _windows_host_dpi() -> float | None:
-    """Read the Windows user's applied DPI from WSL without changing it."""
+    """Read the Windows primary display's effective DPI from WSL.
+
+    The registry's AppliedDPI can remain 96 even when Windows is using a
+    higher display scale. Query the native monitor DPI instead. The helper
+    first requests per-monitor DPI awareness because Windows returns 96 to
+    DPI-unaware callers.
+    """
     if not _is_wsl():
         return None
 
@@ -67,7 +73,81 @@ def _windows_host_dpi() -> float | None:
     if not powershell:
         return None
 
-    command = (
+    command = r"""
+$source = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class AmadeusDpi {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("Shcore.dll")]
+    public static extern int SetProcessDpiAwareness(int value);
+
+    [DllImport("User32.dll")]
+    public static extern IntPtr MonitorFromPoint(POINT pt, uint flags);
+
+    [DllImport("Shcore.dll")]
+    public static extern int GetDpiForMonitor(
+        IntPtr hmonitor,
+        int dpiType,
+        out uint dpiX,
+        out uint dpiY
+    );
+}
+'@
+
+Add-Type -TypeDefinition $source -ErrorAction Stop
+
+# PROCESS_PER_MONITOR_DPI_AWARE = 2. If PowerShell already has a DPI
+# awareness context this can return an error HRESULT; the subsequent query
+# is still valid for that existing context, so the return value is ignored.
+[void][AmadeusDpi]::SetProcessDpiAwareness(2)
+
+$point = New-Object AmadeusDpi+POINT
+$point.X = 0
+$point.Y = 0
+
+# MONITOR_DEFAULTTOPRIMARY = 1, MDT_EFFECTIVE_DPI = 0.
+$monitor = [AmadeusDpi]::MonitorFromPoint($point, 1)
+[uint32]$dpiX = 0
+[uint32]$dpiY = 0
+$result = [AmadeusDpi]::GetDpiForMonitor(
+    $monitor,
+    0,
+    [ref]$dpiX,
+    [ref]$dpiY
+)
+
+if ($result -eq 0 -and $dpiX -gt 0) {
+    [Console]::Write([int]$dpiX)
+}
+"""
+
+    try:
+        completed = subprocess.run(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5.0,
+            check=False,
+        )
+        if completed.returncode == 0:
+            dpi = float((completed.stdout or "").strip())
+            if 48.0 <= dpi <= 768.0:
+                return dpi
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+
+    # Last-resort compatibility fallback for hosts where the native query
+    # cannot run. This value is known to be insufficient on some WSL hosts.
+    registry_command = (
         "$v=(Get-ItemProperty -LiteralPath "
         "'HKCU:\\Control Panel\\Desktop\\WindowMetrics' "
         "-Name AppliedDPI -ErrorAction SilentlyContinue).AppliedDPI; "
@@ -75,7 +155,13 @@ def _windows_host_dpi() -> float | None:
     )
     try:
         completed = subprocess.run(
-            [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                registry_command,
+            ],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -89,10 +175,7 @@ def _windows_host_dpi() -> float | None:
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
 
-    # Reject obviously invalid registry values and fall back to Tk/X11 DPI.
-    if not 48.0 <= dpi <= 768.0:
-        return None
-    return dpi
+    return dpi if 48.0 <= dpi <= 768.0 else None
 
 
 def configure_dpi_scaling(window: tk.Misc) -> None:
