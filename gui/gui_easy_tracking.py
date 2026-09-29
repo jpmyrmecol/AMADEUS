@@ -304,7 +304,14 @@ class EasyTrackingGUI(ctk.CTk):
         self._system_monitor_stop = threading.Event()
         self._system_monitor_thread: threading.Thread | None = None
 
+        # Preview-folder shortcuts. Availability is derived from the current
+        # filesystem state so buttons follow creation, moves, and cleanup.
+        self._preview_folder_buttons: dict[str, ctk.CTkButton] = {}
+        self._preview_folder_paths: dict[str, str] = {}
+        self._preview_folder_poll_id: str | None = None
+
         self._build_ui()
+        self._refresh_preview_folder_buttons()
         self._set_skip_flags(self._default_skip_flags(), render=True)
         self._sync_refine_skip_from_backward_question()
         self._remember_easy_answers()
@@ -693,6 +700,148 @@ class EasyTrackingGUI(ctk.CTk):
             command=self._switch_advanced_mode,
         )
         self._switch_btn.pack(side="left")
+
+        self._build_preview_folder_panel(frame)
+
+    def _build_preview_folder_panel(self, parent: ctk.CTkFrame) -> None:
+        wrap = ctk.CTkFrame(parent, corner_radius=0)
+        wrap.pack(fill="x", padx=8, pady=(0, 10))
+
+        ctk.CTkLabel(
+            wrap,
+            text="Preview folders",
+            font=("TkDefaultFont", 12, "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        labels = [
+            ("single_animal", "Single animal"),
+            ("refine_blobs", "Refine blobs"),
+            ("clustered_paste", "Clustered paste"),
+            ("mixed_paste", "Mixed paste"),
+            ("cropped_images", "Cropped images"),
+            ("detection", "Detection"),
+        ]
+        for col in range(3):
+            wrap.grid_columnconfigure(col, weight=1, uniform="preview_folder")
+        for index, (key, label) in enumerate(labels):
+            button = ctk.CTkButton(
+                wrap,
+                text=label,
+                height=30,
+                state="disabled",
+                command=lambda k=key: self._open_preview_folder(k),
+            )
+            button.grid(
+                row=1 + index // 3,
+                column=index % 3,
+                sticky="ew",
+                padx=(0 if index % 3 == 0 else 3, 0 if index % 3 == 2 else 3),
+                pady=3,
+            )
+            self._preview_folder_buttons[key] = button
+
+    def _preview_folder_patterns(self, session: str) -> dict[str, list[str]]:
+        if not session:
+            return {}
+        detection_parts = [
+            session, OUTPUT_ROOT_DIR, "*", "tracking", "dataset*", "*", "*"
+        ]
+        if self._variable_count.get():
+            detection_parts.append("variable")
+        detection_parts.append("preview")
+        return {
+            "single_animal": [
+                os.path.join(session, "single_animal_images", "preview"),
+            ],
+            "refine_blobs": [
+                os.path.join(session, "single_animal_images", "refine", "dataset", "preview"),
+                os.path.join(session, "single_animal_images", "refine_add*", "dataset", "preview"),
+            ],
+            "clustered_paste": [
+                os.path.join(session, "paste_blobs_clustered", "preview"),
+            ],
+            "mixed_paste": [
+                os.path.join(session, "paste_blobs", "preview"),
+            ],
+            "cropped_images": [
+                os.path.join(session, "paste_blobs", "cropping", "preview"),
+                os.path.join(session, "paste_blobs_clustered", "cropping", "preview"),
+                os.path.join(session, "single_animal_images", "cropping", "preview"),
+            ],
+            "detection": [
+                os.path.join(*detection_parts),
+            ],
+        }
+
+    @staticmethod
+    def _latest_nonempty_preview_dir(patterns: list[str]) -> str:
+        latest_dir = ""
+        latest_mtime = -1.0
+        image_suffixes = (".png", ".jpg", ".jpeg")
+        for pattern in patterns:
+            for directory in sorted(glob.glob(pattern)):
+                if not os.path.isdir(directory):
+                    continue
+                try:
+                    names = os.listdir(directory)
+                except OSError:
+                    continue
+                for name in names:
+                    path = os.path.join(directory, name)
+                    if not name.lower().endswith(image_suffixes) or not os.path.isfile(path):
+                        continue
+                    try:
+                        mtime = os.path.getmtime(path)
+                    except OSError:
+                        continue
+                    if mtime >= latest_mtime:
+                        latest_mtime = mtime
+                        latest_dir = directory
+        return latest_dir
+
+    def _refresh_preview_folder_buttons(self) -> None:
+        session = self._get_session()
+        resolved: dict[str, str] = {}
+        patterns = self._preview_folder_patterns(session)
+        for key, button in self._preview_folder_buttons.items():
+            path = self._latest_nonempty_preview_dir(patterns.get(key, []))
+            if path:
+                resolved[key] = path
+                button.configure(state="normal")
+            else:
+                button.configure(state="disabled")
+        self._preview_folder_paths = resolved
+
+        if self.winfo_exists():
+            self._preview_folder_poll_id = self.after(
+                1000, self._refresh_preview_folder_buttons
+            )
+
+    def _open_preview_folder(self, key: str) -> None:
+        patterns = self._preview_folder_patterns(self._get_session())
+        path = self._latest_nonempty_preview_dir(patterns.get(key, []))
+        if not path:
+            self._preview_folder_paths.pop(key, None)
+            button = self._preview_folder_buttons.get(key)
+            if button is not None:
+                button.configure(state="disabled")
+            return
+
+        self._preview_folder_paths[key] = path
+        try:
+            if os.name == "nt":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except OSError as exc:
+            messagebox.showwarning(
+                "Open preview folder",
+                f"Could not open the preview folder.\n\n{exc}",
+                parent=self,
+            )
 
     # Canvas panel - visual progress
     def _build_canvas_panel(self, parent: tk.Frame) -> None:
