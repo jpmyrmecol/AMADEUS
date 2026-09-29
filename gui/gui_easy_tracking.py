@@ -2985,57 +2985,69 @@ class EasyTrackingGUI(ctk.CTk):
                 self._post_ui_event(self._on_step_done, vi, step_i, script)
 
     def _monitor_batch(self) -> None:
+        proc = self._batch_proc
+        if proc is None or proc.stdout is None:
+            return
+
         state = {"done_count": 0, "last_was_tqdm": False, "last_tqdm_len": 0}
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         buf: list[str] = []
         last_delim_was_cr = False
-        stdout = self._batch_proc.stdout
+        stdout = proc.stdout
+        read_chunk = getattr(stdout, "read1", stdout.read)
 
         def flush_record() -> None:
             nonlocal buf
             line = "".join(buf)
             buf = []
-            self._handle_batch_output_record(line, state)
+            try:
+                self._handle_batch_output_record(line, state)
+            except Exception:
+                # A malformed progress/status line must never terminate the
+                # monitor thread. Keep draining stdout so the batch process
+                # cannot block on a full pipe, and still deliver its exit code.
+                traceback.print_exc()
 
-        while True:
-            chunk = stdout.read1(4096)
-            if not chunk:
-                break
-            text = decoder.decode(chunk)
-            for ch in text:
-                if ch == "\r" or ch == "\n":
-                    if ch == "\n" and last_delim_was_cr and not buf:
+        try:
+            while True:
+                try:
+                    chunk = read_chunk(4096)
+                except (OSError, ValueError):
+                    break
+                if not chunk:
+                    break
+                text = decoder.decode(chunk)
+                for ch in text:
+                    if ch == "\r" or ch == "\n":
+                        if ch == "\n" and last_delim_was_cr and not buf:
+                            last_delim_was_cr = False
+                            continue
+                        flush_record()
+                        last_delim_was_cr = (ch == "\r")
+                    else:
+                        buf.append(ch)
                         last_delim_was_cr = False
-                        continue
-                    flush_record()
-                    last_delim_was_cr = (ch == "\r")
-                else:
-                    buf.append(ch)
-                    last_delim_was_cr = False
 
-        tail = decoder.decode(b"", final=True)
-        if tail:
-            for ch in tail:
-                if ch == "\r" or ch == "\n":
-                    if ch == "\n" and last_delim_was_cr and not buf:
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                for ch in tail:
+                    if ch == "\r" or ch == "\n":
+                        if ch == "\n" and last_delim_was_cr and not buf:
+                            last_delim_was_cr = False
+                            continue
+                        flush_record()
+                        last_delim_was_cr = (ch == "\r")
+                    else:
+                        buf.append(ch)
                         last_delim_was_cr = False
-                        continue
-                    flush_record()
-                    last_delim_was_cr = (ch == "\r")
-                else:
-                    buf.append(ch)
-                    last_delim_was_cr = False
-        if buf:
-            flush_record()
+            if buf:
+                flush_record()
 
-        if state.get("last_was_tqdm", False) and _stdout_supports_overwrite():
-            _safe_stdout_write("\n")
-        proc = self._batch_proc
-        if proc is None:
-            return
-        proc.wait()
-        rc = proc.returncode
-        self._post_ui_event(self._on_batch_finished, rc, proc)
+            if state.get("last_was_tqdm", False) and _stdout_supports_overwrite():
+                _safe_stdout_write("\n")
+        finally:
+            proc.wait()
+            self._post_ui_event(self._on_batch_finished, proc.returncode, proc)
 
     def _on_tqdm_progress(self, pct: float, text: str) -> None:
         self._set_progress(pct, text)
