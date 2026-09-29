@@ -1161,11 +1161,10 @@ class EasyTrackingGUI(ctk.CTk):
             return isinstance(value, (int, float)) and math.isfinite(float(value))
 
         def pair_label(current: float, maximum: float, unit: str) -> str:
-            unit_suffix = unit if unit == "%" else f" {unit}"
             compact_value = f"{current:.1f}/{maximum:.1f}"
             if width / 3.0 < 112.0:
                 return f"{compact_value}\n{unit}"
-            return f"{compact_value}{unit_suffix}"
+            return f"{compact_value} {unit}"
 
         def fixed_scale(value, maximum: float, unit: str) -> tuple[str, float | None]:
             if not finite_number(value):
