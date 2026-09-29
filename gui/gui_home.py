@@ -538,7 +538,10 @@ def build_home(root: ctk.CTk) -> None:
         ("Advanced Tracking", launch_advanced_tracking),
         ("Multi Config Batch", launch_multi_config_batch),
         ("Refinement", launch_refinement),
-        ("Colab (beta)", launch_colab),
+        (
+            "Colab (beta)" if sys.platform.startswith("linux") else "Colab（beta）",
+            launch_colab,
+        ),
     )
     for col, (text, command) in enumerate(lower_panels):
         panel = make_panel(root, root, text, command, font_size=18)
