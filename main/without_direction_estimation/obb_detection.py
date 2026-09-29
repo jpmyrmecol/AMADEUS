@@ -29,7 +29,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from batch_utils import resolve_batch_size, resolve_device, run_with_oom_retry, tqdm
+from batch_utils import evenly_sample_frame_range, resolve_batch_size, resolve_device, run_with_oom_retry, tqdm
 from checkpoint_utils import (
     normalize_checkpoint_weight,
     parse_checkpoint_spec,
@@ -342,16 +342,9 @@ def load_blob_pickle(path: str) -> pd.DataFrame:
         return pd.DataFrame()
     return pd.read_pickle(path)
 
-def _preview_frame_ids(first_frame: int, last_frame: int, interval: int) -> list[int]:
-    """Every `interval`-th frame starting from the first frame of the range."""
-    first = int(first_frame)
-    last = int(last_frame)
-    if last < first:
-        return []
-    step = int(interval)
-    if step <= 0:
-        return []
-    return list(range(first, last + 1, step))
+def _preview_frame_ids(first_frame: int, last_frame: int, max_count: int) -> list[int]:
+    """At most max_count frames sampled evenly across the inclusive range."""
+    return evenly_sample_frame_range(first_frame, last_frame, max_count)
 
 def _rows_to_preview_records(g: pd.DataFrame | None) -> list[dict]:
     if g is None or g.empty:
@@ -412,8 +405,8 @@ def _render_blob_preview_batch(
     return written
 
 
-def render_blob_preview(video_path: str, df: pd.DataFrame, out_dir: str, first_frame: int, last_frame: int, preview_interval: int, kind: str, workers: int = 1) -> None:
-    frame_ids = _preview_frame_ids(first_frame, last_frame, preview_interval)
+def render_blob_preview(video_path: str, df: pd.DataFrame, out_dir: str, first_frame: int, last_frame: int, preview_count: int, kind: str, workers: int = 1) -> None:
+    frame_ids = _preview_frame_ids(first_frame, last_frame, preview_count)
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
     os.makedirs(out_dir, exist_ok=True)
@@ -628,7 +621,7 @@ def main() -> None:
     device = resolve_device(analysis.get('DEVICE', 'auto'), purpose='detection')
     orig_first_frame = int(analysis.get('FIRST_FRAME', 0))
     orig_last_frame = int(analysis.get('LAST_FRAME', -1))
-    preview_interval = int(cfg.get('PREVIEW_INTERVAL', 100))
+    preview_count = max(0, int(cfg.get('NUM_PREVIEW_FRAMES', 20)))
     skip_pose_preview_frames = bool(analysis.get('SKIP_DETECT_PREVIEW', False))
     batch_size_config = analysis.get('BATCH_SIZE', 'auto')
     num_objects = int(cfg.get('NUM_OBJECTS', 0))
@@ -722,7 +715,7 @@ def main() -> None:
                 save_blob_pickle(blobs_direction_pickle, direction_rows_df)
 
             if not skip_pose_preview_frames:
-                render_blob_preview(info['path'], direction_rows_df, preview_direction_dir, info['first_frame'], info['last_frame'], preview_interval, 'all_blobs')
+                render_blob_preview(info['path'], direction_rows_df, preview_direction_dir, info['first_frame'], info['last_frame'], preview_count, 'all_blobs')
 
 
 if __name__ == '__main__':
