@@ -19,7 +19,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 import yaml
-from batch_utils import tqdm
+from batch_utils import evenly_sample_frame_ids, tqdm
 from obb_fitting import fit_obb, normalize_obb_fit_mode
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1597,19 +1597,12 @@ def save_without_crossing_dataset(
             continue
         frame_tasks.append((fid_int, list(blob_records[fid_int])))
 
-    # Select preview frames by actual frame id, at least PREVIEW_INTERVAL video
-    # frames apart, starting at the first available frame id. `frame_tasks` is
-    # already thinned by the upstream frame interval, so slicing by list
-    # position would compound the two intervals instead of spacing previews by
-    # PREVIEW_INTERVAL video frames.
-    preview_interval = max(0, int(cfg.get("PREVIEW_INTERVAL", 0)))
-    preview_ids: List[int] = []
-    if preview_interval > 0:
-        last_preview_fid = None
-        for fid, _ in frame_tasks:
-            if last_preview_fid is None or fid - last_preview_fid >= preview_interval:
-                preview_ids.append(fid)
-                last_preview_fid = fid
+    # Preview frames are sampled evenly across all available output frames,
+    # with a single global cap shared by the Easy Tracking preview folders.
+    preview_ids = evenly_sample_frame_ids(
+        (fid for fid, _ in frame_tasks),
+        int(cfg.get("NUM_PREVIEW_FRAMES", 20)),
+    )
 
     workers = _resolve_without_crossing_writer_workers(cfg)
     use_gpu = _resolve_without_crossing_writer_gpu(cfg)
