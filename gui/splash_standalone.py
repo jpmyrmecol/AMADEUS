@@ -55,7 +55,15 @@ def main() -> None:
 
     root = tk.Tk()
     root.configure(bg=SPLASH_BG)
-    root.attributes("-fullscreen", True)
+    screen_w = root.winfo_screenwidth()
+    screen_h = root.winfo_screenheight()
+    if sys.platform.startswith("linux"):
+        # WSLg/X11 can handle pointer events unreliably on Tk fullscreen
+        # windows. Use an equally sized borderless window instead.
+        root.overrideredirect(True)
+        root.geometry(f"{screen_w}x{screen_h}+0+0")
+    else:
+        root.attributes("-fullscreen", True)
     root.attributes("-topmost", True)
     is_closed = False
 
@@ -64,6 +72,11 @@ def main() -> None:
         if is_closed:
             return
         is_closed = True
+        if sys.platform.startswith("linux"):
+            try:
+                root.grab_release()
+            except tk.TclError:
+                pass
         try:
             root.destroy()
         except tk.TclError:
@@ -78,12 +91,12 @@ def main() -> None:
             pass
         close_splash()
 
+    root.bind("<ButtonPress>", dismiss_splash, add="+")
     root.bind_all("<ButtonPress>", dismiss_splash, add="+")
 
-    screen_w = root.winfo_screenwidth()
-    screen_h = root.winfo_screenheight()
     canvas = tk.Canvas(root, width=screen_w, height=screen_h, bg=SPLASH_BG, highlightthickness=0, bd=0)
     canvas.pack(fill="both", expand=True)
+    canvas.bind("<ButtonPress>", dismiss_splash, add="+")
 
     if logo_path.is_file():
         source = Image.open(logo_path).convert("RGBA")
@@ -99,12 +112,23 @@ def main() -> None:
     else:
         canvas.create_text(screen_w / 2, screen_h / 2, text="AMADEUS", font=("Arial", 32, "bold"), fill="white")
 
+    def activate_linux_splash() -> None:
+        if not sys.platform.startswith("linux") or is_closed:
+            return
+        try:
+            root.lift()
+            root.focus_force()
+            root.grab_set_global()
+        except tk.TclError:
+            pass
+
     def check_stop() -> None:
         if marker.exists():
             close_splash()
             return
         root.after(POLL_MS, check_stop)
 
+    root.after_idle(activate_linux_splash)
     root.after(POLL_MS, check_stop)
     root.after(safety_timeout_ms, close_splash)
     root.mainloop()
