@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import tkinter as tk
@@ -36,32 +38,99 @@ def configure_taskbar_identity() -> None:
         pass
 
 
-def configure_dpi_scaling(window: tk.Misc) -> None:
-    """Correct customtkinter's font/widget scaling on Linux (WSL/WSLg
-    included), where customtkinter's own DPI detection is a no-op and always
-    reports 1.0 -- see customtkinter's ScalingTracker.get_window_dpi_scaling.
-    Windows and macOS are left untouched: customtkinter already queries the
-    real per-monitor DPI on Windows there, and macOS's Retina/HiDPI scaling
-    is already correct without any help, so both keep their current look.
+def _is_wsl() -> bool:
+    """Return whether this Linux process is running under WSL/WSLg."""
+    if not sys.platform.startswith("linux"):
+        return False
+    if os.environ.get("WSL_INTEROP") or os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        release = Path("/proc/sys/kernel/osrelease").read_text(
+            encoding="utf-8", errors="ignore"
+        )
+    except OSError:
+        return False
+    return "microsoft" in release.lower() or "wsl" in release.lower()
 
-    The factor comes from Tk's own winfo_fpixels('1i') (pixels per inch on
-    this display) against the same 96-DPI-is-100% baseline customtkinter's
-    Windows path uses, so it follows whatever the real display DPI is
-    instead of assuming one fixed scaling percentage.
+
+def _windows_host_dpi() -> float | None:
+    """Read the Windows user's applied DPI from WSL without changing it."""
+    if not _is_wsl():
+        return None
+
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        candidate = Path(
+            "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+        )
+        powershell = str(candidate) if candidate.is_file() else None
+    if not powershell:
+        return None
+
+    command = (
+        "$v=(Get-ItemProperty -LiteralPath "
+        "'HKCU:\\Control Panel\\Desktop\\WindowMetrics' "
+        "-Name AppliedDPI -ErrorAction SilentlyContinue).AppliedDPI; "
+        "if ($null -ne $v) { [Console]::Write([int]$v) }"
+    )
+    try:
+        completed = subprocess.run(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3.0,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return None
+        dpi = float((completed.stdout or "").strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+    # Reject obviously invalid registry values and fall back to Tk/X11 DPI.
+    if not 48.0 <= dpi <= 768.0:
+        return None
+    return dpi
+
+
+def configure_dpi_scaling(window: tk.Misc) -> None:
+    """Match Linux GUI scaling to the effective display DPI.
+
+    CustomTkinter does not perform its Windows-style per-monitor DPI handling
+    on Linux. Under WSL/WSLg, XWayland can report 96 DPI even when the Windows
+    host uses 125%, 150%, 200%, or another display scale. Prefer the Windows
+    user's AppliedDPI in WSL, and fall back to Tk's display DPI on native Linux.
+
+    Apply the same DPI to both CustomTkinter and Tk itself. The Tk scaling is
+    required for AMADEUS widgets drawn with tkinter.Canvas.create_text(), which
+    are not affected by CustomTkinter's widget scaling.
     """
     if not sys.platform.startswith("linux"):
         return
-    try:
-        dpi = window.winfo_fpixels("1i")
-    except tk.TclError:
-        return
+
+    dpi = _windows_host_dpi()
+    if dpi is None:
+        try:
+            dpi = float(window.winfo_fpixels("1i"))
+        except (tk.TclError, TypeError, ValueError):
+            return
+
     if not dpi or dpi <= 0:
         return
+
     factor = dpi / 96.0
-    if abs(factor - 1.0) < 0.01:
-        return
     ctk.set_widget_scaling(factor)
     ctk.set_window_scaling(factor)
+
+    # Tk font sizes expressed as positive numbers are point sizes. Match Tk's
+    # point-to-pixel conversion to the same DPI so plain Tk/Canvas text scales
+    # with the CustomTkinter controls.
+    try:
+        window.tk.call("tk", "scaling", dpi / 72.0)
+    except tk.TclError:
+        pass
 
 
 def install_window_icon(window: tk.Misc) -> None:
