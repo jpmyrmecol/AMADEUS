@@ -1135,8 +1135,12 @@ class EasyTrackingGUI(ctk.CTk):
                 center_x + hub_radius, center_y + hub_radius,
                 fill="#9ba99e", outline="",
             )
+            # Keep the numeric readout close to the meter itself rather than
+            # anchoring it to the bottom of the cell.  About two text-height
+            # units below the gauge baseline gives a clear but compact gap.
+            value_y = min(y0 + row_height - 14.0, center_y + 28.0)
             value = canvas.create_text(
-                center_x, y0 + row_height - 18, text="N/A", fill="#aab4ad",
+                center_x, value_y, text="N/A", fill="#aab4ad",
                 font=_VISUAL_PROGRESS_FONT, anchor="center",
                 width=max(1, int(cell_width - 4)), justify="center",
             )
