@@ -770,45 +770,11 @@ class EasyTrackingGUI(ctk.CTk):
         wrap = ctk.CTkFrame(parent, corner_radius=0)
         wrap.pack(fill="x", padx=8, pady=(0, 10))
 
-        ctk.CTkLabel(
-            wrap,
-            text="Preview folders",
-            font=("TkDefaultFont", 12, "bold"),
-            anchor="w",
-        ).grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4))
-
-        labels = [
-            ("single_animal", "Single animal"),
-            ("refine_blobs", "Refine blobs"),
-            ("clustered_paste", "Clustered paste"),
-            ("mixed_paste", "Mixed paste"),
-            ("cropped_images", "Cropped images"),
-            ("detection", "Detection"),
-        ]
-        for col in range(3):
-            wrap.grid_columnconfigure(col, weight=1, uniform="preview_folder")
-        for index, (key, label) in enumerate(labels):
-            button = ctk.CTkButton(
-                wrap,
-                text=label,
-                height=30,
-                state="disabled",
-                command=lambda k=key: self._open_preview_folder(k),
-            )
-            button.grid(
-                row=1 + index // 3,
-                column=index % 3,
-                sticky="ew",
-                padx=(0 if index % 3 == 0 else 3, 0 if index % 3 == 2 else 3),
-                pady=3,
-            )
-            self._preview_folder_buttons[key] = button
-
         actions = ctk.CTkFrame(wrap, corner_radius=0)
         actions.grid(
-            row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0)
+            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8)
         )
-        for col in range(4):
+        for col in range(3):
             actions.grid_columnconfigure(col, weight=1, uniform="easy_actions")
 
         self._open_results_btn = ctk.CTkButton(
@@ -832,15 +798,49 @@ class EasyTrackingGUI(ctk.CTk):
             command=self._load_config,
         )
         self._load_btn.grid(
-            row=0, column=2, sticky="ew", padx=3
+            row=0, column=2, sticky="ew", padx=(3, 0)
         )
 
+        ctk.CTkLabel(
+            wrap,
+            text="Preview folders",
+            font=("TkDefaultFont", 12, "bold"),
+            anchor="w",
+        ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        labels = [
+            ("single_animal", "Single animal"),
+            ("refine_blobs", "Refine blobs"),
+            ("clustered_paste", "Clustered paste"),
+            ("mixed_paste", "Mixed paste"),
+            ("cropped_images", "Cropped images"),
+            ("detection", "Detection"),
+        ]
+        for col in range(3):
+            wrap.grid_columnconfigure(col, weight=1, uniform="preview_folder")
+        for index, (key, label) in enumerate(labels):
+            button = ctk.CTkButton(
+                wrap,
+                text=label,
+                height=30,
+                state="disabled",
+                command=lambda k=key: self._open_preview_folder(k),
+            )
+            button.grid(
+                row=2 + index // 3,
+                column=index % 3,
+                sticky="ew",
+                padx=(0 if index % 3 == 0 else 3, 0 if index % 3 == 2 else 3),
+                pady=3,
+            )
+            self._preview_folder_buttons[key] = button
+
         self._switch_btn = ctk.CTkButton(
-            actions, text="Switch Advanced Mode", height=34,
+            wrap, text="Switch Advanced Mode", height=34,
             command=self._switch_advanced_mode,
         )
         self._switch_btn.grid(
-            row=0, column=3, sticky="ew", padx=(3, 0)
+            row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0)
         )
 
     def _preview_folder_patterns(self, session: str) -> dict[str, list[str]]:
