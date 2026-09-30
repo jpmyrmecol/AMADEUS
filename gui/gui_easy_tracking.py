@@ -179,6 +179,14 @@ _SPIN_CFG = dict(
 # Process steps: (display_label, skip_key, script_stem)
 def _start_maximized(window: tk.Tk) -> None:
     def maximize() -> None:
+        if sys.platform == "darwin":
+            try:
+                window.attributes("-fullscreen", True)
+                window.update_idletasks()
+                return
+            except Exception:
+                pass
+
         try:
             window.state("zoomed")
             window.update_idletasks()
@@ -720,24 +728,6 @@ class EasyTrackingGUI(ctk.CTk):
         )
         self._run_btn.pack(side="left", padx=(0, 10))
 
-        self._open_results_btn = ctk.CTkButton(
-            row1, text="Open results", width=130, height=42,
-            command=self._open_results,
-        )
-        self._open_results_btn.pack(side="left", padx=(0, 10))
-
-        self._save_btn = ctk.CTkButton(
-            row1, text="Save Config", width=130, height=42,
-            command=self._save_config,
-        )
-        self._save_btn.pack(side="left", padx=(0, 10))
-
-        self._load_btn = ctk.CTkButton(
-            row1, text="Load Config", width=130, height=42,
-            command=self._load_config,
-        )
-        self._load_btn.pack(side="left")
-
         self._stop_btn = ctk.CTkButton(
             row1, text="Stop", width=100, height=42,
             state="disabled",
@@ -773,15 +763,6 @@ class EasyTrackingGUI(ctk.CTk):
         self._blocks_wrap.pack(fill="x", padx=8, pady=4)
         self._blocks_row: tk.Frame | None = None
         self._render_blocks([])
-
-        # Bottom bar: mode switch
-        bot = ctk.CTkFrame(frame, corner_radius=0)
-        bot.pack(fill="x", padx=8, pady=(2, 10))
-        self._switch_btn = ctk.CTkButton(
-            bot, text="Switch Advanced Mode", width=180, height=34,
-            command=self._switch_advanced_mode,
-        )
-        self._switch_btn.pack(side="left")
 
         self._build_preview_folder_panel(frame)
 
@@ -822,6 +803,45 @@ class EasyTrackingGUI(ctk.CTk):
                 pady=3,
             )
             self._preview_folder_buttons[key] = button
+
+        actions = ctk.CTkFrame(wrap, corner_radius=0)
+        actions.grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0)
+        )
+        for col in range(4):
+            actions.grid_columnconfigure(col, weight=1, uniform="easy_actions")
+
+        self._open_results_btn = ctk.CTkButton(
+            actions, text="Open results", height=34,
+            command=self._open_results,
+        )
+        self._open_results_btn.grid(
+            row=0, column=0, sticky="ew", padx=(0, 3)
+        )
+
+        self._save_btn = ctk.CTkButton(
+            actions, text="Save Config", height=34,
+            command=self._save_config,
+        )
+        self._save_btn.grid(
+            row=0, column=1, sticky="ew", padx=3
+        )
+
+        self._load_btn = ctk.CTkButton(
+            actions, text="Load Config", height=34,
+            command=self._load_config,
+        )
+        self._load_btn.grid(
+            row=0, column=2, sticky="ew", padx=3
+        )
+
+        self._switch_btn = ctk.CTkButton(
+            actions, text="Switch Advanced Mode", height=34,
+            command=self._switch_advanced_mode,
+        )
+        self._switch_btn.grid(
+            row=0, column=3, sticky="ew", padx=(3, 0)
+        )
 
     def _preview_folder_patterns(self, session: str) -> dict[str, list[str]]:
         if not session:
