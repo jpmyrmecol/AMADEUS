@@ -46,7 +46,7 @@ cu126 = [
 ]
 
 rocm72 = [
-    "triton==3.8.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "triton-rocm==3.8.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torch==2.14.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision==0.29.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
@@ -81,7 +81,7 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-triton = { index = "pytorch-rocm72", extra = "rocm72", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
+triton-rocm = { index = "pytorch-rocm72", extra = "rocm72", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
 torch = [
     { index = "pytorch-rocm72", extra = "rocm72", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform != 'darwin'" },
