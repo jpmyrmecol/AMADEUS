@@ -11,7 +11,7 @@ both CUDA and HIP and intentionally retain their existing training semantics.
 | Runtime backend | Current installation scope | PyTorch / YOLO device | Memory model | External telemetry | WDDM |
 | --- | --- | --- | --- | --- | --- |
 | NVIDIA CUDA | Windows, Linux | `cuda:0` / `0` | reserved / dedicated total | optional NVIDIA SMI | Windows only |
-| AMD ROCm | supported Linux x86_64 systems | `cuda:0` / `0` | reserved / dedicated total | allocator fallback; AMD SMI not required | disabled |
+| AMD ROCm | supported Linux x86_64 and Windows x86_64 systems | `cuda:0` / `0` | reserved / dedicated total | allocator fallback; AMD SMI not required | disabled |
 | Apple MPS | macOS Apple Silicon | `mps` | driver allocation / recommended working-set budget | allocator fallback | disabled |
 | CPU | CPU fallback | `cpu` | existing system-RAM batch policy | existing psutil system telemetry | disabled |
 
@@ -55,26 +55,28 @@ describes the original backend separation, before that revision.
 
 ## Installation and migration
 
-The current profiles are `cpu`, `macos`, `cu126`, and `rocm72`. All four pin
-torch **2.14.0** and torchvision **0.29.0**. NVIDIA uses the official CUDA 12.6
-wheel index; Linux AMD uses the official ROCm 7.2 wheel index and pins
-**triton-rocm 3.8.0** from that same index. Runtime identity does not depend on these
-profile names or package versions. The Linux restriction belongs to the ROCm
-wheel profile, not to the AMD runtime backend.
+The current profiles are `cpu`, `macos`, `cu126`, `rocm72`, and
+`rocmwin100`. CPU, macOS, NVIDIA and Linux AMD use torch **2.14.0** and
+torchvision **0.29.0**. NVIDIA uses the official CUDA 12.6 wheel index; Linux
+AMD uses the official ROCm 7.2 wheel index and pins **triton-rocm 3.8.0** from
+that same index.
 
-**Windows ROCm limitation:** This repository's locked PyTorch 2.14.0 / ROCm 7.2
-profile has Linux wheels only. AMD's Windows PyTorch distribution instead uses
-Python 3.12, PyTorch 2.9.1 and ROCm 7.2.1 on a restricted set of Windows 11
-GPUs. The Windows launcher therefore selects CPU on an AMD-only system and
-reports that choice when it detects an AMD adapter. Installing AMD's Windows
-wheels into the managed environment is not supported: the locked setup would
-replace them. Windows ROCm needs a separate locked dependency profile and
-hardware validation, including YOLO training and torchvision NMS. This is an
-installation limitation, not a requirement for a `rocm` device name; PyTorch
-HIP continues to use `cuda` device strings.
+Windows AMD is intentionally separate. The `rocmwin100` profile uses AMD's
+official Windows ROCm 10.0 wheel index with Python **3.12**, torch
+**2.13.0+rocm10.0.0**, and torchvision **0.28.0+rocm10.0.0**. The
+`device-all` extras install the required AMD runtime components for supported
+hardware. The normal locked AMADEUS dependencies are synced first while
+torch/torchvision remain separately managed. Entering or leaving the Windows AMD
+profile rebuilds the managed Windows virtual environment so CUDA and ROCm
+runtime packages are not mixed.
+
+Runtime identity does not depend on profile names. PyTorch HIP continues to use
+the `cuda` API/device namespace, so the existing AMD runtime backend is shared
+between Linux and Windows.
 
 Setup chooses macOS wheels on macOS, then an NVIDIA driver candidate, then a Linux
-AMD candidate (`/dev/kfd` plus AMD DRM vendor), otherwise CPU. NVIDIA discovery
+AMD candidate (`/dev/kfd` plus AMD DRM vendor), then a Windows AMD display
+adapter, otherwise CPU. Windows AMD selects `rocmwin100` rather than CPU. NVIDIA discovery
 checks PATH plus common native-Linux locations and the WSL2 GPU bridge at
 `/usr/lib/wsl/lib/nvidia-smi`; runtime telemetry uses the same candidate list.
 When CUDA is selected, setup reports the detected GPU, driver version and
@@ -100,9 +102,11 @@ use the CPU profile to install a CPU fallback environment. AMD SMI is optional
 and is currently not installed or queried. Its future provider belongs in
 `compute_telemetry.py`, without changing model training.
 
-Setup preserves the existing locked, inexact sync and isolated `--no-deps`
-torch/torchvision repair. Runtime dependencies (including ROCm Triton) are synced
-from the lock before repairing that pair. The new JSON ready marker stores the
+Setup preserves the existing locked, inexact sync and isolated torch/torchvision
+repair. CPU, macOS, CUDA and Linux ROCm keep the existing `--no-deps` pair
+repair after locked runtime dependencies are synced. Windows AMD instead installs
+AMD's official `device-all` runtime dependencies together with its exact
+torch/torchvision pair from the AMD index. The new JSON ready marker stores the
 profile and hashes of the installation inputs. Old empty/timestamp-only markers
 require one full setup. The Windows fast path also verifies the actual installed
 wheel pair and execution every time, so swapping wheels after a successful setup
@@ -114,7 +118,8 @@ verification latency to the former Windows timestamp-only fast path.
 The regression suite preserves the pre-`6af3f83` CUDA batch estimator while
 retaining tests for explicit-device errors, NVIDIA visible-device reordering,
 and Windows AMD profile selection. Linux NVIDIA, Linux ROCm and Windows ROCm
-hardware runs remain unverified.
+hardware runs remain unverified in this repository. Windows AMD therefore still
+requires real supported hardware validation for full tracking/training workloads.
 
 ### Historical validation (2026-09-25)
 
