@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import re
@@ -35,8 +36,8 @@ except ImportError:  # Preserve direct execution with: python gui/gui_home.py
     )
 
 
-VERSION_URL = "https://raw.githubusercontent.com/jpmyrmecol/AMADEUS/main/VERSION"
-ARCHIVE_URL = "https://github.com/jpmyrmecol/AMADEUS/archive/refs/heads/main.zip"
+LATEST_RELEASE_URL = "https://api.github.com/repos/jpmyrmecol/AMADEUS/releases/latest"
+ARCHIVE_URL_TEMPLATE = "https://github.com/jpmyrmecol/AMADEUS/archive/refs/tags/{tag}.zip"
 REQUEST_TIMEOUT_SECONDS = 30
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_UNPACKED_BYTES = 4 * 1024 * 1024 * 1024
@@ -64,13 +65,22 @@ def _request(url: str) -> urllib.request.Request:
 
 
 def _fetch_latest_version() -> str:
-    with urllib.request.urlopen(_request(VERSION_URL), timeout=REQUEST_TIMEOUT_SECONDS) as response:
-        payload = response.read(129)
-    if len(payload) > 128:
-        raise ValueError("GitHub returned an unexpectedly large VERSION file.")
-    version = payload.decode("utf-8").strip()
-    _version_tuple(version)
-    return version
+    request = urllib.request.Request(
+        LATEST_RELEASE_URL,
+        headers={
+            "User-Agent": "AMADEUS-Updater",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        payload = response.read(64 * 1024 + 1)
+    if len(payload) > 64 * 1024:
+        raise ValueError("GitHub returned an unexpectedly large release response.")
+    release = json.loads(payload.decode("utf-8"))
+    tag = str(release.get("tag_name", "")).strip()
+    _version_tuple(tag)
+    return tag.removeprefix("v").removeprefix("V")
 
 
 def probe_update_status() -> tuple[str, str, bool]:
@@ -85,8 +95,10 @@ def probe_update_status() -> tuple[str, str, bool]:
     return current_version, latest_version, _version_tuple(latest_version) > current_tuple
 
 
-def _download_archive(archive_path: Path) -> None:
-    with urllib.request.urlopen(_request(ARCHIVE_URL), timeout=REQUEST_TIMEOUT_SECONDS) as response:
+def _download_archive(archive_path: Path, version: str) -> None:
+    tag = _version_label(version)
+    archive_url = ARCHIVE_URL_TEMPLATE.format(tag=tag)
+    with urllib.request.urlopen(_request(archive_url), timeout=REQUEST_TIMEOUT_SECONDS) as response:
         content_length = response.headers.get("Content-Length")
         if content_length and int(content_length) > MAX_ARCHIVE_BYTES:
             raise ValueError("The AMADEUS update archive exceeds the 2 GiB safety limit.")
@@ -346,10 +358,10 @@ def start_update_check(
         temporary_root: Path | None = None
         try:
             temporary_root = Path(tempfile.mkdtemp(prefix="amadeus-update-"))
-            archive_path = temporary_root / "main.zip"
+            archive_path = temporary_root / f"{_version_label(latest_version)}.zip"
             staging_root = temporary_root / "source"
             staging_root.mkdir()
-            _download_archive(archive_path)
+            _download_archive(archive_path, latest_version)
             _extract_archive(archive_path, staging_root, latest_version)
         except Exception as exc:
             release_update_lock(PROJECT_ROOT, lock_token)

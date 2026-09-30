@@ -17,19 +17,25 @@ show_version_status() {
     current="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
     echo "[AMADEUS] Version: v$current"
 
-    latest=""
+    release_json=""
     if command -v curl >/dev/null 2>&1; then
-        latest="$(curl -fsSL --connect-timeout 1 --max-time 2 \
-            "https://raw.githubusercontent.com/jpmyrmecol/AMADEUS/main/VERSION" 2>/dev/null || true)"
+        release_json="$(curl -fsSL --connect-timeout 1 --max-time 2 \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/jpmyrmecol/AMADEUS/releases/latest" 2>/dev/null || true)"
     elif command -v wget >/dev/null 2>&1; then
-        latest="$(wget -qO- --timeout=2 --tries=1 \
-            "https://raw.githubusercontent.com/jpmyrmecol/AMADEUS/main/VERSION" 2>/dev/null || true)"
+        release_json="$(wget -qO- --timeout=2 --tries=1 \
+            --header="Accept: application/vnd.github+json" \
+            --header="X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/jpmyrmecol/AMADEUS/releases/latest" 2>/dev/null || true)"
     fi
-    latest="$(printf '%s' "$latest" | tr -d '[:space:]')"
+    latest="$(printf '%s\n' "$release_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+    latest="${latest#v}"
+    latest="${latest#V}"
 
     if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
        [[ ! "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "[AMADEUS] Latest version: unavailable (offline or update check failed)"
+        echo "[AMADEUS] Latest release: unavailable (offline or update check failed)"
         return 0
     fi
 
@@ -40,9 +46,9 @@ show_version_status() {
           (latest_major == current_major && latest_minor == current_minor && latest_patch > current_patch) )); then
         echo "[AMADEUS] Update available: v$current -> v$latest"
     elif (( latest_major == current_major && latest_minor == current_minor && latest_patch == current_patch )); then
-        echo "[AMADEUS] Latest version: v$latest (up to date)"
+        echo "[AMADEUS] Latest release: v$latest (up to date)"
     else
-        echo "[AMADEUS] Latest version: v$latest (installed version is newer)"
+        echo "[AMADEUS] Latest release: v$latest (installed version is newer)"
     fi
 }
 

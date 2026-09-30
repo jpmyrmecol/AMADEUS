@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import urllib.request
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-VERSION_URL = "https://raw.githubusercontent.com/jpmyrmecol/AMADEUS/main/VERSION"
+LATEST_RELEASE_URL = "https://api.github.com/repos/jpmyrmecol/AMADEUS/releases/latest"
 VERSION_PATTERN = re.compile(
     r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z", re.IGNORECASE
 )
@@ -48,17 +49,23 @@ def installed_version() -> str:
 
 
 def fetch_latest_version(*, timeout: float = 2.0) -> str:
+    """Return the version of GitHub's latest published AMADEUS Release."""
     request = urllib.request.Request(
-        VERSION_URL,
-        headers={"User-Agent": "AMADEUS-Version-Check", "Accept": "text/plain"},
+        LATEST_RELEASE_URL,
+        headers={
+            "User-Agent": "AMADEUS-Version-Check",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = response.read(129)
-    if len(payload) > 128:
-        raise ValueError("GitHub returned an unexpectedly large VERSION file.")
-    version = payload.decode("utf-8").strip()
-    version_tuple(version)
-    return version
+        payload = response.read(64 * 1024 + 1)
+    if len(payload) > 64 * 1024:
+        raise ValueError("GitHub returned an unexpectedly large release response.")
+    release = json.loads(payload.decode("utf-8"))
+    tag = str(release.get("tag_name", "")).strip()
+    version_tuple(tag)
+    return tag.removeprefix("v").removeprefix("V")
 
 
 def check_version_status(*, timeout: float = 2.0) -> VersionStatus:
