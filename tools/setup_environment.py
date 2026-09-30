@@ -403,10 +403,13 @@ def install_exact_pytorch_profile(uv_executable: str, profile: str) -> None:
         "install",
         "--python",
         str(python),
-        "--reinstall",
     ]
-    if not selected.install_dependencies:
-        command.append("--no-deps")
+    if selected.install_dependencies:
+        # Keep already-satisfied locked AMADEUS dependencies intact while the
+        # AMD device-all extras add their required ROCm runtime packages.
+        pass
+    else:
+        command.extend(["--reinstall", "--no-deps"])
     if index:
         command.extend(["--index", index])
     else:
