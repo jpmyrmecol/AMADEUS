@@ -373,6 +373,15 @@ class EasyTrackingGUI(ctk.CTk):
 
         left_wrap = ctk.CTkFrame(pane, corner_radius=0, width=800)
         left_wrap.pack_propagate(False)
+
+        left_footer = ctk.CTkFrame(left_wrap, corner_radius=0)
+        left_footer.pack(side="bottom", fill="x", padx=12, pady=(0, 10))
+        self._switch_btn = ctk.CTkButton(
+            left_footer, text="Switch Advanced Mode", width=180, height=34,
+            command=self._switch_advanced_mode,
+        )
+        self._switch_btn.pack(side="right")
+
         left = ctk.CTkScrollableFrame(left_wrap, corner_radius=0)
         left.pack(fill="both", expand=True)
         right = tk.Frame(pane, bg="#181818", width=480)
@@ -834,14 +843,6 @@ class EasyTrackingGUI(ctk.CTk):
                 pady=3,
             )
             self._preview_folder_buttons[key] = button
-
-        self._switch_btn = ctk.CTkButton(
-            wrap, text="Switch Advanced Mode", height=34,
-            command=self._switch_advanced_mode,
-        )
-        self._switch_btn.grid(
-            row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0)
-        )
 
     def _preview_folder_patterns(self, session: str) -> dict[str, list[str]]:
         if not session:
