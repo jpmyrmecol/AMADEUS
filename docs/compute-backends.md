@@ -58,7 +58,7 @@ describes the original backend separation, before that revision.
 The current profiles are `cpu`, `macos`, `cu126`, and `rocm72`. All four pin
 torch **2.14.0** and torchvision **0.29.0**. NVIDIA uses the official CUDA 12.6
 wheel index; Linux AMD uses the official ROCm 7.2 wheel index and pins
-**triton 3.8.0** from that same index. Runtime identity does not depend on these
+**triton-rocm 3.8.0** from that same index. Runtime identity does not depend on these
 profile names or package versions. The Linux restriction belongs to the ROCm
 wheel profile, not to the AMD runtime backend.
 
