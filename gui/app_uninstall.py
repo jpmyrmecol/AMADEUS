@@ -191,11 +191,42 @@ set -u
 PROJECT_ROOT=__AMADEUS_PROJECT_ROOT__
 PARENT_PID="$1"
 
+is_wsl() {
+    grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null \
+        || grep -qi microsoft /proc/version 2>/dev/null
+}
+
+wsl_powershell() {
+    if command -v powershell.exe >/dev/null 2>&1; then
+        command -v powershell.exe
+        return 0
+    fi
+    candidate="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    [ -x "$candidate" ] || return 1
+    printf '%s\n' "$candidate"
+}
+
+notify_wsl() {
+    kind="$1"
+    is_wsl || return 0
+    powershell="$(wsl_powershell)" || return 0
+    if [ "$kind" = success ]; then
+        "$powershell" -NoProfile -NonInteractive -Command \
+            "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('AMADEUS has been uninstalled successfully.','AMADEUS') | Out-Null" \
+            >/dev/null 2>&1 || true
+    else
+        "$powershell" -NoProfile -NonInteractive -Command \
+            "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('AMADEUS could not be completely uninstalled. Please check the WSL terminal or installation folder.','AMADEUS') | Out-Null" \
+            >/dev/null 2>&1 || true
+    fi
+}
+
 fail() {
     echo
     echo "[ERROR] AMADEUS uninstall failed."
     echo "[ERROR] $1"
     echo
+    notify_wsl failure
     if [ -t 0 ]; then
         printf "Press Enter to close..."
         read -r _unused
@@ -234,6 +265,7 @@ rm -rf -- "$PROJECT_ROOT"
 echo
 echo "[AMADEUS] Uninstall complete."
 echo "[AMADEUS] The AMADEUS folder and installed command files were removed."
+notify_wsl success
 SELF="$0"
 rm -f -- "$SELF" 2>/dev/null || true
 sleep 3
