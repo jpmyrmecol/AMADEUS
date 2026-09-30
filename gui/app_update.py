@@ -8,6 +8,7 @@ import os
 import queue
 import re
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -16,6 +17,8 @@ import threading
 import tkinter as tk
 import urllib.request
 import zipfile
+
+import certifi
 from pathlib import Path, PurePosixPath
 from tkinter import messagebox
 from typing import Callable
@@ -57,6 +60,13 @@ def _version_label(value: str) -> str:
     return f"v{value.strip().removeprefix('v').removeprefix('V')}"
 
 
+def _https_context() -> ssl.SSLContext:
+    """Use certifi plus the operating system trust store for HTTPS requests."""
+    context = ssl.create_default_context(cafile=certifi.where())
+    context.load_default_certs()
+    return context
+
+
 def _request(url: str) -> urllib.request.Request:
     return urllib.request.Request(
         url,
@@ -73,7 +83,11 @@ def _fetch_latest_version() -> str:
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+    with urllib.request.urlopen(
+        request,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        context=_https_context(),
+    ) as response:
         payload = response.read(64 * 1024 + 1)
     if len(payload) > 64 * 1024:
         raise ValueError("GitHub returned an unexpectedly large release response.")
@@ -98,7 +112,11 @@ def probe_update_status() -> tuple[str, str, bool]:
 def _download_archive(archive_path: Path, version: str) -> None:
     tag = _version_label(version)
     archive_url = ARCHIVE_URL_TEMPLATE.format(tag=tag)
-    with urllib.request.urlopen(_request(archive_url), timeout=REQUEST_TIMEOUT_SECONDS) as response:
+    with urllib.request.urlopen(
+        _request(archive_url),
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        context=_https_context(),
+    ) as response:
         content_length = response.headers.get("Content-Length")
         if content_length and int(content_length) > MAX_ARCHIVE_BYTES:
             raise ValueError("The AMADEUS update archive exceeds the 2 GiB safety limit.")

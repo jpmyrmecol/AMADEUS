@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import json
 import re
+import ssl
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+
+import certifi
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +51,13 @@ def installed_version() -> str:
     return version
 
 
+def _https_context() -> ssl.SSLContext:
+    """Use certifi plus the operating system trust store for GitHub HTTPS."""
+    context = ssl.create_default_context(cafile=certifi.where())
+    context.load_default_certs()
+    return context
+
+
 def fetch_latest_version(*, timeout: float = 2.0) -> str:
     """Return the version of GitHub's latest published AMADEUS Release."""
     request = urllib.request.Request(
@@ -58,7 +68,7 @@ def fetch_latest_version(*, timeout: float = 2.0) -> str:
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=timeout, context=_https_context()) as response:
         payload = response.read(64 * 1024 + 1)
     if len(payload) > 64 * 1024:
         raise ValueError("GitHub returned an unexpectedly large release response.")
