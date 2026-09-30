@@ -427,13 +427,13 @@ def install_exact_pytorch_profile(uv_executable: str, profile: str) -> None:
 
 
 def ensure_pytorch_profile(uv_executable: str, profile: str) -> None:
-    """Keep a valid existing pair; repair only torch/torchvision when necessary."""
+    """Keep a valid existing pair; repair the selected accelerator profile when necessary."""
     try:
         verify_pytorch_profile(profile)
         return
     except RuntimeError:
         print(
-            "[AMADEUS] PyTorch/torchvision profile is missing or incorrect; repairing only those two packages...",
+            "[AMADEUS] PyTorch/torchvision profile is missing or incorrect; repairing the accelerator profile...",
             flush=True,
         )
 
