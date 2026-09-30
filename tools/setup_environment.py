@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -16,7 +17,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "gui"))
-from tools.runtime_profiles import PROFILES, TORCH_VERSION, TORCHVISION_VERSION, check_support
+from tools.runtime_profiles import PROFILES, check_support
 from main.compute_telemetry import query_nvidia_driver_info
 from splash_ipc import signal_stop  # noqa: E402
 
@@ -69,7 +70,7 @@ def amd_runtime_candidate() -> bool:
 
 
 def windows_amd_gpu_candidate() -> bool:
-    """Detect an AMD display adapter for an honest CPU-profile explanation."""
+    """Detect an AMD display adapter before installing the Windows ROCm profile."""
     if sys.platform != "win32":
         return False
     try:
@@ -98,9 +99,9 @@ def select_torch_profile() -> tuple[str, str]:
     if amd_runtime_candidate():
         return "rocm72", "AMD driver detected; trying ROCm 7.2 wheels. GPU computation and NMS must pass."
     if windows_amd_gpu_candidate():
-        return "cpu", (
-            "AMD GPU detected on Windows. This locked environment only provides Linux ROCm 7.2 "
-            "wheels; using CPU. Windows ROCm needs a separate supported PyTorch/ROCm profile."
+        return "rocmwin100", (
+            "AMD GPU detected on Windows; using AMD ROCm 10.0 / PyTorch 2.13 wheels. "
+            "A supported Windows 11 GPU/driver is required and GPU computation plus NMS must pass."
         )
     return "cpu", "No accelerator runtime candidate detected; using CPU wheels."
 
@@ -110,13 +111,15 @@ def venv_python() -> Path:
 
 
 def sync_environment(uv_executable: str, profile: str, python: str) -> None:
-    """Sync locked dependencies while preserving the installed PyTorch pair.
+    """Sync locked dependencies while preserving the separately managed PyTorch pair.
 
     ``--no-install-package`` prevents uv from selecting torch/torchvision from
     the lockfile, while ``--inexact`` is essential here: uv sync is exact by
     default and would otherwise remove the already-installed CUDA wheels as
     extraneous packages. The pair is verified and repaired separately below.
     """
+    selected = PROFILES[profile]
+    sync_extra = selected.sync_extra or profile
     command = [
         uv_executable,
         "sync",
@@ -126,7 +129,7 @@ def sync_environment(uv_executable: str, profile: str, python: str) -> None:
         python,
         "--no-dev",
         "--extra",
-        profile,
+        sync_extra,
         "--no-install-package",
         "torch",
         "--no-install-package",
@@ -137,12 +140,17 @@ def sync_environment(uv_executable: str, profile: str, python: str) -> None:
     subprocess.run(command, cwd=PROJECT_ROOT, env=environment, check=True)
 
 
-def check_python(python: str, *, macos: bool) -> None:
+def check_python(python: str, *, macos: bool, required_minor: str | None = None) -> None:
     """Reject unsupported Python/Tk before uv can replace an existing environment."""
     code = """
 import sys
 if not (3, 10) <= sys.version_info[:2] < (3, 13):
     raise RuntimeError('Python 3.10–3.12 required')
+"""
+    if required_minor:
+        code += f"""
+if f'{{sys.version_info.major}}.{{sys.version_info.minor}}' != {required_minor!r}:
+    raise RuntimeError('Python {required_minor} required for this accelerator profile')
 """
     if macos:
         code += """
@@ -160,11 +168,12 @@ root.destroy()
     subprocess.run([python, "-c", code], check=True, capture_output=True, text=True)
 
 
-def select_python(requested: str | None) -> str:
+def select_python(requested: str | None, profile: str) -> str:
     macos = sys.platform == "darwin"
+    required_minor = PROFILES[profile].python_minor
     if requested:
         try:
-            check_python(requested, macos=macos)
+            check_python(requested, macos=macos, required_minor=required_minor)
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"Selected Python is incompatible: {requested}\n{exc.stderr}") from exc
         # uv must not silently replace a different existing environment.
@@ -181,7 +190,7 @@ def select_python(requested: str | None) -> str:
         return requested
     if venv_python().exists():
         try:
-            check_python(str(venv_python()), macos=macos)
+            check_python(str(venv_python()), macos=macos, required_minor=required_minor)
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 f"Existing environment is incompatible: {venv_python()}\n{exc.stderr}\n"
@@ -189,6 +198,8 @@ def select_python(requested: str | None) -> str:
                 "and set AMADEUS_VENV=.venv-tk86 to preserve the old environment."
             ) from exc
         return str(venv_python())
+    if required_minor:
+        return required_minor
     if macos:
         # Python.org framework installations are candidates, not an assumed Tk guarantee.
         for minor in (12, 11, 10):
@@ -205,6 +216,50 @@ def select_python(requested: str | None) -> str:
             "Tk 9 is not supported with CustomTkinter 5.2.2. See README macOS setup."
         )
     return "3.10"
+
+
+def _ready_marker_profile() -> str | None:
+    try:
+        payload = json.loads(READY_MARKER.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    profile = payload.get("profile") if isinstance(payload, dict) else None
+    return profile if isinstance(profile, str) else None
+
+
+def prepare_profile_environment(profile: str) -> None:
+    """Rebuild the managed Windows venv when entering/leaving AMD ROCm or changing its Python."""
+    if os.name != "nt" or ENVIRONMENT_ROOT != PROJECT_ROOT / ".venv":
+        return
+
+    previous_profile = _ready_marker_profile()
+    rebuild = (
+        previous_profile is not None
+        and previous_profile != profile
+        and "rocmwin100" in {previous_profile, profile}
+    )
+
+    required_minor = PROFILES[profile].python_minor
+    if not rebuild and required_minor and venv_python().exists():
+        try:
+            running_minor = subprocess.check_output(
+                [
+                    str(venv_python()),
+                    "-c",
+                    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+                ],
+                text=True,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            running_minor = ""
+        rebuild = running_minor != required_minor
+
+    if rebuild and ENVIRONMENT_ROOT.exists():
+        print(
+            "[AMADEUS] Rebuilding the managed environment for the Windows AMD ROCm profile...",
+            flush=True,
+        )
+        shutil.rmtree(ENVIRONMENT_ROOT)
 
 
 def verify_gui_environment() -> None:
@@ -313,27 +368,34 @@ print("[AMADEUS] PyTorch profile verification: OK")
                 "If the verifier reports a CUDA initialization or driver-version error, "
                 "update the NVIDIA driver and rerun AMADEUS."
             )
+        elif profile == "rocmwin100":
+            lines.append(
+                "The Windows AMD profile requires a ROCm 10.0-supported AMD GPU, "
+                "Windows 11, and a compatible AMD driver. "
+                "AMADEUS verifies real GPU computation and torchvision NMS before accepting it."
+            )
         if detail:
             lines.append("Verifier output:\n" + detail)
         raise RuntimeError("\n".join(lines))
 
 
 def install_exact_pytorch_profile(uv_executable: str, profile: str) -> None:
-    """Install only torch and torchvision, without modifying their dependencies."""
+    """Install the exact torch/torchvision pair required by the selected profile."""
     python = venv_python()
 
     check_support(profile)
     selected = PROFILES[profile]
     suffix = f"+{selected.suffix}" if selected.suffix and sys.platform != "darwin" else ""
-    torch_spec = f"torch=={TORCH_VERSION}{suffix}"
-    torchvision_spec = f"torchvision=={TORCHVISION_VERSION}{suffix}"
+    package_extra = f"[{selected.package_extra}]" if selected.package_extra else ""
+    torch_spec = f"torch{package_extra}=={selected.torch_version}{suffix}"
+    torchvision_spec = f"torchvision{package_extra}=={selected.torchvision_version}{suffix}"
     index = selected.index if sys.platform != "darwin" else None
 
     if sys.platform.startswith("linux"):
         import platform
 
         if platform.machine() in ("aarch64", "arm64"):
-            torchvision_spec = f"torchvision=={TORCHVISION_VERSION}"
+            torchvision_spec = f"torchvision=={selected.torchvision_version}"
 
     command = [
         uv_executable,
@@ -342,16 +404,22 @@ def install_exact_pytorch_profile(uv_executable: str, profile: str) -> None:
         "--python",
         str(python),
         "--reinstall",
-        "--no-deps",
     ]
+    if not selected.install_dependencies:
+        command.append("--no-deps")
     if index:
         command.extend(["--index", index])
     else:
         command.extend(["--default-index", "https://pypi.org/simple"])
     command.extend([torch_spec, torchvision_spec])
 
+    dependency_note = (
+        " with AMD device runtime dependencies"
+        if selected.install_dependencies
+        else " without changing other dependencies"
+    )
     print(
-        f"[AMADEUS] Installing exact PyTorch pair without changing other dependencies: "
+        f"[AMADEUS] Installing exact PyTorch pair{dependency_note}: "
         f"{torch_spec}, {torchvision_spec}",
         flush=True,
     )
@@ -597,16 +665,16 @@ def main() -> int:
     print(f"[AMADEUS] {explanation}", flush=True)
     print("[AMADEUS] Preparing the locked Python environment...", flush=True)
 
-    # AMADEUS.bat uses this marker for its fast path. Remove it before making
-    # any changes so an interrupted or failed setup is fully checked next time.
-    READY_MARKER.unlink(missing_ok=True)
-
     try:
         if os.name == "nt" and ENVIRONMENT_ROOT != PROJECT_ROOT / ".venv":
             raise RuntimeError("AMADEUS_VENV is supported by the macOS/Linux launcher only.")
+        prepare_profile_environment(profile)
+        # AMADEUS.bat uses this marker for its fast path. Remove it before making
+        # any changes so an interrupted or failed setup is fully checked next time.
+        READY_MARKER.unlink(missing_ok=True)
         uv_version_in_use = check_uv_version(args.uv)
         print(f"[AMADEUS] Using uv {uv_version_in_use}: {args.uv}", flush=True)
-        python = select_python(args.python)
+        python = select_python(args.python, profile)
         sync_environment(args.uv, profile, python)
         verify_numeric_stack()
         ensure_pytorch_profile(args.uv, profile)
