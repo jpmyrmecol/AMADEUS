@@ -11,9 +11,6 @@ assets/deep_green.json
 assets/logo_amadeus_mini.png
 assets/logo_amadeus_splash.png
 colab/AMADEUS_Colab.ipynb
-docs/mps-benchmark-2026-09-28.md
-docs/mps-training-policy.md
-docs/single-animal-smoothing.md
 gui/__init__.py
 gui/advanced_tracking_layout.py
 gui/app_uninstall.py
