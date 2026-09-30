@@ -91,15 +91,15 @@ def select_torch_profile() -> tuple[str, str]:
     if sys.platform == "darwin":
         return "macos", "Using macOS wheels (MPS/Metal when available, otherwise CPU)."
     if nvidia_gpu_is_available():
-        return "cu128", (
-            "An NVIDIA GPU was detected; using CUDA 12.8 wheels. "
+        return "cu126", (
+            "An NVIDIA GPU was detected; using CUDA 12.6 wheels. "
             + _nvidia_driver_diagnostic()
         )
     if amd_runtime_candidate():
-        return "rocm63", "AMD driver detected; trying ROCm 6.3 wheels. GPU computation and NMS must pass."
+        return "rocm72", "AMD driver detected; trying ROCm 7.2 wheels. GPU computation and NMS must pass."
     if windows_amd_gpu_candidate():
         return "cpu", (
-            "AMD GPU detected on Windows. This locked environment only provides Linux ROCm 6.3 "
+            "AMD GPU detected on Windows. This locked environment only provides Linux ROCm 7.2 "
             "wheels; using CPU. Windows ROCm needs a separate supported PyTorch/ROCm profile."
         )
     return "cpu", "No accelerator runtime candidate detected; using CPU wheels."
@@ -306,10 +306,10 @@ print("[AMADEUS] PyTorch profile verification: OK")
         if len(detail) > 3000:
             detail = detail[-3000:]
         lines = ["PyTorch/torchvision environment verification failed."]
-        if profile == "cu128":
+        if profile == "cu126":
             lines.append(_nvidia_driver_diagnostic())
             lines.append(
-                "The cu128 PyTorch build requires a compatible NVIDIA driver. "
+                "The cu126 PyTorch build requires a compatible NVIDIA driver. "
                 "If the verifier reports a CUDA initialization or driver-version error, "
                 "update the NVIDIA driver and rerun AMADEUS."
             )

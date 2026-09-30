@@ -55,14 +55,14 @@ describes the original backend separation, before that revision.
 
 ## Installation and migration
 
-The existing `cpu`, `macos`, and `cu128` extras retain their names. New `rocm63`
-uses official torch **2.7.1+rocm6.3**, torchvision **0.22.1+rocm6.3**, and their
-**pytorch-triton-rocm 3.3.1** dependency. The latter is explicitly sourced from
-PyTorch's shared wheel index. Existing lockfile package versions are unchanged.
-Runtime identity does not depend on these names or versions. The Linux restriction
-belongs to this wheel profile, not to the AMD runtime backend.
+The current profiles are `cpu`, `macos`, `cu126`, and `rocm72`. All four pin
+torch **2.14.0** and torchvision **0.29.0**. NVIDIA uses the official CUDA 12.6
+wheel index; Linux AMD uses the official ROCm 7.2 wheel index and pins
+**triton 3.8.0** from that same index. Runtime identity does not depend on these
+profile names or package versions. The Linux restriction belongs to the ROCm
+wheel profile, not to the AMD runtime backend.
 
-**Windows ROCm limitation:** This repository's locked PyTorch 2.7.1 / ROCm 6.3
+**Windows ROCm limitation:** This repository's locked PyTorch 2.14.0 / ROCm 7.2
 profile has Linux wheels only. AMD's Windows PyTorch distribution instead uses
 Python 3.12, PyTorch 2.9.1 and ROCm 7.2.1 on a restricted set of Windows 11
 GPUs. The Windows launcher therefore selects CPU on an AMD-only system and
@@ -91,7 +91,7 @@ as `HSA_OVERRIDE_GFX_VERSION` is installed.
 Override selection when necessary, for example:
 
 ```sh
-AMADEUS_TORCH_PROFILE=rocm63 ./AMADEUS.sh
+AMADEUS_TORCH_PROFILE=rocm72 ./AMADEUS.sh
 AMADEUS_TORCH_PROFILE=cpu ./AMADEUS.sh
 ```
 

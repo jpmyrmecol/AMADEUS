@@ -8,8 +8,8 @@ import sys
 
 from main.compute_backend import Backend
 
-TORCH_VERSION = "2.7.1"
-TORCHVISION_VERSION = "0.22.1"
+TORCH_VERSION = "2.14.0"
+TORCHVISION_VERSION = "0.29.0"
 
 
 @dataclass(frozen=True)
@@ -23,22 +23,22 @@ class WheelProfile:
 PROFILES = {
     "cpu": WheelProfile(Backend.CPU, "cpu", "https://download.pytorch.org/whl/cpu"),
     "macos": WheelProfile(Backend.APPLE_MPS, "", None),
-    "cu128": WheelProfile(Backend.NVIDIA_CUDA, "cu128", "https://download.pytorch.org/whl/cu128", "12.8"),
-    "rocm63": WheelProfile(Backend.AMD_ROCM, "rocm6.3", "https://download.pytorch.org/whl/rocm6.3", "6.3"),
+    "cu126": WheelProfile(Backend.NVIDIA_CUDA, "cu126", "https://download.pytorch.org/whl/cu126", "12.6"),
+    "rocm72": WheelProfile(Backend.AMD_ROCM, "rocm7.2", "https://download.pytorch.org/whl/rocm7.2", "7.2"),
 }
 
 
 def check_support(profile: str) -> None:
     if profile not in PROFILES:
         raise RuntimeError(f"Unknown PyTorch profile: {profile}")
-    if profile == "rocm63" and not (
+    if profile == "rocm72" and not (
         sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}
     ):
-        raise RuntimeError("The rocm63 wheel profile requires Linux x86_64.")
+        raise RuntimeError("The rocm72 wheel profile requires Linux x86_64.")
     if profile == "macos" and sys.platform != "darwin":
         raise RuntimeError("The macos wheel profile requires macOS.")
-    if profile == "cu128" and sys.platform == "darwin":
-        raise RuntimeError("The cu128 wheel profile is unavailable on macOS.")
+    if profile == "cu126" and sys.platform == "darwin":
+        raise RuntimeError("The cu126 wheel profile is unavailable on macOS.")
 
 
 def verify_build(profile, torch, torchvision) -> None:
