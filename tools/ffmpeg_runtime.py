@@ -114,6 +114,8 @@ def _binary_path(install_root: Path, asset: FFmpegAsset) -> Path:
 
 
 def _run_encoder_inventory(executable: Path) -> str:
+    if not executable.is_file():
+        raise RuntimeError(f"FFmpeg executable is unavailable: {executable}")
     completed = subprocess.run(
         [str(executable), "-hide_banner", "-encoders"],
         capture_output=True,
@@ -121,6 +123,7 @@ def _run_encoder_inventory(executable: Path) -> str:
         errors="replace",
         timeout=30,
         check=False,
+        cwd=str(executable.parent),
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     if completed.returncode != 0:
@@ -299,26 +302,31 @@ def ensure_ffmpeg(install_root: Path | None = None) -> str:
         extracted_dir = temp_dir / "install"
         extracted_dir.mkdir()
         _download_verified(asset, archive_path)
-        staged_binary = _extract_ffmpeg_and_license(archive_path, asset, extracted_dir)
-        encoders = _run_encoder_inventory(staged_binary)
-        found_encoders = sorted(set(_HARDWARE_ENCODER_PATTERN.findall(encoders)))
-        (extracted_dir / "build.json").write_text(
-            json.dumps(
-                {
-                    "build": asset.build,
-                    "url": asset.url,
-                    "archive_sha256": asset.archive_sha256,
-                    "binary_name": asset.binary_name,
-                    "hardware_encoders": found_encoders,
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+        _extract_ffmpeg_and_license(archive_path, asset, extracted_dir)
 
         if install_dir.exists():
             shutil.rmtree(install_dir)
         extracted_dir.replace(install_dir)
+
+        try:
+            encoders = _run_encoder_inventory(executable)
+            found_encoders = sorted(set(_HARDWARE_ENCODER_PATTERN.findall(encoders)))
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "build": asset.build,
+                        "url": asset.url,
+                        "archive_sha256": asset.archive_sha256,
+                        "binary_name": asset.binary_name,
+                        "hardware_encoders": found_encoders,
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            shutil.rmtree(install_dir, ignore_errors=True)
+            raise
 
     return str(executable)
