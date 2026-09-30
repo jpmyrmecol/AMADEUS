@@ -12,7 +12,7 @@ if defined AMADEUS_ENV_READY goto environment_prepared
 
 call :setup_environment
 if errorlevel 1 (
-    echo [ERROR] AMADEUS setup or PyTorch/torchvision CUDA verification failed.
+    echo [ERROR] AMADEUS setup or PyTorch/torchvision accelerator verification failed.
     echo [ERROR] See the diagnostic message above.
     call :keep_prompt_open
     exit /b 1
