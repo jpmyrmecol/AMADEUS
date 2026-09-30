@@ -115,44 +115,10 @@ verification latency to the former Windows timestamp-only fast path.
 
 ## Validation
 
-The regression suite preserves the pre-`6af3f83` CUDA batch estimator while
-retaining tests for explicit-device errors, NVIDIA visible-device reordering,
-and Windows AMD profile selection. Linux NVIDIA, Linux ROCm and Windows ROCm
-hardware runs remain unverified in this repository. Windows AMD therefore still
-requires real supported hardware validation for full tracking/training workloads.
-
-### Historical validation (2026-09-25)
-
-Base: repository main `07e6775`. No test files were present in that checkout
-(despite historical test paths in the update manifest). Twenty focused unittest tests provide
-coverage includes detection, device selection, vendor/OS telemetry isolation,
-both training samplers, memory/cache/sync, batch dispatch, OOM retries, setup
-selection, incompatible wheels, repair and ready-marker rejection.
-
-```sh
-python -m unittest discover -s tests -v
-uv lock --check --offline
-python tests/smoke_compute_backend.py auto
-python tests/smoke_compute_backend.py cpu
-```
-
-Actual hardware: Windows, NVIDIA GeForce RTX 4070; existing environment with
-PyTorch 2.7.1+cu128 and torchvision 0.22.1+cu128. GPU and explicit CPU passed
-synthetic Ultralytics forward/backward, optimizer step, torchvision NMS, memory,
-cache and synchronization. The CPU smoke used the CPU device of that CUDA build,
-not a separately installed CPU wheel. Exact CUDA profile verification passed.
-NVIDIA SMI returned values; WDDM returned unknown on this machine, so actual spill
-recovery was **not** reproduced. No sustained/full dataset training is claimed.
-
-Batch estimates were additionally compared against the unchanged main version
-for 288 CPU/MPS/CUDA combinations of RAM, device budget, image size and mode;
-all matched. Locked installer dry-runs passed for Windows CPU/CUDA, Linux
-CUDA/ROCm and macOS arm64 profiles; the ROCm plan contains ROCm Triton and no
-NVIDIA packages. Nine resume/checkpoint/monitor definitions in each training module
-were checked structurally unchanged. ROCm, MPS and Linux NVIDIA are covered by
-mock/unit verification only; hardware training and full installer execution on
-those systems remain unverified. A real supported AMD machine should run the
-manual smoke and a representative training/resume workload before rollout.
+Windows NVIDIA has been validated on actual hardware. Linux NVIDIA, Linux AMD,
+macOS Apple Silicon, and Windows AMD use separate runtime profiles as described
+above. Windows AMD support should still be validated on a supported AMD GPU with
+a representative tracking and training workload.
 
 ## Changed paths
 
@@ -160,8 +126,7 @@ manual smoke and a representative training/resume workload before rollout.
 - Integration: `main/batch_utils.py`, both `obb_detector_training.py` files,
   `gui/gui_easy_tracking.py`, `tools/setup_environment.py`, `AMADEUS.bat`.
 - Packaging/update: `pyproject.toml`, `uv.lock`, `tools/update_manifest.txt`.
-- Validation/docs: `tests/test_compute_backend.py`, `tests/test_runtime_profiles.py`,
-  `tests/smoke_compute_backend.py`, this document, `README.md`.
+- Documentation: this document, `README.md`.
 
 ## Specification references
 
