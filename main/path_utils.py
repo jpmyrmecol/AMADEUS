@@ -23,8 +23,18 @@ CONFIG_PATH_KEYS = (
 )
 
 
+def _portable_relative_path(path: str) -> str:
+    """Store relative config paths with POSIX separators on every operating system."""
+    return str(path).replace("\\", "/")
+
+
+def _native_relative_path(path: str) -> str:
+    """Accept config paths written on Windows or POSIX and use this OS's separators."""
+    return str(path).replace("\\", "/").replace("/", os.sep)
+
+
 def to_relative_path(path, base_dir: str) -> str:
-    """Convert an absolute path to a path relative to base_dir, for storage in config.yaml."""
+    """Convert an absolute path to a portable path relative to base_dir for config.yaml."""
     path = str(path or "").strip()
     if not path:
         return path
@@ -32,21 +42,22 @@ def to_relative_path(path, base_dir: str) -> str:
     if not base_dir:
         return path
     try:
-        return os.path.relpath(os.path.abspath(path), os.path.abspath(base_dir))
+        relative = os.path.relpath(os.path.abspath(path), os.path.abspath(base_dir))
+        return _portable_relative_path(relative)
     except ValueError:
         # e.g. path and base_dir are on different drives on Windows.
         return os.path.abspath(path)
 
 
 def resolve_path(value, base_dir: str) -> str:
-    """Resolve a config.yaml path value (relative or absolute) to an absolute path."""
+    """Resolve a portable config.yaml path value to an absolute path on this OS."""
     value = str(value or "").strip()
     if not value or os.path.isabs(value):
         return value
     base_dir = str(base_dir or "").strip()
     if not base_dir:
-        return value
-    return os.path.normpath(os.path.join(base_dir, value))
+        return _native_relative_path(value)
+    return os.path.normpath(os.path.join(base_dir, _native_relative_path(value)))
 
 
 def _map_source_dirs(value, fn, base_dir: str):
