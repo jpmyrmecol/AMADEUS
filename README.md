@@ -13,11 +13,11 @@ After you configure foreground segmentation, AMADEUS extracts single-animal blob
 
 ### Recommended environment
 
-AMADEUS supports **NVIDIA GPUs on Windows/Linux, Apple Silicon on macOS, AMD GPUs on supported Linux ROCm systems, and supported AMD GPUs on Windows 11**.
+AMADEUS supports **NVIDIA GPUs on Windows and Linux, Apple Silicon on macOS, and AMD GPUs via ROCm on Linux and Windows 11**.
 
 For NVIDIA GPUs, **8 GB or more of VRAM is recommended**, although the required memory depends on factors such as video resolution and the number of animals. AMADEUS has also been confirmed to run on laptop GPUs with **4 GB of VRAM**.
 
-Apple Silicon uses the MPS backend. Linux AMD uses ROCm 7.2 with PyTorch 2.14. Windows AMD uses AMD's ROCm 10.0 wheels with PyTorch 2.13 and Python 3.12. Windows AMD support is limited to hardware, OS and driver combinations supported by AMD; AMADEUS verifies GPU computation and torchvision NMS during setup before accepting the accelerator profile.
+AMD GPU support depends on ROCm compatibility with the GPU, operating system, and driver version.
 
 Use the [installers on the website](https://amadeus.jpmyrmecol.com/#install), or clone this repository and run the launcher from its root directory.
 
