@@ -18,6 +18,12 @@ class WheelProfile:
     suffix: str
     index: str | None
     runtime_version: str | None = None
+    torch_version: str = TORCH_VERSION
+    torchvision_version: str = TORCHVISION_VERSION
+    package_extra: str | None = None
+    install_dependencies: bool = False
+    python_minor: str | None = None
+    sync_extra: str | None = None
 
 
 PROFILES = {
@@ -25,6 +31,20 @@ PROFILES = {
     "macos": WheelProfile(Backend.APPLE_MPS, "", None),
     "cu126": WheelProfile(Backend.NVIDIA_CUDA, "cu126", "https://download.pytorch.org/whl/cu126", "12.6"),
     "rocm72": WheelProfile(Backend.AMD_ROCM, "rocm7.2", "https://download.pytorch.org/whl/rocm7.2", "7.2"),
+    # AMD publishes the Windows ROCm PyTorch wheels through its own index.
+    # device-all installs the GPU runtime components required by supported hardware.
+    "rocmwin100": WheelProfile(
+        Backend.AMD_ROCM,
+        "rocm10.0.0",
+        "https://stable.repo.amd.com/rocm/whl-next/",
+        None,
+        torch_version="2.13.0",
+        torchvision_version="0.28.0",
+        package_extra="device-all",
+        install_dependencies=True,
+        python_minor="3.12",
+        sync_extra="cpu",
+    ),
 }
 
 
@@ -35,6 +55,10 @@ def check_support(profile: str) -> None:
         sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}
     ):
         raise RuntimeError("The rocm72 wheel profile requires Linux x86_64.")
+    if profile == "rocmwin100" and not (
+        sys.platform == "win32" and platform.machine().lower() in {"x86_64", "amd64"}
+    ):
+        raise RuntimeError("The rocmwin100 wheel profile requires Windows x86_64.")
     if profile == "macos" and sys.platform != "darwin":
         raise RuntimeError("The macos wheel profile requires macOS.")
     if profile == "cu126" and sys.platform == "darwin":
@@ -45,7 +69,16 @@ def verify_build(profile, torch, torchvision) -> None:
     """Reject wrong vendors, runtime versions and mismatched torchvision wheels."""
     check_support(profile)
     expected = PROFILES[profile]
-    for module, version in ((torch, TORCH_VERSION), (torchvision, TORCHVISION_VERSION)):
+    if expected.python_minor:
+        running_minor = f"{sys.version_info.major}.{sys.version_info.minor}"
+        if running_minor != expected.python_minor:
+            raise RuntimeError(
+                f"{profile} requires Python {expected.python_minor}, found Python {running_minor}"
+            )
+    for module, version in (
+        (torch, expected.torch_version),
+        (torchvision, expected.torchvision_version),
+    ):
         if module.__version__.split("+")[0] != version:
             raise RuntimeError(f"Expected {version}, found {module.__version__}")
     hip = getattr(torch.version, "hip", None)
@@ -53,7 +86,9 @@ def verify_build(profile, torch, torchvision) -> None:
     if expected.backend == Backend.NVIDIA_CUDA:
         valid = not hip and cuda == expected.runtime_version
     elif expected.backend == Backend.AMD_ROCM:
-        valid = bool(hip) and str(hip).split(".")[:2] == expected.runtime_version.split(".") and not cuda
+        valid = bool(hip) and not cuda
+        if valid and expected.runtime_version:
+            valid = str(hip).split(".")[:2] == expected.runtime_version.split(".")
     else:
         valid = not hip and not cuda
     if not valid:
