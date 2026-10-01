@@ -98,7 +98,7 @@ from without_direction_estimation.multi_staged_association import (
     predict_obb_from_filters,
 )
 from random_utils import derive_seed, normalize_seed
-from tracking_constants import FIXED_INTERACT_IOU
+from tracking_constants import DEFAULT_INTERACT_IOU
 FILLED_ARTIFACT_SUFFIX = 'filled'
 ID_RESOLVED_ARTIFACT_SUFFIX = 'id_resolved'
 
@@ -3347,7 +3347,7 @@ def _run_single_correction_job(spec: dict) -> None:
     embedding_device = embedding_cfg.get('DEVICE', 'auto')
     preview_count    = int(embedding_cfg.get('PREVIEW_COUNT', 100))
     episode_max_len  = int(embedding_cfg.get('EPISODE_MAX_LEN', 0))
-    min_interact_iou = float(embedding_cfg.get('INTERACT_IOU', FIXED_INTERACT_IOU))
+    min_interact_iou = float(embedding_cfg.get('INTERACT_IOU', DEFAULT_INTERACT_IOU))
     if not np.isfinite(min_interact_iou) or not 0.0 <= min_interact_iou <= 1.0:
         raise ValueError('EMBEDDING.INTERACT_IOU must be between 0 and 1.')
     concurrent_jobs = max(1, int(spec.get('concurrent_correction_jobs', 1)))

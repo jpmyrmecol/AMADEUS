@@ -160,7 +160,7 @@ from segmentation_metadata import (
     segmentation_paths_for_session,
 )
 from training_paths import OUTPUT_ROOT_DIR, TRAINING_STAGE_DIRS
-from tracking_constants import FIXED_INTERACT_IOU
+from tracking_constants import DEFAULT_INTERACT_IOU
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme(CTK_THEME)
@@ -2571,7 +2571,7 @@ class EasyTrackingGUI(ctk.CTk):
         min_overlap, max_overlap = self._overlap_values()
         embedding_enabled = self._overlap.get() == "super_heavy"
         match_iou = 0.5
-        interact_iou = FIXED_INTERACT_IOU
+        interact_iou = DEFAULT_INTERACT_IOU
         dir_min_sec = 0.5
         dir_min_disp = 1.0
         refine_frame_ratio = 1.0

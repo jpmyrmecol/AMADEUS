@@ -30,7 +30,7 @@ from path_utils import relativize_config_paths, resolve_config_paths
 from obb_fitting import fit_obb, normalize_obb_fit_mode
 from scipy.optimize import linear_sum_assignment
 from segmentation_metadata import segmentation_metadata_from_object
-from tracking_constants import FIXED_INTERACT_IOU, MATCH_IOU_CANDIDATES
+from tracking_constants import DEFAULT_INTERACT_IOU, MATCH_IOU_CANDIDATES
 from video_frame_count import (
     clamp_frame_range_to_usable_count,
     read_video_frame_info,
@@ -723,7 +723,7 @@ def compute_auto_params(
     embedding_cfg = cfg.get("EMBEDDING", {}) or {}
     if not isinstance(embedding_cfg, dict):
         raise ValueError("EMBEDDING must be a mapping.")
-    interact_iou = float(embedding_cfg.get("INTERACT_IOU", FIXED_INTERACT_IOU))
+    interact_iou = float(embedding_cfg.get("INTERACT_IOU", DEFAULT_INTERACT_IOU))
     if not np.isfinite(interact_iou) or not 0.0 <= interact_iou <= 1.0:
         raise ValueError("EMBEDDING.INTERACT_IOU must be between 0 and 1.")
 

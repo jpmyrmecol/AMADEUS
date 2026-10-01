@@ -65,7 +65,7 @@ from segmentation_metadata import (
     segmentation_paths_for_session,
     segmentation_pickle_path_for_video,
 )
-from tracking_constants import FIXED_INTERACT_IOU
+from tracking_constants import DEFAULT_INTERACT_IOU
 
 CTK_THEME = str(gui_asset("deep_green.json"))
 INITIAL_TRACKING_SCRIPT = str(main_script("initial_tracking.py"))
@@ -707,7 +707,7 @@ class ConfigGUI(ctk.CTk):
                 ("MAX_AXIS_ERR", "Max Axis Error (deg)", 45.0),
                 ("MAX_AGE", "Max Age (frames)", 10),
                 ("FLIP_SEC", "Flip Duration (sec)", 5.0),
-                ("INTERACT_IOU", "Interact OBB IoU", FIXED_INTERACT_IOU),
+                ("INTERACT_IOU", "Interact OBB IoU", DEFAULT_INTERACT_IOU),
                 ("IOU_WEIGHT", "IoU Weight", 1.0),
                 ("DIRECTION_WEIGHT", "Direction Weight", 1.0),
                 ("MISS_WEIGHT", "Miss Weight", 1.0),
@@ -1777,7 +1777,7 @@ class ConfigGUI(ctk.CTk):
         if not isinstance(embedding_cfg, dict):
             messagebox.showerror("Error", "EMBEDDING must be a mapping.")
             return False
-        embedding_cfg.setdefault("INTERACT_IOU", FIXED_INTERACT_IOU)
+        embedding_cfg.setdefault("INTERACT_IOU", DEFAULT_INTERACT_IOU)
         self._loaded_cfg = copy.deepcopy(cfg)
         self._loaded_training_video_path = str(cfg.get("TRAINING_VIDEO_PATH", "") or "")
 
@@ -2167,7 +2167,7 @@ class ConfigGUI(ctk.CTk):
                 config_key,
                 analysis_widgets[widget_key].get(),
             )
-        interact_iou = float(embedding_dict.get("INTERACT_IOU", FIXED_INTERACT_IOU))
+        interact_iou = float(embedding_dict.get("INTERACT_IOU", DEFAULT_INTERACT_IOU))
         if not math.isfinite(interact_iou) or not 0.0 <= interact_iou <= 1.0:
             messagebox.showerror("Error", "INTERACT_IOU must be between 0 and 1.")
             return False
@@ -2543,7 +2543,7 @@ class ConfigGUI(ctk.CTk):
             "Adjust Parameters",
             "Auto parameters updated from the current segmentation results:\n"
             f"  MATCH_IOU = {updates['MATCH_IOU']}\n"
-            f"  INTERACT_IOU = {(cfg.get('EMBEDDING', {}) or {}).get('INTERACT_IOU', FIXED_INTERACT_IOU)}\n"
+            f"  INTERACT_IOU = {(cfg.get('EMBEDDING', {}) or {}).get('INTERACT_IOU', DEFAULT_INTERACT_IOU)}\n"
             f"  DIR_MIN_SEC = {updates['DIR_MIN_SEC']}\n"
             f"  LOCALIZED = {updates['LOCALIZED']}\n"
             f"  NUM_CROPS = {updates['NUM_CROPS']}\n"
