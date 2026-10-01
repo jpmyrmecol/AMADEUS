@@ -3,9 +3,9 @@
 </p>
 
 <div align="center" style="line-height: 1;">
-  <a href="https://doi.org/10.64898/2026.09.19.752854" target="_blank"><img alt="bioRxiv" src="https://img.shields.io/badge/bioRxiv-10.64898%2F2026.09.19.752854-B31B1B?logo=biorxiv&logoColor=white"/></a>
-  <a href="https://x.com/jpmyrmecol" target="_blank"><img alt="X" src="https://img.shields.io/badge/X-jpmyrmecol-1D9BF0?logo=x&logoColor=white"/></a>
-  <a href="https://amadeus.jpmyrmecol.com/" target="_blank"><img alt="Website" src="https://img.shields.io/badge/Website-AMADEUS-14C290?logo=googlechrome&logoColor=white"/></a>
+  <a href="https://doi.org/10.64898/2026.09.19.752854" target="_blank"><img alt="bioRxiv" src="https://img.shields.io/badge/bioRxiv-10.64898%2F2026.09.19.752854-1D9BF0?logo=biorxiv&logoColor=white"/></a>
+  <a href="https://x.com/jpmyrmecol" target="_blank"><img alt="X" src="https://img.shields.io/badge/X-jpmyrmecol-14C290?logo=x&logoColor=white"/></a>
+  <a href="https://amadeus.jpmyrmecol.com/" target="_blank"><img alt="Website" src="https://img.shields.io/badge/Website-AMADEUS-B31B1B?logo=googlechrome&logoColor=white"/></a>
 </div>
 <br>
 <div align="center">
