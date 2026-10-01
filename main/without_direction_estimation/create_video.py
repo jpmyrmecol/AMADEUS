@@ -45,6 +45,7 @@ from experiment_utils import (
 )
 from weight_utils import deduplicate_best_epoch_weights
 from video_frame_count import read_video_frame_info, warn_if_frame_count_adjusted
+from tracking_video_inputs import configured_tracking_video_files
 from gui.color import make_id_palette, resolve_color_seed
 from main.video_compat import ffmpeg_executable
 from main.video_encoders import detect_hardware_video_encoder, hardware_encoder_args
@@ -267,16 +268,8 @@ def build_track_label(assign_type: float | None) -> str:
     code = float(assign_type)
     return base_map.get(code, f"t{int(round(code))}")
 
-def list_video_files(video_path_in: str) -> list[str]:
-    if os.path.isdir(video_path_in):
-        video_files = [
-            os.path.join(video_path_in, f)
-            for f in sorted(os.listdir(video_path_in))
-            if os.path.isfile(os.path.join(video_path_in, f))
-            and f.lower().endswith((".mp4", ".avi", ".mov", ".m4v"))
-        ]
-    else:
-        video_files = [video_path_in]
+def list_video_files(cfg: dict, video_path_in: str) -> list[str]:
+    video_files = configured_tracking_video_files(cfg, video_path_in)
     if not video_files:
         raise RuntimeError(f"Video not found: {video_path_in}")
     return video_files
@@ -927,7 +920,7 @@ def main():
         color_space="bgr",
         seed=color_seed,
     )
-    video_files = list_video_files(video_path_in)
+    video_files = list_video_files(cfg, video_path_in)
     from batch_utils import resolve_num_workers as _bt_resolve_workers
     _workers_raw = (cfg.get("create_video", {}) or {}).get("NUM_WORKERS") or cfg.get("NUM_WORKERS", "auto")
     num_io_workers = _bt_resolve_workers(_workers_raw, task="process")
