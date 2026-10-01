@@ -3597,6 +3597,8 @@ class EasyTrackingGUI(ctk.CTk):
             and os.path.isdir(tracking_video)
             and isinstance(configured_tracking_files, list)
             and configured_tracking_files
+            and len(configured_tracking_files)
+            == len(self._tracking_directory_candidates(tracking_video))
             and all(os.path.isfile(str(path)) for path in configured_tracking_files)
         ):
             candidates = self._tracking_directory_candidates(tracking_video)
