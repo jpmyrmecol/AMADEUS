@@ -798,6 +798,12 @@ class ConfigGUI(ctk.CTk):
         self.sections["Analysis"]["widgets"]["ENABLE"].trace_add(
             "write", self._refresh_skip_dependent_states
         )
+        self.sections["Initial Tracking"]["widgets"]["AUTO_PARAMS"].trace_add(
+            "write", self._refresh_skip_dependent_states
+        )
+        self.sections["Create dataset"]["widgets"]["LOCALIZED"].trace_add(
+            "write", self._refresh_skip_dependent_states
+        )
         self._refresh_skip_dependent_states()
 
         self._apply_prefill_paths()
@@ -1238,6 +1244,10 @@ class ConfigGUI(ctk.CTk):
         any_paste_active = mixed_paste_active or clustered_paste_active
         dataset_active = not bool(self.skip_creating_direction_dataset.get())
         crop_active = dataset_active and not bool(self.skip_cropping.get())
+        auto_params_var = self.sections.get("Initial Tracking", {}).get("widgets", {}).get("AUTO_PARAMS")
+        auto_params_will_run = bool(
+            initial_active and auto_params_var is not None and auto_params_var.get()
+        )
 
         # Initial Tracking controls. OBB_FIT_MODE is shared with direction
         # assignment, paste synthesis, and cropping.
@@ -1256,10 +1266,15 @@ class ConfigGUI(ctk.CTk):
         set_keys(
             "Create single animal images",
             [
-                "TRAJ_MAX_DIST", "DIR_MIN_SEC", "TRAJ_MAX_JUMP",
+                "TRAJ_MAX_DIST", "TRAJ_MAX_JUMP",
                 "MIN_ASPECT", "SKIP_DIR_PREVIEW",
             ],
             trajectory_active,
+        )
+        set_keys(
+            "Create single animal images",
+            ["DIR_MIN_SEC"],
+            trajectory_active and not auto_params_will_run,
         )
         set_keys(
             "Create single animal images",
@@ -1298,9 +1313,14 @@ class ConfigGUI(ctk.CTk):
             "Create with crossing",
             [
                 "RATIO_SINGLE", "RATIO_P2", "RATIO_P3",
-                "FREE_SCALE", "FREE_RATIO_SINGLE", "FREE_RATIO_P2", "FREE_RATIO_P3",
+                "FREE_RATIO_SINGLE", "FREE_RATIO_P2", "FREE_RATIO_P3",
             ],
             mixed_paste_active,
+        )
+        set_keys(
+            "Create with crossing",
+            ["FREE_SCALE"],
+            mixed_paste_active and not auto_params_will_run,
         )
 
         shared_paste_keys = [
@@ -1370,21 +1390,26 @@ class ConfigGUI(ctk.CTk):
         set_keys(
             "Create with crossing",
             ["CLUSTER_FRAMES"],
-            initial_active or clustered_paste_active or dataset_active,
+            (clustered_paste_active or dataset_active) and not auto_params_will_run,
         )
 
         # Dataset controls. NUM_CROPS and LOCALIZED are also consumed by paste
         # synthesis/cropping, so they do not follow dataset skip alone.
         set_keys("Create dataset", ["VAL_RATIO"], dataset_active)
+        dataset_widgets = self.sections.get("Create dataset", {}).get("widgets", {})
+        localized_var = dataset_widgets.get("LOCALIZED")
+        localized_enabled = bool(localized_var.get()) if localized_var is not None else False
         set_keys(
             "Create dataset",
             ["NUM_CROPS"],
-            initial_active or any_paste_active or crop_active or dataset_active,
+            (any_paste_active or crop_active or dataset_active)
+            and not auto_params_will_run
+            and not localized_enabled,
         )
         set_keys(
             "Create dataset",
             ["LOCALIZED"],
-            initial_active or mixed_paste_active or crop_active,
+            (mixed_paste_active or crop_active) and not auto_params_will_run,
         )
 
         training_active = not bool(self.skip_training.get())
@@ -1425,7 +1450,8 @@ class ConfigGUI(ctk.CTk):
         set_keys(
             "Analysis",
             ["MATCH_IOU"],
-            initial_active or id_tracking_active or refinement_active,
+            (initial_active or id_tracking_active or refinement_active)
+            and not auto_params_will_run,
         )
         set_keys(
             "Analysis",
