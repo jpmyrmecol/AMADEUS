@@ -16,9 +16,10 @@ def configured_tracking_video_files(
     video_path_in: str | None = None,
 ) -> list[str]:
     """Return the concrete analysis videos configured for this run."""
-    configured = cfg.get("TRACKING_VIDEO_FILES")
-    if isinstance(configured, (list, tuple)) and configured:
-        return [str(path) for path in configured if str(path).strip()]
+    if bool(cfg.get("TRACKING_VIDEO_PATH_IS_DIR", False)):
+        configured = cfg.get("TRACKING_VIDEO_FILES")
+        if isinstance(configured, (list, tuple)) and configured:
+            return [str(path) for path in configured if str(path).strip()]
 
     path = str(
         video_path_in
