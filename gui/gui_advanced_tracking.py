@@ -1985,6 +1985,15 @@ class ConfigGUI(ctk.CTk):
             return
 
         cfg["TRACKING_VIDEO_PATH_IS_DIR"] = self.path_mode["TRACKING_VIDEO_PATH_IS_DIR"].get()
+        loaded_tracking_path = str(self._loaded_cfg.get("TRACKING_VIDEO_PATH", "") or "").strip()
+        loaded_tracking_is_dir = bool(
+            self._loaded_cfg.get("TRACKING_VIDEO_PATH_IS_DIR", False)
+        )
+        if (
+            str(cfg.get("TRACKING_VIDEO_PATH", "") or "").strip() != loaded_tracking_path
+            or bool(cfg["TRACKING_VIDEO_PATH_IS_DIR"]) != loaded_tracking_is_dir
+        ):
+            cfg.pop("TRACKING_VIDEO_FILES", None)
 
         for key, widget in self.sections["Initial Tracking"]["widgets"].items():
             val = widget.get() if isinstance(widget, tk.Variable) else widget.get().strip()
