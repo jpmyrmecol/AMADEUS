@@ -80,6 +80,17 @@ def _nvidia_compute_capability() -> tuple[int, int] | None:
         return None
 
 
+def _nvidia_driver_major() -> int | None:
+    info = query_nvidia_driver_info()
+    if info is None:
+        return None
+    _, driver, _ = info
+    try:
+        return int(str(driver).split(".", 1)[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_apple_silicon() -> bool:
     import platform
 
@@ -130,10 +141,23 @@ def select_torch_profiles() -> tuple[list[str], str]:
         return ["macos"], "Using macOS wheels (MPS/Metal when available, otherwise CPU)."
     if nvidia_gpu_is_available():
         capability = _nvidia_compute_capability()
+        driver_major = _nvidia_driver_major()
         if capability is not None and capability < (7, 5):
             return ["cu126"], (
                 f"NVIDIA GPU0 compute capability is {capability[0]}.{capability[1]}; "
                 "using the legacy CUDA 12.6 profile retained for pre-Turing GPUs. "
+                + _nvidia_driver_diagnostic()
+            )
+        if (
+            capability is not None
+            and capability < (10, 0)
+            and driver_major is not None
+            and driver_major < 580
+        ):
+            return ["cu126"], (
+                f"NVIDIA GPU0 compute capability is {capability[0]}.{capability[1]} "
+                f"but driver {driver_major}.x is below the CUDA 13.x compatibility floor; "
+                "using CUDA 12.6. "
                 + _nvidia_driver_diagnostic()
             )
         capability_text = (
@@ -141,6 +165,13 @@ def select_torch_profiles() -> tuple[list[str], str]:
             if capability is not None
             else "GPU0 compute capability could not be queried"
         )
+        if capability is not None and capability >= (10, 0):
+            return ["cu132"], (
+                f"An NVIDIA Blackwell-class GPU was detected ({capability_text}); "
+                "using CUDA 13.2 because the CUDA 12.6 PyTorch build has no compatible "
+                "sm_100/sm_120 kernels. "
+                + _nvidia_driver_diagnostic()
+            )
         return ["cu132", "cu126"], (
             f"An NVIDIA GPU was detected ({capability_text}); trying CUDA 13.2 first. "
             "CUDA 12.6 is retained as an automatic compatibility fallback. "
@@ -287,12 +318,13 @@ def _ready_marker_profile() -> str | None:
     return profile if isinstance(profile, str) else None
 
 
-def prepare_profile_environment(profile: str) -> None:
+def prepare_profile_environment(profile: str, previous_profile: str | None = None) -> None:
     """Rebuild the managed venv when a profile requires another Python/runtime stack."""
     if ENVIRONMENT_ROOT != PROJECT_ROOT / ".venv":
         return
 
-    previous_profile = _ready_marker_profile()
+    if previous_profile is None:
+        previous_profile = _ready_marker_profile()
     rebuild = False
     if previous_profile is not None and previous_profile != profile:
         previous = PROFILES.get(previous_profile)
@@ -753,6 +785,7 @@ def main() -> int:
     try:
         if os.name == "nt" and ENVIRONMENT_ROOT != PROJECT_ROOT / ".venv":
             raise RuntimeError("AMADEUS_VENV is supported by the macOS/Linux launcher only.")
+        previous_profile = _ready_marker_profile()
         # AMADEUS.bat uses this marker for its fast path. Remove it before making
         # any changes so an interrupted or failed setup is fully checked next time.
         READY_MARKER.unlink(missing_ok=True)
@@ -768,7 +801,7 @@ def main() -> int:
                         f"[AMADEUS] Trying compatibility profile {candidate}...",
                         flush=True,
                     )
-                prepare_profile_environment(candidate)
+                prepare_profile_environment(candidate, previous_profile)
                 python = select_python(args.python, candidate)
                 sync_environment(args.uv, candidate, python)
                 verify_numeric_stack()
@@ -790,6 +823,7 @@ def main() -> int:
                     f"[AMADEUS] Falling back to {profiles[index + 1]}.",
                     flush=True,
                 )
+                previous_profile = candidate
 
         if not profile:
             raise RuntimeError(f"No usable PyTorch profile was found: {last_error}")
