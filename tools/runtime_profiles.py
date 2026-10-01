@@ -29,10 +29,33 @@ class WheelProfile:
 PROFILES = {
     "cpu": WheelProfile(Backend.CPU, "cpu", "https://download.pytorch.org/whl/cpu"),
     "macos": WheelProfile(Backend.APPLE_MPS, "", None),
+    # CUDA 13.2 is the primary NVIDIA profile for Turing (CC 7.5) and newer.
+    # It is installed outside uv.lock so legacy CUDA 12.6 remains available.
+    "cu132": WheelProfile(
+        Backend.NVIDIA_CUDA,
+        "cu132",
+        "https://download.pytorch.org/whl/cu132",
+        "13.2",
+        sync_extra="cpu",
+    ),
+    # PyTorch 2.14 + CUDA 12.6 is the final prebuilt line retaining
+    # Maxwell/Pascal/Volta support.
     "cu126": WheelProfile(Backend.NVIDIA_CUDA, "cu126", "https://download.pytorch.org/whl/cu126", "12.6"),
     "rocm72": WheelProfile(Backend.AMD_ROCM, "rocm7.2", "https://download.pytorch.org/whl/rocm7.2", "7.2"),
-    # AMD publishes the Windows ROCm PyTorch wheels through its own index.
-    # device-all installs the GPU runtime components required by supported hardware.
+    # AMD ROCm 10 wheels are distributed from AMD's wheel index. device-all
+    # installs the GPU runtime components required by supported hardware.
+    "rocm100": WheelProfile(
+        Backend.AMD_ROCM,
+        "rocm10.0.0",
+        "https://stable.repo.amd.com/rocm/whl-next/",
+        None,
+        torch_version="2.13.0",
+        torchvision_version="0.28.0",
+        package_extra="device-all",
+        install_dependencies=True,
+        python_minor="3.12",
+        sync_extra="cpu",
+    ),
     "rocmwin100": WheelProfile(
         Backend.AMD_ROCM,
         "rocm10.0.0",
@@ -51,18 +74,18 @@ PROFILES = {
 def check_support(profile: str) -> None:
     if profile not in PROFILES:
         raise RuntimeError(f"Unknown PyTorch profile: {profile}")
-    if profile == "rocm72" and not (
+    if profile in {"rocm72", "rocm100"} and not (
         sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}
     ):
-        raise RuntimeError("The rocm72 wheel profile requires Linux x86_64.")
+        raise RuntimeError(f"The {profile} wheel profile requires Linux x86_64.")
     if profile == "rocmwin100" and not (
         sys.platform == "win32" and platform.machine().lower() in {"x86_64", "amd64"}
     ):
         raise RuntimeError("The rocmwin100 wheel profile requires Windows x86_64.")
     if profile == "macos" and sys.platform != "darwin":
         raise RuntimeError("The macos wheel profile requires macOS.")
-    if profile == "cu126" and sys.platform == "darwin":
-        raise RuntimeError("The cu126 wheel profile is unavailable on macOS.")
+    if profile in {"cu126", "cu132"} and sys.platform == "darwin":
+        raise RuntimeError(f"The {profile} wheel profile is unavailable on macOS.")
 
 
 def verify_build(profile, torch, torchvision) -> None:
