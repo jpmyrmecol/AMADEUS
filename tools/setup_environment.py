@@ -520,8 +520,8 @@ def install_exact_pytorch_profile(uv_executable: str, profile: str) -> None:
         str(python),
     ]
     if selected.install_dependencies:
-        # Keep already-satisfied locked AMADEUS dependencies intact while the
-        # AMD device-all extras add their required ROCm runtime packages.
+        # CUDA 13.2 and ROCm 10.0 require runtime packages supplied by their
+        # accelerator indexes, so allow those dependencies to be installed.
         pass
     else:
         command.extend(["--reinstall", "--no-deps"])
