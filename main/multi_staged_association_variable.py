@@ -282,7 +282,7 @@ def main() -> None:
     )
 
     if os.path.isdir(video_path_in):
-        video_files = [os.path.join(video_path_in, f) for f in os.listdir(video_path_in) if f.lower().endswith(('.mp4', '.avi', '.mov', '.m4v'))]
+        video_files = [\n            os.path.join(video_path_in, f)\n            for f in sorted(os.listdir(video_path_in))\n            if os.path.isfile(os.path.join(video_path_in, f))\n            and f.lower().endswith(('.mp4', '.avi', '.mov', '.m4v'))\n        ]
     else:
         video_files = [video_path_in]
     if not video_files:
