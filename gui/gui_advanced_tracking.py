@@ -1288,7 +1288,7 @@ class ConfigGUI(ctk.CTk):
             "MAX_OVERLAP", "PASTE_SCALE_MIN", "PASTE_SCALE_MAX",
             "WIDTH_SCALE_MIN", "WIDTH_SCALE_MAX", "MASK_EXPANSION_RATIO",
             "BRIGHT_MIN", "BRIGHT_MAX", "CONTRAST_MIN", "CONTRAST_MAX",
-            "PASTE_LAYER_MODE", "OCCLUDER_MARGIN", "ALPHA_MODE",
+            "PASTE_LAYER_MODE", "ALPHA_MODE",
             "FEATHER_MIN", "FEATHER_MAX", "MAX_TRIES",
         ]
         set_keys("Create with crossing", shared_paste_keys, any_paste_active)
@@ -1306,6 +1306,11 @@ class ConfigGUI(ctk.CTk):
             "Create with crossing",
             ["UNDER_PASTE_PROB"],
             any_paste_active and paste_layer_mode == "mixed",
+        )
+        set_keys(
+            "Create with crossing",
+            ["OCCLUDER_MARGIN"],
+            any_paste_active and paste_layer_mode in {"under", "mixed"},
         )
         set_keys(
             "Create with crossing",
