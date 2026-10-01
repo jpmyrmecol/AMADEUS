@@ -2395,13 +2395,6 @@ class EasyTrackingGUI(ctk.CTk):
         new_value = not bool(self._skip_flags.get(skip_key, False))
         self._skip_flags[skip_key] = new_value
         self._manual_skip_keys.add(skip_key)
-        if skip_key == "skip_id_tracking" and new_value:
-            self._skip_flags["skip_refinement"] = True
-            self._manual_skip_keys.add("skip_refinement")
-        if skip_key == "skip_refinement" and not new_value:
-            self._skip_flags["skip_id_tracking"] = False
-            self._manual_skip_keys.add("skip_id_tracking")
-
         self._selected_block = vis_i
         self._refresh_block_colors()
 
@@ -3150,6 +3143,7 @@ class EasyTrackingGUI(ctk.CTk):
     def _on_step_done(self, vis_i: int, step_i: int, script: str) -> None:
         self._persist_completed_step_skips(step_i)
         self._done_steps.add(step_i)
+        self._refresh_block_colors()
         if self._active_block_vis == vis_i:
             self._active_block_vis = -1
             self._cancel_shimmer()
@@ -3159,6 +3153,40 @@ class EasyTrackingGUI(ctk.CTk):
         session = self._base_cfg.get("SESSION_PATH", "")
         self._display_step = -2         # force re-render on next poll
         self._update_canvas_for_step(step_i, session)
+
+    def _sync_skip_panels_from_config(self, path: str | None = None) -> None:
+        """Reload persisted skip flags and reflect them in the Easy Tracking panels."""
+        config_path = path or self._active_config_path or self._loaded_config_path
+        if not config_path or not os.path.isfile(config_path):
+            flags = {
+                key: self._base_cfg.get(key, self._skip_flags.get(key, False))
+                for key in self._default_skip_flags()
+            }
+            self._set_skip_flags(flags, render=True)
+            return
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            if not isinstance(cfg, dict):
+                raise ValueError("config root must be a mapping")
+            self._loaded_cfg = copy.deepcopy(cfg)
+            self._base_cfg.update({
+                key: bool(cfg.get(key, False))
+                for key in self._default_skip_flags()
+                if key in cfg
+            })
+            self._set_skip_flags(self._skip_flags_from_config(cfg), render=True)
+        except Exception as exc:
+            print(
+                f"[WARN] Could not synchronize Easy Tracking step panels from {config_path}: {exc}",
+                flush=True,
+            )
+            flags = {
+                key: self._base_cfg.get(key, self._skip_flags.get(key, False))
+                for key in self._default_skip_flags()
+            }
+            self._set_skip_flags(flags, render=True)
 
     def _on_batch_finished(
         self,
@@ -3183,11 +3211,12 @@ class EasyTrackingGUI(ctk.CTk):
         self._active_block_vis = -1
         self._cancel_shimmer()
 
-        # Reset block state so the user can edit skip flags immediately
+        # Reset visual progress, then reload the persisted skip state so the
+        # panels exactly match config.yaml before the user edits or resumes.
         self._done_steps = set()
         self._selected_block = -1
-        flags = {key: self._base_cfg.get(key, False) for key in self._default_skip_flags()}
-        self._set_skip_flags(flags, render=True)
+        active_config_path = self._active_config_path
+        self._sync_skip_panels_from_config(active_config_path)
         self._active_config_path = ""
 
         self._run_btn.configure(state="normal")
