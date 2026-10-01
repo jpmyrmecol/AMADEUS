@@ -2415,7 +2415,6 @@ class ConfigGUI(ctk.CTk):
         self._stop_requested = False
         session = self.basic_entries["SESSION_PATH"].get()
         yaml_path = os.path.join(session, "config.yaml")
-        self._run_config_path = yaml_path
 
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
@@ -2620,6 +2619,8 @@ class ConfigGUI(ctk.CTk):
 
         # Keep only the corresponding in-memory config values synchronized;
         # no unrelated user input is reloaded or overwritten.
+        if not isinstance(self._loaded_cfg, dict):
+            self._loaded_cfg = {}
         for key in ("LOCALIZED", "NUM_CROPS", "FREE_SCALE", "DIR_MIN_SEC", "CLUSTER_FRAMES"):
             if updates[key] is not None:
                 self._loaded_cfg[key] = updates[key]
@@ -2673,6 +2674,7 @@ class ConfigGUI(ctk.CTk):
             return
         session = self.basic_entries["SESSION_PATH"].get()
         yaml_path = os.path.join(session, "config.yaml")
+        self._run_config_path = yaml_path
 
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
