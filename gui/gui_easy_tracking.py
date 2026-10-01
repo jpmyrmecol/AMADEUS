@@ -2637,8 +2637,6 @@ class EasyTrackingGUI(ctk.CTk):
         skip_key = STEPS[step_i][1]
         if self._single_animal_skips_paste() and skip_key in {"skip_paste_blobs_with_crossing", "skip_paste_blobs_clustered"}:
             return
-        if skip_key == "skip_cropping":
-            return
         new_value = not bool(self._skip_flags.get(skip_key, False))
         self._skip_flags[skip_key] = new_value
         self._manual_skip_keys.add(skip_key)
