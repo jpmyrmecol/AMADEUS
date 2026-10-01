@@ -264,9 +264,8 @@ _C_DISABLED  = "#252525"
 _C_BG_ROW    = "#1e1e1e"
 _WIDTH_SCALE_MIN = 0.9
 _WIDTH_SCALE_MAX = 1.1
-# Directory analysis intentionally uses containers that the full tracking
-# pipeline reads directly without per-file compatibility conversion.
-_DIRECTORY_VIDEO_SUFFIXES = (".mp4", ".avi", ".mov", ".m4v")
+# Directory mode accepts every suffix supported by the normal video picker.
+# Each top-level file is passed through the same compatibility preparation path.
 
 
 class EasyTrackingGUI(ctk.CTk):
@@ -294,6 +293,9 @@ class EasyTrackingGUI(ctk.CTk):
         self._loaded_config_path: str = ""
         self._loaded_easy_answers: dict = {}
         self._tracking_video_is_dir = tk.BooleanVar(value=False)
+        self._prepared_tracking_directory = ""
+        self._prepared_tracking_files: list[str] = []
+        self._prepared_tracking_source_signature: tuple[tuple[str, int, int], ...] = ()
         self._skip_flags: dict[str, bool] = {}
         self._manual_skip_keys: set[str] = set()
         self._num_confirmed = False
@@ -532,6 +534,83 @@ class EasyTrackingGUI(ctk.CTk):
             self._sync_segmentation_status_from_outputs()
         return "break"
 
+    def _reset_prepared_tracking_directory(self) -> None:
+        self._prepared_tracking_directory = ""
+        self._prepared_tracking_files = []
+        self._prepared_tracking_source_signature = ()
+
+    def _tracking_directory_candidates(self, directory: str) -> list[str]:
+        return [
+            os.path.join(directory, name)
+            for name in sorted(os.listdir(directory))
+            if os.path.isfile(os.path.join(directory, name))
+            and os.path.splitext(name)[1].lower() in VIDEO_DROP_SUFFIXES
+        ]
+
+    @staticmethod
+    def _tracking_source_signature(paths: list[str]) -> tuple[tuple[str, int, int], ...]:
+        signature: list[tuple[str, int, int]] = []
+        for path in paths:
+            stat = os.stat(path)
+            signature.append(
+                (
+                    os.path.normcase(os.path.abspath(path)),
+                    stat.st_mtime_ns,
+                    stat.st_size,
+                )
+            )
+        return tuple(signature)
+
+    def _prepare_tracking_directory(self, directory: str) -> list[str] | None:
+        candidates = self._tracking_directory_candidates(directory)
+        if not candidates:
+            messagebox.showerror(
+                "Error",
+                "The selected analysis directory contains no supported video files "
+                "at its top level.",
+                parent=self,
+            )
+            return None
+
+        try:
+            signature = self._tracking_source_signature(candidates)
+        except OSError as exc:
+            messagebox.showerror(
+                "Error",
+                f"Failed to inspect the analysis directory:\n{exc}",
+                parent=self,
+            )
+            return None
+
+        normalized_directory = os.path.normcase(os.path.abspath(directory))
+        if (
+            normalized_directory == self._prepared_tracking_directory
+            and signature == self._prepared_tracking_source_signature
+            and self._prepared_tracking_files
+            and all(os.path.isfile(path) for path in self._prepared_tracking_files)
+        ):
+            return list(self._prepared_tracking_files)
+
+        prepared_files: list[str] = []
+        for path in candidates:
+            prepared = prepare_analysis_video(
+                self,
+                path,
+                log=lambda message, name=os.path.basename(path): print(
+                    f"[video:{name}] {message}",
+                    flush=True,
+                ),
+            )
+            if prepared is None:
+                self._reset_prepared_tracking_directory()
+                return None
+            prepared_files.append(prepared.path)
+
+        self._prepared_tracking_directory = normalized_directory
+        self._prepared_tracking_source_signature = signature
+        self._prepared_tracking_files = list(prepared_files)
+        return prepared_files
+
     def _browse_tracking_video(self) -> None:
         if not self._video_entry.get().strip():
             return
@@ -542,6 +621,9 @@ class EasyTrackingGUI(ctk.CTk):
                 initial = os.path.dirname(self._video_entry.get().strip()) or os.getcwd()
             path = filedialog.askdirectory(initialdir=initial)
             if not path:
+                return
+            prepared_files = self._prepare_tracking_directory(path)
+            if prepared_files is None:
                 return
             self._tracking_video_entry.delete(0, tk.END)
             self._tracking_video_entry.insert(0, path)
@@ -558,6 +640,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._tracking_video_entry.insert(0, prepared.path)
 
     def _on_tracking_video_mode_changed(self) -> None:
+        self._reset_prepared_tracking_directory()
         if not self._video_entry.get().strip():
             self._tracking_video_is_dir.set(False)
             self._refresh_tracking_video_controls()
@@ -2720,22 +2803,15 @@ class EasyTrackingGUI(ctk.CTk):
         if not tracking_video:
             messagebox.showerror("Error", "Please select an analysis video or directory.")
             return None
+        tracking_video_files: list[str] = []
         if tracking_video_is_dir:
             if not os.path.isdir(tracking_video):
                 messagebox.showerror("Error", "Analysis Video Path must be a directory.")
                 return None
-            direct_videos = [
-                name for name in os.listdir(tracking_video)
-                if os.path.isfile(os.path.join(tracking_video, name))
-                and os.path.splitext(name)[1].lower() in _DIRECTORY_VIDEO_SUFFIXES
-            ]
-            if not direct_videos:
-                messagebox.showerror(
-                    "Error",
-                    "The selected analysis directory contains no supported video files "
-                    "at its top level.",
-                )
+            prepared_files = self._prepare_tracking_directory(tracking_video)
+            if prepared_files is None:
                 return None
+            tracking_video_files = prepared_files
         elif not os.path.isfile(tracking_video):
             messagebox.showerror("Error", "Analysis Video Path must be a video file.")
             return None
@@ -2814,6 +2890,7 @@ class EasyTrackingGUI(ctk.CTk):
             "SESSION_PATH":               session,
             "TRAINING_VIDEO_PATH":        video,
             "TRACKING_VIDEO_PATH":        tracking_video,
+            "TRACKING_VIDEO_FILES":       tracking_video_files,
             "NUM_OBJECTS":                num_objects,
             "TRAIN_IMG_SIZE":             geometry_img_size,
             "TRACKING_VIDEO_PATH_IS_DIR": tracking_video_is_dir,
@@ -2992,9 +3069,9 @@ class EasyTrackingGUI(ctk.CTk):
             training_cfg["FIRST_FRAME"] = meta_training_start
             training_cfg["LAST_FRAME"] = meta_training_end
             flags["skip_cropping"] = skip_crop
-        if answer_changed("tracking_video", "tracking_video_is_dir"):
-            cfg["TRACKING_VIDEO_PATH"] = tracking_video
-            cfg["TRACKING_VIDEO_PATH_IS_DIR"] = tracking_video_is_dir
+        cfg["TRACKING_VIDEO_PATH"] = tracking_video
+        cfg["TRACKING_VIDEO_PATH_IS_DIR"] = tracking_video_is_dir
+        cfg["TRACKING_VIDEO_FILES"] = tracking_video_files
         if answer_changed("session"):
             cfg["SESSION_PATH"] = session
             cfg["INIT_CSV_PATH"] = os.path.join(
@@ -3511,7 +3588,27 @@ class EasyTrackingGUI(ctk.CTk):
             self._video_entry.delete(0, tk.END)
             self._video_entry.insert(0, video)
         tracking_video = str(cfg.get("TRACKING_VIDEO_PATH", "") or "") or video
-        self._tracking_video_is_dir.set(bool(cfg.get("TRACKING_VIDEO_PATH_IS_DIR", False)))
+        tracking_video_is_dir = bool(cfg.get("TRACKING_VIDEO_PATH_IS_DIR", False))
+        self._tracking_video_is_dir.set(tracking_video_is_dir)
+        self._reset_prepared_tracking_directory()
+        configured_tracking_files = cfg.get("TRACKING_VIDEO_FILES", [])
+        if (
+            tracking_video_is_dir
+            and os.path.isdir(tracking_video)
+            and isinstance(configured_tracking_files, list)
+            and configured_tracking_files
+            and all(os.path.isfile(str(path)) for path in configured_tracking_files)
+        ):
+            candidates = self._tracking_directory_candidates(tracking_video)
+            self._prepared_tracking_directory = os.path.normcase(
+                os.path.abspath(tracking_video)
+            )
+            self._prepared_tracking_source_signature = self._tracking_source_signature(
+                candidates
+            )
+            self._prepared_tracking_files = [
+                str(path) for path in configured_tracking_files
+            ]
         self._tracking_video_entry.configure(state="normal")
         self._tracking_video_entry.delete(0, tk.END)
         if tracking_video:
