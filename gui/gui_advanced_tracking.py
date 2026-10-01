@@ -786,6 +786,7 @@ class ConfigGUI(ctk.CTk):
             self.skip_refine_blobs_through_tracking,
             self.skip_paste_blobs_with_crossing,
             self.skip_paste_blobs_clustered,
+            self.skip_cropping,
             self.skip_creating_direction_dataset,
             self.skip_training,
             self.skip_detection,
@@ -1226,22 +1227,37 @@ class ConfigGUI(ctk.CTk):
             if present:
                 self._set_create_images_group_enabled(section, present, enabled)
 
-        # Initial Tracking.
+        # Stage activity. Some parameters are shared across panels/stages, so
+        # controls are enabled by their actual consumers rather than by the
+        # section they happen to be displayed in.
         initial_active = not bool(self.skip_initial_tracking.get())
+        trajectory_active = not bool(self.skip_trajectory_direction_filtering.get())
+        refine_blobs_active = not bool(self.skip_refine_blobs_through_tracking.get())
+        mixed_paste_active = not bool(self.skip_paste_blobs_with_crossing.get())
+        clustered_paste_active = not bool(self.skip_paste_blobs_clustered.get())
+        any_paste_active = mixed_paste_active or clustered_paste_active
+        dataset_active = not bool(self.skip_creating_direction_dataset.get())
+        crop_active = dataset_active and not bool(self.skip_cropping.get())
+
+        # Initial Tracking controls. OBB_FIT_MODE is shared with direction
+        # assignment, paste synthesis, and cropping.
         set_keys(
             "Initial Tracking",
-            list(self.sections.get("Initial Tracking", {}).get("widgets", {}).keys()),
+            ["AUTO_PARAMS", "LOCALIZED_RATIO", "INIT_MAX_GAP", "SKIP_INIT_PREVIEW"],
             initial_active,
+        )
+        set_keys(
+            "Initial Tracking",
+            ["OBB_FIT_MODE"],
+            initial_active or trajectory_active or any_paste_active or crop_active,
         )
 
         # Create single animal images: the two passes are independently skippable.
-        trajectory_active = not bool(self.skip_trajectory_direction_filtering.get())
-        refine_blobs_active = not bool(self.skip_refine_blobs_through_tracking.get())
         set_keys(
             "Create single animal images",
             [
                 "TRAJ_MAX_DIST", "DIR_MIN_SEC", "TRAJ_MAX_JUMP",
-                "MIN_ASPECT", "DIR_MIN_DISP", "SKIP_DIR_PREVIEW",
+                "MIN_ASPECT", "SKIP_DIR_PREVIEW",
             ],
             trajectory_active,
         )
@@ -1255,12 +1271,17 @@ class ConfigGUI(ctk.CTk):
             refine_blobs_active,
         )
 
+        # DIR_MIN_DISP also participates in Initial Tracking's automatic
+        # motion measurement.
+        set_keys(
+            "Create single animal images",
+            ["DIR_MIN_DISP"],
+            trajectory_active or initial_active,
+        )
+
         # Synthetic interaction generation. The clustered and mixed generators
         # share appearance/placement parameters, while composition is mixed-only
         # and most cluster geometry is clustered-only.
-        mixed_paste_active = not bool(self.skip_paste_blobs_with_crossing.get())
-        clustered_paste_active = not bool(self.skip_paste_blobs_clustered.get())
-        any_paste_active = mixed_paste_active or clustered_paste_active
 
         set_keys("Create with crossing", ["NOISE_ENABLE"], any_paste_active)
         noise_enabled = False
@@ -1284,12 +1305,19 @@ class ConfigGUI(ctk.CTk):
 
         shared_paste_keys = [
             "MAX_OVERLAP", "PASTE_SCALE_MIN", "PASTE_SCALE_MAX",
-            "WIDTH_SCALE_MIN", "WIDTH_SCALE_MAX", "MASK_EXPANSION_RATIO",
+            "WIDTH_SCALE_MIN", "WIDTH_SCALE_MAX",
             "BRIGHT_MIN", "BRIGHT_MAX", "CONTRAST_MIN", "CONTRAST_MAX",
             "PASTE_LAYER_MODE", "ALPHA_MODE",
             "FEATHER_MIN", "FEATHER_MAX", "MAX_TRIES",
         ]
         set_keys("Create with crossing", shared_paste_keys, any_paste_active)
+        # MASK_EXPANSION_RATIO is also used when extracting direction-training
+        # objects, so it stays editable if that stage remains active.
+        set_keys(
+            "Create with crossing",
+            ["MASK_EXPANSION_RATIO"],
+            trajectory_active or any_paste_active,
+        )
 
         paste_widgets = self.sections.get("Create with crossing", {}).get("widgets", {})
         paste_layer_mode = str(
@@ -1310,35 +1338,53 @@ class ConfigGUI(ctk.CTk):
             ["OCCLUDER_MARGIN"],
             any_paste_active and paste_layer_mode in {"under", "mixed"},
         )
+        blur_consumed = trajectory_active or crop_active or (
+            any_paste_active and alpha_mode == "gaussian"
+        )
         set_keys(
             "Create with crossing",
             ["EDGE_BLUR_KSIZE", "EDGE_BLUR_SIGMA"],
-            any_paste_active and alpha_mode == "gaussian",
+            blur_consumed,
         )
         for blur_key in ("EDGE_BLUR_KSIZE", "EDGE_BLUR_SIGMA"):
             if ("Create with crossing", blur_key) in self._parameter_rows:
                 self._set_parameter_row_visible(
-                    "Create with crossing", blur_key, alpha_mode == "gaussian"
+                    "Create with crossing", blur_key, blur_consumed
                 )
 
-        # CLUSTERED_RATIO also determines the non-clustered target, so it
-        # remains relevant while either paste generator runs.
-        set_keys("Create with crossing", ["CLUSTERED_RATIO"], any_paste_active)
+        # CLUSTERED_RATIO also drives automatic CLUSTER_FRAMES and final
+        # dataset composition, so it remains relevant beyond paste generation.
+        set_keys(
+            "Create with crossing",
+            ["CLUSTERED_RATIO"],
+            initial_active or any_paste_active or dataset_active,
+        )
         set_keys(
             "Create with crossing",
             [
-                "CLUSTER_COUNT", "CLUSTER_FRAMES", "CLUSTER_FIT_LONG",
+                "CLUSTER_COUNT", "CLUSTER_FIT_LONG",
                 "CLUSTER_FIT_SHORT", "CLUSTER_BREAK_PROB",
             ],
             clustered_paste_active,
         )
+        set_keys(
+            "Create with crossing",
+            ["CLUSTER_FRAMES"],
+            initial_active or clustered_paste_active or dataset_active,
+        )
 
-        # Dataset and training stages.
-        dataset_active = not bool(self.skip_creating_direction_dataset.get())
+        # Dataset controls. NUM_CROPS and LOCALIZED are also consumed by paste
+        # synthesis/cropping, so they do not follow dataset skip alone.
+        set_keys("Create dataset", ["VAL_RATIO"], dataset_active)
         set_keys(
             "Create dataset",
-            list(self.sections.get("Create dataset", {}).get("widgets", {}).keys()),
-            dataset_active,
+            ["NUM_CROPS"],
+            initial_active or any_paste_active or crop_active or dataset_active,
+        )
+        set_keys(
+            "Create dataset",
+            ["LOCALIZED"],
+            initial_active or mixed_paste_active or crop_active,
         )
 
         training_active = not bool(self.skip_training.get())
@@ -1374,10 +1420,16 @@ class ConfigGUI(ctk.CTk):
             detection_active or id_tracking_active,
         )
 
-        # Shared by ID Tracking and Refinement.
+        # MATCH_IOU is also consumed by Initial Tracking. MATCH_ANGLE and
+        # MAX_AGE are shared by ID Tracking and Refinement.
         set_keys(
             "Analysis",
-            ["MATCH_IOU", "MATCH_ANGLE", "MAX_AGE"],
+            ["MATCH_IOU"],
+            initial_active or id_tracking_active or refinement_active,
+        )
+        set_keys(
+            "Analysis",
+            ["MATCH_ANGLE", "MAX_AGE"],
             id_tracking_active or refinement_active,
         )
 
