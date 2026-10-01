@@ -99,6 +99,7 @@ from without_direction_estimation.multi_staged_association import (
 )
 from random_utils import derive_seed, normalize_seed
 from tracking_constants import DEFAULT_INTERACT_IOU
+from tracking_video_inputs import configured_tracking_video_files
 FILLED_ARTIFACT_SUFFIX = 'filled'
 ID_RESOLVED_ARTIFACT_SUFFIX = 'id_resolved'
 
@@ -3772,22 +3773,12 @@ def main() -> None:
         requested_direction_weights,
     )
 
-    if os.path.isdir(video_path_in):
-        video_names = [
-            os.path.splitext(f)[0]
-            for f in sorted(os.listdir(video_path_in))
-            if os.path.isfile(os.path.join(video_path_in, f))
-            and f.lower().endswith(('.mp4', '.avi', '.mov', '.m4v'))
-        ]
-        video_paths = {
-            os.path.splitext(f)[0]: os.path.join(video_path_in, f)
-            for f in sorted(os.listdir(video_path_in))
-            if os.path.isfile(os.path.join(video_path_in, f))
-            and f.lower().endswith(('.mp4', '.avi', '.mov', '.m4v'))
-        }
-    else:
-        video_names = [os.path.splitext(os.path.basename(video_path_in))[0]]
-        video_paths = {video_names[0]: video_path_in}
+    video_files = configured_tracking_video_files(cfg, video_path_in)
+    video_paths = {
+        os.path.splitext(os.path.basename(path))[0]: path
+        for path in video_files
+    }
+    video_names = list(video_paths)
     if not video_names:
         raise RuntimeError(f'No video files found at: {video_path_in}')
 
