@@ -22,6 +22,10 @@ CONFIG_PATH_KEYS = (
     "YOLO_DATASET_DIR",
 )
 
+CONFIG_PATH_LIST_KEYS = (
+    "TRACKING_VIDEO_FILES",
+)
+
 
 def _portable_relative_path(path: str) -> str:
     """Store relative config paths with POSIX separators on every operating system."""
@@ -78,6 +82,9 @@ def resolve_config_paths(cfg: dict) -> dict:
     for key in CONFIG_PATH_KEYS:
         if key in cfg and cfg[key]:
             cfg[key] = resolve_path(cfg[key], session_path)
+    for key in CONFIG_PATH_LIST_KEYS:
+        if key in cfg:
+            cfg[key] = _map_source_dirs(cfg[key], resolve_path, session_path)
     if "CREATE_DATASET_SOURCE_DIRS" in cfg:
         cfg["CREATE_DATASET_SOURCE_DIRS"] = _map_source_dirs(
             cfg["CREATE_DATASET_SOURCE_DIRS"], resolve_path, session_path
@@ -95,6 +102,9 @@ def relativize_config_paths(cfg: dict) -> dict:
     for key in CONFIG_PATH_KEYS:
         if key in out and out[key]:
             out[key] = to_relative_path(out[key], session_path)
+    for key in CONFIG_PATH_LIST_KEYS:
+        if key in out:
+            out[key] = _map_source_dirs(out[key], to_relative_path, session_path)
     if "CREATE_DATASET_SOURCE_DIRS" in out:
         out["CREATE_DATASET_SOURCE_DIRS"] = _map_source_dirs(
             out["CREATE_DATASET_SOURCE_DIRS"], to_relative_path, session_path
