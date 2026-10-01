@@ -25,6 +25,9 @@ _CONFIG_PATH_KEYS = (
     "INIT_CSV_PATH",
     "YOLO_DATASET_DIR",
 )
+_CONFIG_PATH_LIST_KEYS = (
+    "TRACKING_VIDEO_FILES",
+)
 _VIDEO_KEYS = ("TRAINING_VIDEO_PATH", "TRACKING_VIDEO_PATH")
 _VIDEO_SUFFIXES = VIDEO_DROP_SUFFIXES
 _SKIP_SEARCH_DIRS = frozenset({".git", ".venv", "venv", "__pycache__"})
@@ -116,7 +119,12 @@ def relocate_config_paths(cfg: dict, config_path: str) -> tuple[dict, ConfigRelo
     new_config_dir = os.path.dirname(selected_config)
     raw_values = {
         key: copy.deepcopy(result.get(key))
-        for key in (*_CONFIG_PATH_KEYS, "SESSION_PATH", "CREATE_DATASET_SOURCE_DIRS")
+        for key in (
+            *_CONFIG_PATH_KEYS,
+            *_CONFIG_PATH_LIST_KEYS,
+            "SESSION_PATH",
+            "CREATE_DATASET_SOURCE_DIRS",
+        )
         if key in result
     }
     old_session_path = _resolve_session_path(result.get("SESSION_PATH", ""), new_config_dir)
@@ -128,7 +136,7 @@ def relocate_config_paths(cfg: dict, config_path: str) -> tuple[dict, ConfigRelo
         new_session_path = new_config_dir
         relocated = True
         result["SESSION_PATH"] = new_session_path
-        for key in _CONFIG_PATH_KEYS:
+        for key in (*_CONFIG_PATH_KEYS, *_CONFIG_PATH_LIST_KEYS):
             if key in result:
                 result[key] = _relocate_value(result[key], old_config_dir, new_config_dir)
         if "CREATE_DATASET_SOURCE_DIRS" in result:
