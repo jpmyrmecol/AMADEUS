@@ -76,6 +76,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_refinement
     from config_path_recovery import prepare_config_for_gui
 from tracking_artifacts import artifact_path as tracking_artifact_path
 from training_paths import OUTPUT_ROOT_DIR
+from tracking_video_inputs import configured_tracking_video_files
 from experiment_utils import (
     DEFAULT_LR0,
     DEFAULT_LRF,
@@ -255,12 +256,12 @@ def video_stem(path: str) -> str:
     return os.path.splitext(os.path.basename(path))[0]
 
 
-def list_video_files(video_path_in: str) -> list[str]:
-    if os.path.isdir(video_path_in):
-        files = [os.path.join(video_path_in, f) for f in sorted(os.listdir(video_path_in)) if f.lower().endswith(VIDEO_SUFFIXES)]
-    else:
-        files = [video_path_in]
-    return [f for f in files if os.path.isfile(f)]
+def list_video_files(cfg: dict, video_path_in: str) -> list[str]:
+    return [
+        path
+        for path in configured_tracking_video_files(cfg, video_path_in)
+        if os.path.isfile(path)
+    ]
 
 
 def artifact_filename(base_name: str, suffix: str = "") -> str:
@@ -1126,7 +1127,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
             weights = [o["weight"] for o in self.available_weight_options] or parse_weight_spec(None)
         else:
             weights = [selected_weight]
-        video_files = list_video_files(tracking_video_path) if tracking_video_path else []
+        video_files = list_video_files(cfg, tracking_video_path) if tracking_video_path else []
         video_lookup = {video_stem(p): p for p in video_files}
         datasets: list[dict] = []
         seen: set[tuple[str, str, str]] = set()
