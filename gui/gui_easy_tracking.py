@@ -273,6 +273,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._ui_event_poll_id: str | None = None
         self._batch_proc: subprocess.Popen | None = None
         self._batch_log_path: str = ""
+        self._active_config_path: str = ""
         self._stop_requested = False
         self._last_run_state = "idle"
         self._base_cfg: dict = {}
@@ -988,7 +989,7 @@ class EasyTrackingGUI(ctk.CTk):
 
         batch_running = self._batch_proc is not None and self._batch_proc.poll() is None
         if batch_running or self._last_run_state == "running":
-            message = "Processing is running. No action is required. Please wait."
+            message = "Have a cup of tea and take a break."
         elif not self._video_entry.get().strip():
             message = "1. Select a video file."
         elif (
@@ -1002,11 +1003,11 @@ class EasyTrackingGUI(ctk.CTk):
         elif not self._variable_count.get() and not self._num_confirmed:
             message = "3. Set the number of animals and press Enter."
         elif self._last_run_state == "complete":
-            message = "Processing is complete. Click Open results to inspect the output."
+            message = "Processing is complete. Click Open results to view the results."
         elif self._last_run_state == "failed":
             message = "Processing failed. Review the error and log, then click Processing to retry."
         elif self._last_run_state == "stopped":
-            message = "Processing was stopped. Click Processing when you are ready to run it again."
+            message = "Processing was stopped. Update the settings as needed, then click Processing to resume."
         elif self._single_animal_skips_paste():
             message = "4. Click Processing. No further setup is required for a single animal."
         elif self._without_direction.get():
@@ -2122,8 +2123,6 @@ class EasyTrackingGUI(ctk.CTk):
         for key, value in (flags or {}).items():
             if key in merged:
                 merged[key] = bool(value)
-        if merged.get("skip_id_tracking", False):
-            merged["skip_refinement"] = True
         self._skip_flags = merged
         if hasattr(self, "_num_objects_sb"):
             self._apply_individual_count_state()
@@ -2307,8 +2306,6 @@ class EasyTrackingGUI(ctk.CTk):
             return False
         _, skip_key, _ = STEPS[step_i]
         if skip_key == "skip_cropping" and self._skip_flags.get("skip_creating_direction_dataset", False):
-            return True
-        if skip_key == "skip_refinement" and self._skip_flags.get("skip_id_tracking", False):
             return True
         return bool(self._skip_flags.get(skip_key, False))
 
@@ -2882,6 +2879,7 @@ class EasyTrackingGUI(ctk.CTk):
         if cfg_path is None:
             return
 
+        self._active_config_path = cfg_path
         loaded_flags = {key: cfg.get(key, self._skip_flags.get(key, False)) for key in self._default_skip_flags()}
         self._set_skip_flags(loaded_flags, render=False)
         self._base_cfg = copy.deepcopy(cfg)
@@ -3090,7 +3088,67 @@ class EasyTrackingGUI(ctk.CTk):
         if self._canvas_poll_id is None:
             self._canvas_poll()
 
+    def _persist_completed_step_skips(self, step_i: int) -> None:
+        """Persist completed Easy Tracking progress into the active config.
+
+        Every successfully completed stage and every earlier stage is marked
+        skip=true so a stopped run can resume from the next unfinished stage.
+        The file is re-read first because processing stages may have persisted
+        other automatic parameters while the batch was running.
+        """
+        if step_i < 0:
+            return
+        path = self._active_config_path or self._loaded_config_path
+        if not path:
+            return
+
+        last_i = min(int(step_i), len(STEPS) - 1)
+        completed_keys = [STEPS[i][1] for i in range(last_i + 1)]
+        temp_path = ""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            if not isinstance(cfg, dict):
+                raise ValueError("config root must be a mapping")
+
+            changed = False
+            for key in completed_keys:
+                if cfg.get(key) is not True:
+                    cfg[key] = True
+                    changed = True
+
+            if changed:
+                temp_path = f"{path}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    yaml.dump(cfg, f, sort_keys=False, allow_unicode=True)
+                os.replace(temp_path, path)
+                temp_path = ""
+
+            for key in completed_keys:
+                self._skip_flags[key] = True
+                self._base_cfg[key] = True
+                self._loaded_cfg[key] = True
+
+            if changed:
+                print(
+                    f"[INFO] Easy Tracking resume progress saved through {STEPS[last_i][2]}: "
+                    f"{', '.join(completed_keys)}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f"[WARN] Could not persist Easy Tracking resume progress to {path}: {exc}",
+                flush=True,
+            )
+        finally:
+            if temp_path:
+                try:
+                    os.remove(temp_path)
+                except FileNotFoundError:
+                    pass
+
     def _on_step_done(self, vis_i: int, step_i: int, script: str) -> None:
+        self._persist_completed_step_skips(step_i)
         self._done_steps.add(step_i)
         if self._active_block_vis == vis_i:
             self._active_block_vis = -1
@@ -3130,6 +3188,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._selected_block = -1
         flags = {key: self._base_cfg.get(key, False) for key in self._default_skip_flags()}
         self._set_skip_flags(flags, render=True)
+        self._active_config_path = ""
 
         self._run_btn.configure(state="normal")
         self._switch_btn.configure(state="normal")
