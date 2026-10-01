@@ -1386,10 +1386,7 @@ def _use_single_animal_images_source(cfg: dict, session_path: str) -> bool:
 
 
 def _images_per_frame_from_cfg(cfg: dict, include_full_resized: bool, include_crop_highres: bool) -> int:
-    if cfg_bool(cfg, "skip_cropping", False):
-        crop_outputs = 0
-    else:
-        crop_outputs = int(cfg.get("NUM_CROPS", 2)) * int(bool(include_crop_highres))
+    crop_outputs = int(cfg.get("NUM_CROPS", 2)) * int(bool(include_crop_highres))
     return crop_outputs + int(bool(include_full_resized))
 
 
@@ -1422,8 +1419,10 @@ def _rerun_crop_if_needed(
     *,
     append: bool = False,
 ) -> None:
-    if needs_crops and not cfg_bool(cfg, "skip_cropping", False):
-        overrides = {"CROP_APPEND": True} if append else {}
+    if needs_crops:
+        overrides = {"skip_cropping": False}
+        if append:
+            overrides["CROP_APPEND"] = True
         suffix = "crop_append" if append else "crop"
         _run_python_stage("crop_images.py", cfg, overrides, suffix)
 
@@ -1500,6 +1499,7 @@ def ensure_generation_targets(
                 {
                     "CLUSTER_FRAMES": int(next_frames),
                     "CLUSTER_APPEND": True,
+                    "skip_paste_blobs_clustered": False,
                     "RANDOM_SEED": derive_seed(
                         normalize_seed(cfg.get("RANDOM_SEED", 0)),
                         "create_dataset",
@@ -1558,6 +1558,7 @@ def ensure_generation_targets(
                 {
                     "PASTE_BLOBS_NUM_FRAMES": int(next_frames),
                     "PASTE_BLOBS_APPEND": True,
+                    "skip_paste_blobs_with_crossing": False,
                     "RANDOM_SEED": derive_seed(
                         normalize_seed(cfg.get("RANDOM_SEED", 0)),
                         "create_dataset",
