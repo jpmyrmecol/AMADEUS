@@ -832,12 +832,12 @@ def main() -> None:
         video_names = [
             os.path.splitext(f)[0]
             for f in os.listdir(video_path_in)
-            if f.lower().endswith(('.mp4', '.avi', '.mov'))
+            if f.lower().endswith(('.mp4', '.avi', '.mov', '.m4v'))
         ]
         video_paths = {
             os.path.splitext(f)[0]: os.path.join(video_path_in, f)
             for f in os.listdir(video_path_in)
-            if f.lower().endswith(('.mp4', '.avi', '.mov'))
+            if f.lower().endswith(('.mp4', '.avi', '.mov', '.m4v'))
         }
     else:
         video_names = [os.path.splitext(os.path.basename(video_path_in))[0]]

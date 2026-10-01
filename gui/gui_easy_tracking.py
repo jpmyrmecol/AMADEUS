@@ -264,6 +264,9 @@ _C_DISABLED  = "#252525"
 _C_BG_ROW    = "#1e1e1e"
 _WIDTH_SCALE_MIN = 0.9
 _WIDTH_SCALE_MAX = 1.1
+# Directory analysis intentionally uses containers that the full tracking
+# pipeline reads directly without per-file compatibility conversion.
+_DIRECTORY_VIDEO_SUFFIXES = (".mp4", ".avi", ".mov", ".m4v")
 
 
 class EasyTrackingGUI(ctk.CTk):
@@ -450,7 +453,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._tracking_video_button.pack(side="left", padx=3)
         self._tracking_video_dir_checkbox = ctk.CTkCheckBox(
             analysis_row,
-            text="Directory",
+            text="Select Directory",
             variable=self._tracking_video_is_dir,
             command=self._on_tracking_video_mode_changed,
             width=100,
@@ -2724,7 +2727,7 @@ class EasyTrackingGUI(ctk.CTk):
             direct_videos = [
                 name for name in os.listdir(tracking_video)
                 if os.path.isfile(os.path.join(tracking_video, name))
-                and os.path.splitext(name)[1].lower() in VIDEO_DROP_SUFFIXES
+                and os.path.splitext(name)[1].lower() in _DIRECTORY_VIDEO_SUFFIXES
             ]
             if not direct_videos:
                 messagebox.showerror(

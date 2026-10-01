@@ -647,7 +647,7 @@ def main() -> None:
     all_jobs = direction_jobs
 
     if os.path.isdir(video_path_in):
-        video_files = [os.path.join(video_path_in, f) for f in os.listdir(video_path_in) if f.lower().endswith(('.mp4', '.avi', '.mov'))]
+        video_files = [os.path.join(video_path_in, f) for f in os.listdir(video_path_in) if f.lower().endswith(('.mp4', '.avi', '.mov', '.m4v'))]
     else:
         video_files = [video_path_in]
     if not video_files:

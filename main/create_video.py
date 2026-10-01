@@ -370,7 +370,7 @@ def list_video_files(video_path_in: str) -> list[str]:
         video_files = [
             os.path.join(video_path_in, f)
             for f in sorted(os.listdir(video_path_in))
-            if f.lower().endswith((".mp4", ".avi", ".mov", ".mkv", ".m4v"))
+            if f.lower().endswith((".mp4", ".avi", ".mov", ".m4v"))
         ]
     else:
         video_files = [video_path_in]
