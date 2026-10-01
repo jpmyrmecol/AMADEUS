@@ -36,6 +36,7 @@ PROFILES = {
         "cu132",
         "https://download.pytorch.org/whl/cu132",
         "13.2",
+        install_dependencies=True,
         sync_extra="cpu",
     ),
     # PyTorch 2.14 + CUDA 12.6 is the final prebuilt line retaining
