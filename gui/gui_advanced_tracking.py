@@ -309,6 +309,7 @@ class ConfigGUI(ctk.CTk):
         self.stop_btn.pack(side="left", padx=8, pady=8)
         self.proc = None
         self._batch_log_path = ""
+        self._run_config_path = ""
         self._stop_requested = False
         _layout_frame(bottom).pack(side="left", expand=True)
 
@@ -2345,6 +2346,14 @@ class ConfigGUI(ctk.CTk):
         elif "] END:   " in line:
             script = line.split("] END:   ", 1)[-1].split("  (")[0].strip()
             self.after(0, lambda s=script: self._set_run_progress(1.0, s + " done"))
+            if script == "initial_tracking":
+                config_path = self._run_config_path
+                self.after(
+                    0,
+                    lambda p=config_path: self._reload_auto_params_from_config(
+                        p, show_error=False
+                    ),
+                )
 
     def _monitor_proc_output(self):
         state = {"last_was_tqdm": False, "last_tqdm_len": 0}
@@ -2406,6 +2415,7 @@ class ConfigGUI(ctk.CTk):
         self._stop_requested = False
         session = self.basic_entries["SESSION_PATH"].get()
         yaml_path = os.path.join(session, "config.yaml")
+        self._run_config_path = yaml_path
 
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
@@ -2493,24 +2503,103 @@ class ConfigGUI(ctk.CTk):
 
         threading.Thread(target=_pump, daemon=True).start()
 
-    def _reload_adjusted_config(self, yaml_path: str):
+    @staticmethod
+    def _set_widget_value_preserve_state(widget, value) -> None:
+        """Set a GUI value even when the control is currently disabled."""
+        if value is None:
+            return
+        if isinstance(value, list):
+            value = ",".join(str(x) for x in value)
+        if isinstance(widget, tk.Variable):
+            try:
+                widget.set(value)
+            except Exception:
+                widget.set(str(value))
+            return
+        if isinstance(widget, ctk.CTkComboBox):
+            candidate = str(value).strip()
+            try:
+                values = list(widget.cget("values"))
+                if candidate not in values:
+                    for option in values:
+                        if str(option).lower() == candidate.lower():
+                            candidate = option
+                            break
+            except Exception:
+                pass
+            restore_state = None
+            try:
+                current_state = str(widget.cget("state"))
+                if current_state == "disabled":
+                    restore_state = current_state
+                    widget.configure(state="normal")
+            except Exception:
+                pass
+            try:
+                widget.set(candidate)
+            finally:
+                if restore_state is not None:
+                    try:
+                        widget.configure(state=restore_state)
+                    except Exception:
+                        pass
+            return
+
+        restore_state = None
+        try:
+            current_state = str(widget.cget("state"))
+            if current_state in {"disabled", "readonly"}:
+                restore_state = current_state
+                try:
+                    widget.configure(state="normal")
+                except Exception:
+                    widget.config(state="normal")
+        except Exception:
+            pass
+        try:
+            widget.delete(0, tk.END)
+            widget.insert(0, str(value))
+        finally:
+            if restore_state is not None:
+                try:
+                    widget.configure(state=restore_state)
+                except Exception:
+                    try:
+                        widget.config(state=restore_state)
+                    except Exception:
+                        pass
+
+    def _reload_auto_params_from_config(
+        self,
+        yaml_path: str,
+        *,
+        show_error: bool = False,
+    ) -> dict | None:
+        """Reload only the six AUTO_PARAMS outputs into Advanced Tracking."""
+        if not yaml_path:
+            return None
         try:
             with open(yaml_path, "r", encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}
             cfg = resolve_config_paths(cfg)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to reload adjusted config:\n{e}")
-            return
+            if not isinstance(cfg, dict):
+                raise ValueError("config root must be a mapping")
+        except Exception as exc:
+            if show_error:
+                messagebox.showerror("Error", f"Failed to reload auto parameters:\n{exc}")
+            else:
+                print(
+                    f"[WARN] Could not refresh auto parameters from {yaml_path}: {exc}",
+                    flush=True,
+                )
+            return None
 
         if not bool(cfg.get("AUTO_PARAMS", True)):
-            messagebox.showinfo(
-                "Adjust Parameters",
-                "AUTO_PARAMS is Off, so the measured values were logged to "
-                "tracking_stats.csv but not applied to the config.",
-            )
-            return
+            return None
 
         analysis_cfg = cfg.get("analysis", {}) or {}
+        if not isinstance(analysis_cfg, dict):
+            analysis_cfg = {}
         updates = {
             "LOCALIZED": cfg.get("LOCALIZED"),
             "NUM_CROPS": cfg.get("NUM_CROPS"),
@@ -2520,30 +2609,55 @@ class ConfigGUI(ctk.CTk):
             "MATCH_IOU": analysis_cfg.get("MATCH_IOU"),
         }
 
-        def _set_value(widget, value):
-            if value is None:
-                return
-            if isinstance(widget, tk.BooleanVar):
-                widget.set(bool(value))
-            elif isinstance(widget, ctk.CTkComboBox):
-                widget.set(str(value))
-            else:
-                widget.delete(0, tk.END)
-                widget.insert(0, str(value))
-
         for key, value in updates.items():
+            if value is None:
+                continue
             for section in self.sections.values():
                 widget = section.get("widgets", {}).get(key)
                 if widget is not None:
-                    _set_value(widget, value)
+                    self._set_widget_value_preserve_state(widget, value)
+                    break
+
+        # Keep only the corresponding in-memory config values synchronized;
+        # no unrelated user input is reloaded or overwritten.
+        for key in ("LOCALIZED", "NUM_CROPS", "FREE_SCALE", "DIR_MIN_SEC", "CLUSTER_FRAMES"):
+            if updates[key] is not None:
+                self._loaded_cfg[key] = updates[key]
+        if updates["MATCH_IOU"] is not None:
+            loaded_analysis = self._loaded_cfg.setdefault("analysis", {})
+            if isinstance(loaded_analysis, dict):
+                loaded_analysis["MATCH_IOU"] = updates["MATCH_IOU"]
 
         self._capture_auto_param_values(cfg)
         self._refresh_default_markers()
+        self._refresh_skip_dependent_states()
+        print(
+            "[INFO] Advanced Tracking GUI refreshed AUTO_PARAMS: "
+            + ", ".join(f"{key}={value}" for key, value in updates.items()),
+            flush=True,
+        )
+        return updates
+
+    def _reload_adjusted_config(self, yaml_path: str):
+        updates = self._reload_auto_params_from_config(yaml_path, show_error=True)
+        if updates is None:
+            try:
+                with open(yaml_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            except Exception:
+                return
+            if not bool(cfg.get("AUTO_PARAMS", True)):
+                messagebox.showinfo(
+                    "Adjust Parameters",
+                    "AUTO_PARAMS is Off, so the measured values were logged to "
+                    "tracking_stats.csv but not applied to the config.",
+                )
+            return
+
         messagebox.showinfo(
             "Adjust Parameters",
             "Auto parameters updated from the current segmentation results:\n"
             f"  MATCH_IOU = {updates['MATCH_IOU']}\n"
-            f"  INTERACT_IOU = {(cfg.get('EMBEDDING', {}) or {}).get('INTERACT_IOU', DEFAULT_INTERACT_IOU)}\n"
             f"  DIR_MIN_SEC = {updates['DIR_MIN_SEC']}\n"
             f"  LOCALIZED = {updates['LOCALIZED']}\n"
             f"  NUM_CROPS = {updates['NUM_CROPS']}\n"
@@ -2625,6 +2739,7 @@ class ConfigGUI(ctk.CTk):
         self.run_btn.configure(state="normal")
         self.switch_easy_btn.configure(state="normal")
         self._direction_mode_checkbox.configure(state="normal")
+        self._run_config_path = ""
 
     @staticmethod
     def _cast(key: str, value):
