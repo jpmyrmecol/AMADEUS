@@ -720,7 +720,12 @@ def compute_auto_params(
             float(cfg.get("DIR_MIN_DISP", DEFAULT_DIR_MIN_DISP)),
         )
         motion_fallback = ""
-    interact_iou = FIXED_INTERACT_IOU
+    embedding_cfg = cfg.get("EMBEDDING", {}) or {}
+    if not isinstance(embedding_cfg, dict):
+        raise ValueError("EMBEDDING must be a mapping.")
+    interact_iou = float(embedding_cfg.get("INTERACT_IOU", FIXED_INTERACT_IOU))
+    if not np.isfinite(interact_iou) or not 0.0 <= interact_iou <= 1.0:
+        raise ValueError("EMBEDDING.INTERACT_IOU must be between 0 and 1.")
 
     num_crops = (
         1
@@ -754,27 +759,14 @@ def compute_auto_params(
 
 
 def _apply_auto_params(cfg: dict, auto_params: dict) -> None:
-    """Apply the six measured values plus the fixed interaction threshold."""
+    """Apply measured automatic parameters without changing INTERACT_IOU."""
     for key in ("LOCALIZED", "NUM_CROPS", "FREE_SCALE", "DIR_MIN_SEC", "CLUSTER_FRAMES"):
         cfg[key] = auto_params[key]
 
     analysis_cfg = cfg.setdefault("analysis", {})
-    embedding_cfg = cfg.setdefault("EMBEDDING", {})
     if not isinstance(analysis_cfg, dict):
         raise ValueError("analysis must be a mapping.")
-    if not isinstance(embedding_cfg, dict):
-        raise ValueError("EMBEDDING must be a mapping.")
     analysis_cfg["MATCH_IOU"] = auto_params["MATCH_IOU"]
-    embedding_cfg["INTERACT_IOU"] = FIXED_INTERACT_IOU
-
-
-def _apply_fixed_interact_iou(cfg: dict) -> bool:
-    embedding_cfg = cfg.setdefault("EMBEDDING", {})
-    if not isinstance(embedding_cfg, dict):
-        raise ValueError("EMBEDDING must be a mapping.")
-    changed = embedding_cfg.get("INTERACT_IOU") != FIXED_INTERACT_IOU
-    embedding_cfg["INTERACT_IOU"] = FIXED_INTERACT_IOU
-    return changed
 
 
 def _dump_config_atomic(path: str, cfg: dict) -> None:
@@ -802,17 +794,15 @@ def _persist_auto_params_if_enabled(
     cfg: dict,
     auto_params: dict,
 ) -> bool:
-    """Persist auto values when enabled and always normalize INTERACT_IOU."""
+    """Persist measured auto values only when AUTO_PARAMS is enabled."""
     auto_enabled = bool(cfg.get("AUTO_PARAMS", True))
-    fixed_value_changed = _apply_fixed_interact_iou(cfg)
-    if auto_enabled:
-        _apply_auto_params(cfg, auto_params)
-    if not auto_enabled and not fixed_value_changed:
+    if not auto_enabled:
         return False
+    _apply_auto_params(cfg, auto_params)
     # cfg is kept absolute in memory for the rest of this process; only the
     # on-disk copy stores paths relative to SESSION_PATH.
     _dump_config_atomic(cfg_path, relativize_config_paths(cfg))
-    return auto_enabled
+    return True
 
 def save_assignments(rows: List[Dict[str, object]], out_dir: str, tracking_stats: Dict[str, object]) -> Tuple[str, str]:
     csv_path = os.path.join(out_dir, "track_assignments.csv")
@@ -958,7 +948,7 @@ def _prepare_context(cfg_path: str, cfg: dict) -> dict:
     if auto_params.get("motion_fallback"):
         print(f"[initial_tracking]   motion_fallback={auto_params['motion_fallback']}")
     print(f"[initial_tracking]   auto MATCH_IOU={auto_params['MATCH_IOU']:.1f}")
-    print(f"[initial_tracking]   fixed INTERACT_IOU={auto_params['INTERACT_IOU']:.1f}")
+    print(f"[initial_tracking]   configured INTERACT_IOU={auto_params['INTERACT_IOU']:.3f}")
     print(f"[initial_tracking]   auto DIR_MIN_SEC={auto_params['DIR_MIN_SEC']:.2f}")
 
     if _persist_auto_params_if_enabled(cfg_path, cfg, auto_params):
@@ -966,7 +956,7 @@ def _prepare_context(cfg_path: str, cfg: dict) -> dict:
     else:
         print(
             "[initial_tracking]   AUTO_PARAMS=False; measured auto values were not applied; "
-            f"INTERACT_IOU remains fixed at {FIXED_INTERACT_IOU:.1f}"
+            f"configured INTERACT_IOU={auto_params['INTERACT_IOU']:.3f}"
         )
 
     analysis_cfg = cfg.get("analysis", {}) or {}

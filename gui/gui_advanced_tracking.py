@@ -707,7 +707,7 @@ class ConfigGUI(ctk.CTk):
                 ("MAX_AXIS_ERR", "Max Axis Error (deg)", 45.0),
                 ("MAX_AGE", "Max Age (frames)", 10),
                 ("FLIP_SEC", "Flip Duration (sec)", 5.0),
-                ("INTERACT_IOU", "Interact OBB IoU (fixed)", FIXED_INTERACT_IOU),
+                ("INTERACT_IOU", "Interact OBB IoU", FIXED_INTERACT_IOU),
                 ("IOU_WEIGHT", "IoU Weight", 1.0),
                 ("DIRECTION_WEIGHT", "Direction Weight", 1.0),
                 ("MISS_WEIGHT", "Miss Weight", 1.0),
@@ -731,8 +731,6 @@ class ConfigGUI(ctk.CTk):
                 (self.skip_refinement, "Skip Refinement"),
             ],
         )
-        self.sections["Analysis"]["widgets"]["INTERACT_IOU"].configure(state="disabled")
-
         # Create Video
         create_video_fields = {
             "Draw Elements": [
@@ -1411,10 +1409,9 @@ class ConfigGUI(ctk.CTk):
             embedding_details_active,
         )
 
-        # Fixed threshold is intentionally display-only.
-        interact_iou = analysis_widgets.get("INTERACT_IOU")
-        if interact_iou is not None:
-            interact_iou.configure(state="disabled")
+        # INTERACT_IOU is shared across multiple stages and remains editable
+        # regardless of the individual Analysis skip states.
+        set_keys("Analysis", ["INTERACT_IOU"], True)
 
         for widget in getattr(self, "analysis_range", {}).values():
             try:
@@ -1702,7 +1699,7 @@ class ConfigGUI(ctk.CTk):
         if not isinstance(embedding_cfg, dict):
             messagebox.showerror("Error", "EMBEDDING must be a mapping.")
             return False
-        embedding_cfg["INTERACT_IOU"] = FIXED_INTERACT_IOU
+        embedding_cfg.setdefault("INTERACT_IOU", FIXED_INTERACT_IOU)
         self._loaded_cfg = copy.deepcopy(cfg)
         self._loaded_training_video_path = str(cfg.get("TRAINING_VIDEO_PATH", "") or "")
 
@@ -2092,7 +2089,11 @@ class ConfigGUI(ctk.CTk):
                 config_key,
                 analysis_widgets[widget_key].get(),
             )
-        embedding_dict["INTERACT_IOU"] = FIXED_INTERACT_IOU
+        interact_iou = float(embedding_dict.get("INTERACT_IOU", FIXED_INTERACT_IOU))
+        if not math.isfinite(interact_iou) or not 0.0 <= interact_iou <= 1.0:
+            messagebox.showerror("Error", "INTERACT_IOU must be between 0 and 1.")
+            return False
+        embedding_dict["INTERACT_IOU"] = interact_iou
         cfg["EMBEDDING"] = embedding_dict
         create_video_cfg = dict(cfg.get("create_video", {}) or {})
         create_video_cfg.update({k: self._cast(k, w.get()) for k, w in self.sections["Create Video"]["widgets"].items()})
@@ -2464,7 +2465,7 @@ class ConfigGUI(ctk.CTk):
             "Adjust Parameters",
             "Auto parameters updated from the current segmentation results:\n"
             f"  MATCH_IOU = {updates['MATCH_IOU']}\n"
-            f"  INTERACT_IOU = {FIXED_INTERACT_IOU} (fixed)\n"
+            f"  INTERACT_IOU = {(cfg.get('EMBEDDING', {}) or {}).get('INTERACT_IOU', FIXED_INTERACT_IOU)}\n"
             f"  DIR_MIN_SEC = {updates['DIR_MIN_SEC']}\n"
             f"  LOCALIZED = {updates['LOCALIZED']}\n"
             f"  NUM_CROPS = {updates['NUM_CROPS']}\n"
