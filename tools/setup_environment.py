@@ -168,7 +168,6 @@ def select_torch_profiles() -> tuple[list[str], str]:
         capability = _nvidia_compute_capability()
         driver = _nvidia_driver_version()
         cuda12_min = (528, 33) if sys.platform == "win32" else (525, 60, 13)
-        blackwell_cu128_min = (570, 65) if sys.platform == "win32" else (570, 26)
         cuda13_min = (580,)
 
         if capability is not None and capability < (5, 0):
@@ -176,28 +175,6 @@ def select_torch_profiles() -> tuple[list[str], str]:
                 f"NVIDIA GPU0 compute capability is {capability[0]}.{capability[1]}; "
                 "current AMADEUS PyTorch profiles require Maxwell (CC 5.0) or newer. "
                 "Using the CPU profile."
-            )
-
-        if capability is not None and capability >= (10, 0):
-            if not _driver_at_least(driver, blackwell_cu128_min):
-                return ["cpu"], (
-                    f"NVIDIA Blackwell GPU0 compute capability is {capability[0]}.{capability[1]}, "
-                    "but the installed driver is too old for the CUDA 12.8+ builds that provide "
-                    "Blackwell kernels. Using the CPU profile. "
-                    + _nvidia_driver_diagnostic()
-                )
-            if not _driver_at_least(driver, cuda13_min):
-                return ["cu128"], (
-                    f"NVIDIA Blackwell GPU0 compute capability is {capability[0]}.{capability[1]}; "
-                    "the installed driver cannot run CUDA 13.x, so AMADEUS is using the retained "
-                    "PyTorch 2.7.1 + CUDA 12.8 compatibility profile. "
-                    + _nvidia_driver_diagnostic()
-                )
-            return ["cu132", "cu128"], (
-                f"NVIDIA Blackwell GPU0 compute capability is {capability[0]}.{capability[1]}; "
-                "trying PyTorch 2.14 + CUDA 13.2 first, with PyTorch 2.7.1 + CUDA 12.8 "
-                "available as the Blackwell compatibility fallback. "
-                + _nvidia_driver_diagnostic()
             )
 
         if not _driver_at_least(driver, cuda12_min):
@@ -221,12 +198,28 @@ def select_torch_profiles() -> tuple[list[str], str]:
             if capability is not None
             else "GPU0 compute capability could not be queried"
         )
+
+        if capability is not None and capability >= (10, 0):
+            if not _driver_at_least(driver, cuda13_min):
+                return ["cpu"], (
+                    f"NVIDIA Blackwell GPU0 compute capability is {capability[0]}.{capability[1]}, "
+                    "but Blackwell requires the CUDA 13.2 AMADEUS profile and the installed "
+                    "driver cannot run CUDA 13.x. Using the CPU profile. "
+                    + _nvidia_driver_diagnostic()
+                )
+            return ["cu132"], (
+                f"NVIDIA Blackwell GPU0 compute capability is {capability[0]}.{capability[1]}; "
+                "using PyTorch 2.14 + CUDA 13.2. "
+                + _nvidia_driver_diagnostic()
+            )
+
         if not _driver_at_least(driver, cuda13_min):
             return ["cu126"], (
                 f"An NVIDIA GPU was detected ({capability_text}), but the installed driver "
                 "cannot run CUDA 13.x. Using PyTorch 2.14 + CUDA 12.6. "
                 + _nvidia_driver_diagnostic()
             )
+
         return ["cu132", "cu126"], (
             f"An NVIDIA GPU was detected ({capability_text}); trying PyTorch 2.14 + CUDA 13.2 first. "
             "PyTorch 2.14 + CUDA 12.6 is retained as the compatibility fallback. "
@@ -516,7 +509,7 @@ print("[AMADEUS] PyTorch profile verification: OK")
         if len(detail) > 3000:
             detail = detail[-3000:]
         lines = ["PyTorch/torchvision environment verification failed."]
-        if profile in {"cu132", "cu128", "cu126"}:
+        if profile in {"cu132", "cu126"}:
             lines.append(_nvidia_driver_diagnostic())
             capability = _nvidia_compute_capability()
             if capability is not None:
@@ -526,18 +519,13 @@ print("[AMADEUS] PyTorch profile verification: OK")
             if profile == "cu132":
                 lines.append(
                     "CUDA 13.2 is the primary profile for Turing (CC 7.5) and newer GPUs "
-                    "with a CUDA 13-compatible NVIDIA driver."
-                )
-            elif profile == "cu128":
-                lines.append(
-                    "CUDA 12.8 with PyTorch 2.7.1 is retained specifically as the Blackwell "
-                    "compatibility profile when CUDA 13.x cannot be used."
+                    "with a CUDA 13-compatible NVIDIA driver, and is required for Blackwell."
                 )
             else:
                 lines.append(
                     "CUDA 12.6 with PyTorch 2.14 is retained for Maxwell, Pascal and Volta, "
-                    "and for newer GPUs whose driver cannot run CUDA 13.x. It does not provide "
-                    "Blackwell sm_100/sm_120 kernels."
+                    "and for Turing through Hopper when their driver cannot run CUDA 13.x. "
+                    "It does not provide Blackwell sm_100/sm_120 kernels."
                 )
         elif profile in {"rocm100", "rocmwin100"}:
             lines.append(
