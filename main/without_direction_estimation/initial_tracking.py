@@ -861,7 +861,13 @@ def save_assignments(rows: List[Dict[str, object]], out_dir: str, tracking_stats
     return csv_path, stats_path
 
 
-def _prepare_context(cfg_path: str, cfg: dict) -> dict:
+def _prepare_context(
+    cfg_path: str,
+    cfg: dict,
+    *,
+    force_auto_params: bool = False,
+    disable_auto_params_after_apply: bool = False,
+) -> dict:
     """Load the pickle, resolve the frame range, build the blob index, and
     measure + (if AUTO_PARAMS) apply the automatic config values.
 
@@ -951,7 +957,16 @@ def _prepare_context(cfg_path: str, cfg: dict) -> dict:
     print(f"[initial_tracking]   configured INTERACT_IOU={auto_params['INTERACT_IOU']:.3f}")
     print(f"[initial_tracking]   auto DIR_MIN_SEC={auto_params['DIR_MIN_SEC']:.2f}")
 
-    if _persist_auto_params_if_enabled(cfg_path, cfg, auto_params):
+    if force_auto_params:
+        _apply_auto_params(cfg, auto_params)
+        if disable_auto_params_after_apply:
+            cfg["AUTO_PARAMS"] = False
+        _dump_config_atomic(cfg_path, relativize_config_paths(cfg))
+        print(
+            "[initial_tracking]   explicit auto parameters applied to config; "
+            f"AUTO_PARAMS={bool(cfg.get('AUTO_PARAMS', True))}"
+        )
+    elif _persist_auto_params_if_enabled(cfg_path, cfg, auto_params):
         print(f"[initial_tracking]   applied to config (AUTO_PARAMS=True)")
     else:
         print(
@@ -1007,14 +1022,12 @@ def _run_main() -> None:
 
 
 def _run_adjust_only() -> None:
-    """Measure and (if AUTO_PARAMS) apply the auto values without
-    running the OBB IoU association or writing track_assignments.csv.
+    """Measure/apply auto values once, then return control to manual editing.
 
-    Lets the GUI show the freshly-measured config (LOCALIZED, MATCH_IOU, ...)
-    before the user commits to running the full pipeline. The full run later
-    measures again (compute_auto_params is deterministic given the same
-    segmentation output), so this is purely a fast preview step, not a
-    required prerequisite.
+    This explicit operation always calculates and stores the six measured
+    values, regardless of the current AUTO_PARAMS setting. It then persists
+    AUTO_PARAMS=False so a later full run reuses those values unless automatic
+    recalculation is explicitly enabled again.
     """
     if len(sys.argv) < 2:
         raise SystemExit("Usage: python initial_tracking.py config.yaml --adjust-only")
@@ -1023,8 +1036,16 @@ def _run_adjust_only() -> None:
 
     cfg_path = sys.argv[1]
     cfg = load_config(cfg_path)
-    _prepare_context(cfg_path, cfg)
-    print("[initial_tracking] adjust-only: done (initial tracking association was not run)")
+    _prepare_context(
+        cfg_path,
+        cfg,
+        force_auto_params=True,
+        disable_auto_params_after_apply=True,
+    )
+    print(
+        "[initial_tracking] adjust-only: done; measured values saved and "
+        "AUTO_PARAMS=False (initial tracking association was not run)"
+    )
 
 
 def main() -> None:

@@ -2573,6 +2573,7 @@ class ConfigGUI(ctk.CTk):
         yaml_path: str,
         *,
         show_error: bool = False,
+        require_auto_enabled: bool = True,
     ) -> dict | None:
         """Reload only the six AUTO_PARAMS outputs into Advanced Tracking."""
         if not yaml_path:
@@ -2593,7 +2594,7 @@ class ConfigGUI(ctk.CTk):
                 )
             return None
 
-        if not bool(cfg.get("AUTO_PARAMS", True)):
+        if require_auto_enabled and not bool(cfg.get("AUTO_PARAMS", True)):
             return None
 
         analysis_cfg = cfg.get("analysis", {}) or {}
@@ -2640,31 +2641,36 @@ class ConfigGUI(ctk.CTk):
         return updates
 
     def _reload_adjusted_config(self, yaml_path: str):
-        updates = self._reload_auto_params_from_config(yaml_path, show_error=True)
+        # Adjust Parameters is a one-shot measurement. The CLI stores the
+        # measured values and leaves AUTO_PARAMS=False afterward, so load those
+        # values even though automatic recalculation is now disabled.
+        updates = self._reload_auto_params_from_config(
+            yaml_path,
+            show_error=True,
+            require_auto_enabled=False,
+        )
         if updates is None:
-            try:
-                with open(yaml_path, "r", encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-            except Exception:
-                return
-            if not bool(cfg.get("AUTO_PARAMS", True)):
-                messagebox.showinfo(
-                    "Adjust Parameters",
-                    "AUTO_PARAMS is Off, so the measured values were logged to "
-                    "tracking_stats.csv but not applied to the config.",
-                )
             return
+
+        auto_var = self.sections["Initial Tracking"]["widgets"].get("AUTO_PARAMS")
+        if auto_var is not None:
+            auto_var.set(False)
+        if not isinstance(self._loaded_cfg, dict):
+            self._loaded_cfg = {}
+        self._loaded_cfg["AUTO_PARAMS"] = False
+        self._refresh_skip_dependent_states()
+        self._refresh_default_markers()
 
         messagebox.showinfo(
             "Adjust Parameters",
-            "Auto parameters updated from the current segmentation results:\n"
+            "Auto parameters were measured and applied:\n"
             f"  MATCH_IOU = {updates['MATCH_IOU']}\n"
             f"  DIR_MIN_SEC = {updates['DIR_MIN_SEC']}\n"
             f"  LOCALIZED = {updates['LOCALIZED']}\n"
             f"  NUM_CROPS = {updates['NUM_CROPS']}\n"
             f"  FREE_SCALE = {updates['FREE_SCALE']}\n"
             f"  CLUSTER_FRAMES = {updates['CLUSTER_FRAMES']}\n\n"
-            "Run will reuse this config, so there is no need to adjust again.",
+            "Auto Parameters is now Off. These values can be edited manually before Run.",
         )
 
     def run(self):
