@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo_amadeus_splash.png" alt="AMADEUS" style="width: 72%; height: auto;">
+  <img src="assets/logo_amadeus_splash.png" alt="AMADEUS" style="width: 60%; height: auto;">
 </p>
 
 <div align="center" style="line-height: 1;">
