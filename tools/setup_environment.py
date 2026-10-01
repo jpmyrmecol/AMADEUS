@@ -47,6 +47,39 @@ def _nvidia_driver_diagnostic() -> str:
     return f"NVIDIA GPU: {name}; driver: {driver}; nvidia-smi: {executable}"
 
 
+def _nvidia_compute_capability() -> tuple[int, int] | None:
+    """Return GPU0 compute capability using the NVIDIA driver tool."""
+    info = query_nvidia_driver_info()
+    if info is None:
+        return None
+    _, _, executable = info
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "--query-gpu=compute_cap",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    first = (result.stdout or "").splitlines()
+    if not first:
+        return None
+    try:
+        major, minor = first[0].strip().split(".", 1)
+        return int(major), int(minor)
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_apple_silicon() -> bool:
     import platform
 
@@ -84,26 +117,53 @@ def windows_amd_gpu_candidate() -> bool:
         return False
 
 
-def select_torch_profile() -> tuple[str, str]:
+def select_torch_profiles() -> tuple[list[str], str]:
+    """Return ordered accelerator profiles, newest compatible candidate first."""
     requested = os.environ.get("AMADEUS_TORCH_PROFILE", "auto").strip().lower()
     if requested not in {"", "auto"}:
         check_support(requested)
-        return requested, f"Requested PyTorch profile: {requested}; runtime verification is required."
+        return [requested], (
+            f"Requested PyTorch profile: {requested}; automatic fallback is disabled "
+            "for an explicit profile."
+        )
     if sys.platform == "darwin":
-        return "macos", "Using macOS wheels (MPS/Metal when available, otherwise CPU)."
+        return ["macos"], "Using macOS wheels (MPS/Metal when available, otherwise CPU)."
     if nvidia_gpu_is_available():
-        return "cu126", (
-            "An NVIDIA GPU was detected; using CUDA 12.6 wheels. "
+        capability = _nvidia_compute_capability()
+        if capability is not None and capability < (7, 5):
+            return ["cu126"], (
+                f"NVIDIA GPU0 compute capability is {capability[0]}.{capability[1]}; "
+                "using the legacy CUDA 12.6 profile retained for pre-Turing GPUs. "
+                + _nvidia_driver_diagnostic()
+            )
+        capability_text = (
+            f"GPU0 compute capability {capability[0]}.{capability[1]}"
+            if capability is not None
+            else "GPU0 compute capability could not be queried"
+        )
+        return ["cu132", "cu126"], (
+            f"An NVIDIA GPU was detected ({capability_text}); trying CUDA 13.2 first. "
+            "CUDA 12.6 is retained as an automatic compatibility fallback. "
             + _nvidia_driver_diagnostic()
         )
     if amd_runtime_candidate():
-        return "rocm72", "AMD driver detected; trying ROCm 7.2 wheels. GPU computation and NMS must pass."
+        return ["rocm100", "rocm72"], (
+            "AMD GPU runtime detected on Linux; trying AMD ROCm 10.0 / PyTorch 2.13 first. "
+            "If real GPU computation or torchvision NMS is incompatible, AMADEUS will "
+            "retry the PyTorch ROCm 7.2 profile."
+        )
     if windows_amd_gpu_candidate():
-        return "rocmwin100", (
+        return ["rocmwin100"], (
             "AMD GPU detected on Windows; using AMD ROCm 10.0 / PyTorch 2.13 wheels. "
             "A supported Windows 11 GPU/driver is required and GPU computation plus NMS must pass."
         )
-    return "cpu", "No accelerator runtime candidate detected; using CPU wheels."
+    return ["cpu"], "No accelerator runtime candidate detected; using CPU wheels."
+
+
+def select_torch_profile() -> tuple[str, str]:
+    """Compatibility helper returning the preferred profile only."""
+    profiles, explanation = select_torch_profiles()
+    return profiles[0], explanation
 
 
 def venv_python() -> Path:
@@ -228,16 +288,19 @@ def _ready_marker_profile() -> str | None:
 
 
 def prepare_profile_environment(profile: str) -> None:
-    """Rebuild the managed Windows venv when entering/leaving AMD ROCm or changing its Python."""
-    if os.name != "nt" or ENVIRONMENT_ROOT != PROJECT_ROOT / ".venv":
+    """Rebuild the managed venv when a profile requires another Python/runtime stack."""
+    if ENVIRONMENT_ROOT != PROJECT_ROOT / ".venv":
         return
 
     previous_profile = _ready_marker_profile()
-    rebuild = (
-        previous_profile is not None
-        and previous_profile != profile
-        and "rocmwin100" in {previous_profile, profile}
-    )
+    rebuild = False
+    if previous_profile is not None and previous_profile != profile:
+        previous = PROFILES.get(previous_profile)
+        current = PROFILES[profile]
+        rebuild = bool(
+            (previous and previous.install_dependencies)
+            or current.install_dependencies
+        )
 
     required_minor = PROFILES[profile].python_minor
     if not rebuild and required_minor and venv_python().exists():
@@ -256,7 +319,7 @@ def prepare_profile_environment(profile: str) -> None:
 
     if rebuild and ENVIRONMENT_ROOT.exists():
         print(
-            "[AMADEUS] Rebuilding the managed environment for the Windows AMD ROCm profile...",
+            f"[AMADEUS] Rebuilding the managed environment for PyTorch profile {profile}...",
             flush=True,
         )
         shutil.rmtree(ENVIRONMENT_ROOT)
@@ -361,18 +424,33 @@ print("[AMADEUS] PyTorch profile verification: OK")
         if len(detail) > 3000:
             detail = detail[-3000:]
         lines = ["PyTorch/torchvision environment verification failed."]
-        if profile == "cu126":
+        if profile in {"cu132", "cu126"}:
             lines.append(_nvidia_driver_diagnostic())
+            capability = _nvidia_compute_capability()
+            if capability is not None:
+                lines.append(
+                    f"NVIDIA GPU0 compute capability: {capability[0]}.{capability[1]}."
+                )
+            if profile == "cu132":
+                lines.append(
+                    "CUDA 13.2 is the primary profile for Turing (CC 7.5) and newer GPUs. "
+                    "It requires a CUDA 13-compatible NVIDIA driver."
+                )
+            else:
+                lines.append(
+                    "CUDA 12.6 is the legacy profile retained for Maxwell, Pascal and Volta. "
+                    "It does not provide Blackwell sm_100/sm_120 kernels."
+                )
+        elif profile in {"rocm100", "rocmwin100"}:
             lines.append(
-                "The cu126 PyTorch build requires a compatible NVIDIA driver. "
-                "If the verifier reports a CUDA initialization or driver-version error, "
-                "update the NVIDIA driver and rerun AMADEUS."
+                "The AMD ROCm 10.0 profile requires supported AMD hardware and a compatible "
+                "driver/runtime. AMADEUS verifies real GPU computation and torchvision NMS "
+                "before accepting it."
             )
-        elif profile == "rocmwin100":
+        elif profile == "rocm72":
             lines.append(
-                "The Windows AMD profile requires a ROCm 10.0-supported AMD GPU, "
-                "Windows 11, and a compatible AMD driver. "
-                "AMADEUS verifies real GPU computation and torchvision NMS before accepting it."
+                "The ROCm 7.2 compatibility profile requires a supported Linux AMD GPU and "
+                "driver. Real GPU computation and torchvision NMS must both pass."
             )
         if detail:
             lines.append("Verifier output:\n" + detail)
@@ -640,8 +718,12 @@ def ready_identity(profile: str) -> dict:
 def environment_ready() -> bool:
     """Legacy empty markers are invalid. Verify installed wheels on every fast path."""
     try:
-        profile, _ = select_torch_profile()
-        if json.loads(READY_MARKER.read_text()) != ready_identity(profile):
+        profiles, _ = select_torch_profiles()
+        marker = json.loads(READY_MARKER.read_text())
+        profile = marker.get("profile") if isinstance(marker, dict) else None
+        if profile not in profiles:
+            return False
+        if marker != ready_identity(profile):
             return False
         verify_pytorch_profile(profile)
         return True
@@ -664,25 +746,54 @@ def main() -> int:
         return 0 if environment_ready() else 1
     if not args.uv:
         raise RuntimeError("--uv is required for setup")
-    profile, explanation = select_torch_profile()
+    profiles, explanation = select_torch_profiles()
     print(f"[AMADEUS] {explanation}", flush=True)
     print("[AMADEUS] Preparing the locked Python environment...", flush=True)
 
     try:
         if os.name == "nt" and ENVIRONMENT_ROOT != PROJECT_ROOT / ".venv":
             raise RuntimeError("AMADEUS_VENV is supported by the macOS/Linux launcher only.")
-        prepare_profile_environment(profile)
         # AMADEUS.bat uses this marker for its fast path. Remove it before making
         # any changes so an interrupted or failed setup is fully checked next time.
         READY_MARKER.unlink(missing_ok=True)
         uv_version_in_use = check_uv_version(args.uv)
         print(f"[AMADEUS] Using uv {uv_version_in_use}: {args.uv}", flush=True)
-        python = select_python(args.python, profile)
-        sync_environment(args.uv, profile, python)
-        verify_numeric_stack()
-        ensure_pytorch_profile(args.uv, profile)
-        # Re-check after any PyTorch repair to ensure no unrelated package changed.
-        verify_numeric_stack()
+
+        profile = ""
+        last_error: Exception | None = None
+        for index, candidate in enumerate(profiles):
+            try:
+                if index:
+                    print(
+                        f"[AMADEUS] Trying compatibility profile {candidate}...",
+                        flush=True,
+                    )
+                prepare_profile_environment(candidate)
+                python = select_python(args.python, candidate)
+                sync_environment(args.uv, candidate, python)
+                verify_numeric_stack()
+                ensure_pytorch_profile(args.uv, candidate)
+                # Re-check after any PyTorch repair to ensure no unrelated package changed.
+                verify_numeric_stack()
+                profile = candidate
+                break
+            except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
+                last_error = exc
+                if index + 1 >= len(profiles):
+                    raise
+                print(
+                    f"[AMADEUS] PyTorch profile {candidate} was not usable: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                print(
+                    f"[AMADEUS] Falling back to {profiles[index + 1]}.",
+                    flush=True,
+                )
+
+        if not profile:
+            raise RuntimeError(f"No usable PyTorch profile was found: {last_error}")
+
         verify_gui_environment()
         prepare_ffmpeg()
         command_path = install_amadeus_command()
