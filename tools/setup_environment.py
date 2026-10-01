@@ -178,15 +178,16 @@ def select_torch_profiles() -> tuple[list[str], str]:
             + _nvidia_driver_diagnostic()
         )
     if amd_runtime_candidate():
-        return ["rocm100", "rocm72"], (
+        return ["rocm100", "rocm72", "cpu"], (
             "AMD GPU runtime detected on Linux; trying AMD ROCm 10.0 / PyTorch 2.13 first. "
             "If real GPU computation or torchvision NMS is incompatible, AMADEUS will "
-            "retry the PyTorch ROCm 7.2 profile."
+            "retry the PyTorch ROCm 7.2 profile and finally the CPU profile."
         )
     if windows_amd_gpu_candidate():
-        return ["rocmwin100"], (
-            "AMD GPU detected on Windows; using AMD ROCm 10.0 / PyTorch 2.13 wheels. "
-            "A supported Windows 11 GPU/driver is required and GPU computation plus NMS must pass."
+        return ["rocmwin100", "cpu"], (
+            "AMD GPU detected on Windows; trying AMD ROCm 10.0 / PyTorch 2.13 wheels first. "
+            "If the GPU, Windows release, driver, GPU computation or torchvision NMS is "
+            "not compatible with native Windows ROCm, AMADEUS will use the CPU profile."
         )
     return ["cpu"], "No accelerator runtime candidate detected; using CPU wheels."
 
