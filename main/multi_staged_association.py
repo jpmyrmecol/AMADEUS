@@ -49,6 +49,7 @@ from experiment_utils import (
     resolve_existing_experiment_dir_name,
 )
 from weight_utils import deduplicate_best_epoch_weights
+from tracking_video_inputs import configured_tracking_video_files
 from video_frame_count import (
     clamp_frame_range_to_usable_count,
     read_video_frame_info,
@@ -2511,10 +2512,7 @@ def main() -> None:
         requested_direction_weights,
     )
 
-    if os.path.isdir(video_path_in):
-        video_files = [\n            os.path.join(video_path_in, f)\n            for f in sorted(os.listdir(video_path_in))\n            if os.path.isfile(os.path.join(video_path_in, f))\n            and f.lower().endswith(('.mp4', '.avi', '.mov', '.m4v'))\n        ]
-    else:
-        video_files = [video_path_in]
+    video_files = configured_tracking_video_files(cfg, video_path_in)
     if not video_files:
         raise RuntimeError(f'Video not found: {video_path_in}')
 
