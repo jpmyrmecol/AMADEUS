@@ -484,6 +484,8 @@ class OpenCvProbe:
     seekable_frame_count: int = 0
     first_frame_decoded: bool = False
     random_seek_ok: bool = False
+    seek_tested_frames: tuple[int, ...] = ()
+    seek_failed_frames: tuple[int, ...] = ()
     measured_fps: float = 0.0
     irregular_interval_fraction: float | None = None
     variable_frame_rate: bool | None = None
@@ -517,6 +519,8 @@ class OpenCvProbe:
             "seekable_frame_count": self.seekable_frame_count,
             "first_frame_decoded": self.first_frame_decoded,
             "random_seek_ok": self.random_seek_ok,
+            "seek_tested_frames": list(self.seek_tested_frames),
+            "seek_failed_frames": list(self.seek_failed_frames),
             "measured_fps": self.measured_fps,
             "variable_frame_rate": self.variable_frame_rate,
         }
@@ -539,6 +543,50 @@ def _fourcc_to_string(value: float) -> str:
         return ""
     chars = [chr((code >> (8 * i)) & 0xFF) for i in range(4)]
     return "".join(ch for ch in chars if ch.isprintable()).strip()
+
+
+def _seek_test_targets(frame_count: int) -> tuple[int, ...]:
+    """Return unique frame indices spanning the video for direct-access tests."""
+    count = max(0, int(frame_count))
+    if count <= 0:
+        return ()
+    last = count - 1
+    targets = {
+        0,
+        int(round(last * 0.25)),
+        int(round(last * 0.50)),
+        int(round(last * 0.75)),
+        last,
+    }
+    return tuple(sorted(targets))
+
+
+def _seek_and_decode_exact(cap: Any, frame_idx: int) -> bool:
+    """Seek to one frame, decode it, and verify that OpenCV landed there."""
+    cv2 = _cv2()
+    target = max(0, int(frame_idx))
+    try:
+        if not cap.set(cv2.CAP_PROP_POS_FRAMES, target):
+            return False
+        ok, frame = cap.read()
+        if not ok or frame is None or getattr(frame, "size", 0) <= 0:
+            return False
+        # After read(), CAP_PROP_POS_FRAMES should point to the next frame.
+        # If it does not, OpenCV decoded something but did not honor the seek.
+        position_after = float(cap.get(cv2.CAP_PROP_POS_FRAMES) or 0.0)
+    except Exception:
+        return False
+    return abs(position_after - float(target + 1)) <= 0.5
+
+
+def _multi_point_seek_test(
+    cap: Any,
+    frame_count: int,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Test exact seek/decode at start, 25%, 50%, 75%, and end."""
+    tested = _seek_test_targets(frame_count)
+    failed = tuple(frame_idx for frame_idx in tested if not _seek_and_decode_exact(cap, frame_idx))
+    return tested, failed
 
 
 def measure_frame_intervals(cap: Any, sample: int = FRAME_INTERVAL_SAMPLE) -> tuple[float, float | None]:
@@ -594,13 +642,16 @@ def probe_opencv(path: str) -> OpenCvProbe:
 
         measured_fps, irregular = measure_frame_intervals(cap)
 
+        seek_tested: tuple[int, ...] = ()
+        seek_failed: tuple[int, ...] = ()
         random_ok = False
-        if first_ok and reported > 2:
-            target = reported // 2
-            cap.set(cv2.CAP_PROP_POS_FRAMES, target)
-            ok, frame = cap.read()
-            random_ok = bool(ok and frame is not None and getattr(frame, "size", 0) > 0)
+        if first_ok and reported > 0:
+            seek_tested, seek_failed = _multi_point_seek_test(cap, reported)
+            random_ok = bool(seek_tested) and not seek_failed
         elif first_ok:
+            # Preserve the previous behavior for unusual backends that decode a
+            # frame but do not report a frame count. Downstream frame-range
+            # validation will still reject a video with no usable frame count.
             random_ok = True
     finally:
         cap.release()
@@ -624,6 +675,8 @@ def probe_opencv(path: str) -> OpenCvProbe:
         seekable_frame_count=seekable,
         first_frame_decoded=first_ok,
         random_seek_ok=random_ok,
+        seek_tested_frames=seek_tested,
+        seek_failed_frames=seek_failed,
         measured_fps=measured_fps,
         irregular_interval_fraction=irregular,
         variable_frame_rate=variable,
@@ -710,7 +763,14 @@ class VideoAssessment:
                 if probe.random_seek_ok and probe.seekable_frame_count != probe.reported_frame_count
                 else ""
             ),
-            "Random frame access: " + ("works" if probe.random_seek_ok else "fails"),
+            "Multi-point frame access: "
+            + ("works" if probe.random_seek_ok else "fails")
+            + (
+                f" ({len(probe.seek_tested_frames) - len(probe.seek_failed_frames)}/"
+                f"{len(probe.seek_tested_frames)} positions)"
+                if probe.seek_tested_frames
+                else ""
+            ),
         ]
         if source.duration_seconds:
             lines.append(f"Duration: {source.duration_seconds:.3f} s")
@@ -742,11 +802,19 @@ def assess_video(path: str) -> VideoAssessment:
     else:
         if not probe.random_seek_ok:
             escalate(STATUS_REQUIRED)
-            reasons.append(
-                "Seeking to an arbitrary frame failed. AMADEUS addresses frames "
-                "directly during segmentation and tracking, so this video cannot "
-                "be used unchanged."
-            )
+            if probe.seek_failed_frames:
+                failed = ", ".join(str(frame_idx) for frame_idx in probe.seek_failed_frames)
+                reasons.append(
+                    "Multi-point frame seeking failed at frame(s) "
+                    f"{failed}. AMADEUS addresses frames directly during segmentation "
+                    "and tracking, so this video cannot be used unchanged."
+                )
+            else:
+                reasons.append(
+                    "Direct frame seeking could not be verified. AMADEUS addresses "
+                    "frames directly during segmentation and tracking, so this video "
+                    "cannot be used unchanged."
+                )
         tail = probe.unreadable_tail if probe.random_seek_ok else 0
         if tail > max(2, int(probe.reported_frame_count * 0.005)):
             escalate(STATUS_REQUIRED)
@@ -1260,11 +1328,23 @@ def _verify_conversion(plan: ConversionPlan) -> tuple[int, list[str]]:
     try:
         frames = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
         ok, frame = cap.read()
+        first_ok = bool(ok and frame is not None and getattr(frame, "size", 0) > 0)
+        seek_tested: tuple[int, ...] = ()
+        seek_failed: tuple[int, ...] = ()
+        if first_ok and frames > 0:
+            seek_tested, seek_failed = _multi_point_seek_test(cap, frames)
     finally:
         cap.release()
-    if not ok or frame is None:
+    if not first_ok:
         _delete_quietly(plan.output_path)
         raise RuntimeError("The converted video's first frame could not be decoded.")
+    if seek_failed:
+        _delete_quietly(plan.output_path)
+        failed = ", ".join(str(frame_idx) for frame_idx in seek_failed)
+        raise RuntimeError(
+            "The converted video failed the multi-point frame-access check at "
+            f"frame(s) {failed}."
+        )
 
     expected = plan.expected_output_frames
     if frames and abs(frames - expected) > max(1, int(expected * plan.frame_count_tolerance)):
