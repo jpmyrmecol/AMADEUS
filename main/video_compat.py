@@ -52,6 +52,7 @@ except ImportError:  # Imported as ``video_compat`` from main/ scripts.
 # what the user may *select*; whether a file can be used unchanged is decided by
 # assess_video() after probing and decoding it.
 SUPPORTED_VIDEO_SUFFIXES: tuple[str, ...] = (
+    # Common current camera / phone containers.
     ".mp4",
     ".mov",
     ".avi",
@@ -63,6 +64,21 @@ SUPPORTED_VIDEO_SUFFIXES: tuple[str, ...] = (
     ".mpg",
     ".mpeg",
     ".webm",
+    # Mobile-phone containers, including older 3GPP / 3GPP2 recordings.
+    ".3gp",
+    ".3g2",
+    ".3gp2",
+    # Professional and legacy camcorder containers. These intentionally remain
+    # outside ROBUST_CONTAINER_SUFFIXES so assess_video() recommends
+    # normalization to the H.264/MP4 analysis format before tracking.
+    ".mxf",
+    ".mod",
+    ".tod",
+    ".vob",
+    ".dv",
+    ".dif",
+    ".asf",
+    ".wmv",
 )
 
 VIDEO_DROP_SUFFIXES = frozenset(SUPPORTED_VIDEO_SUFFIXES)
