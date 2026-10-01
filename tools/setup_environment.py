@@ -122,19 +122,35 @@ def amd_runtime_candidate() -> bool:
     return False
 
 
-def windows_amd_gpu_candidate() -> bool:
-    """Detect an AMD display adapter before installing the Windows ROCm profile."""
+def _windows_amd_identity() -> str | None:
     if sys.platform != "win32":
-        return False
+        return None
     try:
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-             "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty PNPDeviceID"],
-            capture_output=True, text=True, errors="replace", timeout=8, check=False,
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | "
+                "Where-Object {$_.PNPDeviceID -match 'VEN_1002'} | "
+                "Select-Object Name,DriverVersion,PNPDeviceID | ConvertTo-Json -Compress",
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=8,
+            check=False,
         )
-        return result.returncode == 0 and "VEN_1002" in result.stdout.upper()
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        return None
+    value = (result.stdout or "").strip()
+    return value if result.returncode == 0 and value else None
+
+
+def windows_amd_gpu_candidate() -> bool:
+    """Detect an AMD display adapter before installing the Windows ROCm profile."""
+    return _windows_amd_identity() is not None
 
 
 def select_torch_profiles() -> tuple[list[str], str]:
@@ -788,13 +804,60 @@ def check_uv_version(uv_executable: str) -> str:
     )
 
 
+def _accelerator_selection_identity() -> dict:
+    profiles, _ = select_torch_profiles()
+    identity: dict[str, object] = {"candidates": profiles}
+
+    nvidia = query_nvidia_driver_info()
+    if nvidia is not None:
+        name, driver, _ = nvidia
+        identity["nvidia"] = {
+            "name": name,
+            "driver": driver,
+            "compute_capability": _nvidia_compute_capability(),
+        }
+        return identity
+
+    windows_amd = _windows_amd_identity()
+    if windows_amd is not None:
+        identity["windows_amd"] = windows_amd
+        return identity
+
+    if amd_runtime_candidate():
+        devices = []
+        for device in sorted(Path("/sys/class/drm").glob("card*/device")):
+            values = []
+            for field in ("vendor", "device", "revision"):
+                try:
+                    values.append((device / field).read_text().strip())
+                except OSError:
+                    values.append("")
+            if values[0].lower() == "0x1002":
+                devices.append(values)
+        try:
+            driver_version = Path("/sys/module/amdgpu/version").read_text().strip()
+        except OSError:
+            driver_version = ""
+        identity["linux_amd"] = {
+            "devices": devices,
+            "driver": driver_version,
+        }
+
+    return identity
+
+
 def ready_identity(profile: str) -> dict:
     inputs = ("pyproject.toml", "uv.lock", "VERSION", "tools/setup_environment.py",
               "tools/runtime_profiles.py", "main/compute_backend.py", "gui/tk_compat.py")
     digest = hashlib.sha256()
     for name in inputs:
         digest.update((PROJECT_ROOT / name).read_bytes())
-    return {"schema": 1, "profile": profile, "inputs": digest.hexdigest()}
+    return {
+        "schema": 2,
+        "profile": profile,
+        "selection": _accelerator_selection_identity(),
+        "inputs": digest.hexdigest(),
+    }
 
 
 def environment_ready() -> bool:
