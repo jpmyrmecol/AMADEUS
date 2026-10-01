@@ -727,6 +727,15 @@ class ConfigGUI(ctk.CTk):
         )
         self.sections["Analysis"]["widgets"]["INTERACT_IOU"].configure(state="disabled")
 
+        # Analysis stages are independently skippable. Keep the checkboxes
+        # independent and only disable parameters that are irrelevant to every
+        # stage that consumes them.
+        for _skip_var in (self.skip_detection, self.skip_id_tracking, self.skip_refinement):
+            _skip_var.trace_add("write", self._refresh_analysis_skip_states)
+        _embedding_enable_var = self.sections["Analysis"]["widgets"]["ENABLE"]
+        _embedding_enable_var.trace_add("write", self._refresh_analysis_skip_states)
+        self._refresh_analysis_skip_states()
+
         # Create Video
         create_video_fields = {
             "Draw Elements": [
@@ -1184,6 +1193,87 @@ class ConfigGUI(ctk.CTk):
             else:
                 w.configure(state=state)
 
+    def _refresh_analysis_skip_states(self, *_):
+        """Enable only Analysis controls used by at least one active stage.
+
+        Detection, ID Tracking, and Refinement are independent stages. Shared
+        parameters remain editable whenever any active stage still consumes
+        them; no skip checkbox changes another skip checkbox.
+        """
+        if "Analysis" not in self.sections:
+            return
+
+        detection_active = not bool(self.skip_detection.get())
+        id_tracking_active = not bool(self.skip_id_tracking.get())
+        refinement_active = not bool(self.skip_refinement.get())
+        any_analysis_active = detection_active or id_tracking_active or refinement_active
+
+        # Object-detection-only controls.
+        self._set_create_images_group_enabled(
+            "Analysis",
+            ["DEVICE", "BATCH_SIZE", "SKIP_DETECT_PREVIEW"],
+            detection_active,
+        )
+
+        # WEIGHT selects the checkpoint family used by detection, tracking,
+        # and refinement. CONF/NMS_IOU are needed by detection and ID tracking.
+        self._set_create_images_group_enabled(
+            "Analysis",
+            ["WEIGHT"],
+            any_analysis_active,
+        )
+        self._set_create_images_group_enabled(
+            "Analysis",
+            ["CONF", "NMS_IOU"],
+            detection_active or id_tracking_active,
+        )
+
+        # Parameters shared by ID Tracking and Refinement.
+        self._set_create_images_group_enabled(
+            "Analysis",
+            ["MATCH_IOU", "MATCH_ANGLE", "MAX_AGE"],
+            id_tracking_active or refinement_active,
+        )
+
+        # ID-Tracking-only association costs.
+        self._set_create_images_group_enabled(
+            "Analysis",
+            ["IOU_WEIGHT", "DIRECTION_WEIGHT", "MISS_WEIGHT", "DISTANCE_WEIGHT"],
+            id_tracking_active,
+        )
+
+        # Refinement-only correction parameters.
+        self._set_create_images_group_enabled(
+            "Analysis",
+            ["MAX_AXIS_ERR", "FLIP_SEC"],
+            refinement_active,
+        )
+
+        # Embedding belongs to Refinement. Its detail fields are meaningful
+        # only while Refinement and embedding are both enabled.
+        embedding_enable = self.sections["Analysis"]["widgets"]["ENABLE"]
+        self._set_create_images_group_enabled(
+            "Analysis",
+            ["ENABLE"],
+            refinement_active,
+        )
+        embedding_details_active = refinement_active and bool(embedding_enable.get())
+        self._set_create_images_group_enabled(
+            "Analysis",
+            ["EMBED_DEVICE", "IMG_SIZE", "PREVIEW_COUNT"],
+            embedding_details_active,
+        )
+
+        # Fixed threshold: always display it, never make it editable.
+        self.sections["Analysis"]["widgets"]["INTERACT_IOU"].configure(state="disabled")
+
+        # Analysis range is shared by the three analysis stages.
+        for widget in getattr(self, "analysis_range", {}).values():
+            try:
+                widget.configure(state="normal" if any_analysis_active else "disabled")
+            except Exception:
+                pass
+
     def create_section(self, *, title: str, fields: dict, btn_parent, skip_vars=None):
         btn = ctk.CTkButton(
             btn_parent,
@@ -1555,9 +1645,6 @@ class ConfigGUI(ctk.CTk):
             _set_widget_value(self.analysis_range["start"], ana_cfg["FIRST_FRAME"])
         if "LAST_FRAME" in ana_cfg:
             _set_widget_value(self.analysis_range["end"], ana_cfg["LAST_FRAME"])
-        if hasattr(self, "_toggle_tracking_mode"):
-            self._toggle_tracking_mode()
-
         emb_cfg = cfg.get("EMBEDDING", {}) or {}
         _emb_widget_keys = {
             "ENABLE": "ENABLE",
@@ -1604,6 +1691,7 @@ class ConfigGUI(ctk.CTk):
         self.skip_refinement.set(cfg.get("skip_refinement", False))
         self.skip_creating_video.set(cfg.get("skip_creating_video", False))
         self.delete_tmp_files.set(cfg.get("delete_tmp_files", False))
+        self._refresh_analysis_skip_states()
 
         self._capture_auto_param_values(cfg)
         self._refresh_default_markers()
@@ -1813,13 +1901,14 @@ class ConfigGUI(ctk.CTk):
             messagebox.showerror("Error", str(exc))
             return False
         cfg["analysis"] = analysis_cfg
-        try:
-            flip_duration_sec = float(cfg["analysis"]["FLIP_SEC"])
-        except (KeyError, TypeError, ValueError):
-            flip_duration_sec = float("nan")
-        if flip_duration_sec <= 0.0 or not math.isfinite(flip_duration_sec):
-            messagebox.showerror("Error", "FLIP_SEC must be a positive number of seconds.")
-            return
+        if not self.skip_refinement.get():
+            try:
+                flip_duration_sec = float(cfg["analysis"]["FLIP_SEC"])
+            except (KeyError, TypeError, ValueError):
+                flip_duration_sec = float("nan")
+            if flip_duration_sec <= 0.0 or not math.isfinite(flip_duration_sec):
+                messagebox.showerror("Error", "FLIP_SEC must be a positive number of seconds.")
+                return False
         _tc_keys = ("IOU_WEIGHT", "DIRECTION_WEIGHT", "MISS_WEIGHT", "DISTANCE_WEIGHT")
         tracking_cost_dict = dict(cfg["analysis"].get("TRACKING_COST", {}) or {})
         for _k in _tc_keys:
