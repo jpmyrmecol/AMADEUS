@@ -12,6 +12,7 @@ for _path in (str(_MAIN_DIR), str(_MAIN_DIR.parent)):
 from without_direction_estimation.multi_staged_association import *
 from without_direction_estimation.multi_staged_association import _artifact_path, _worker_budget, _auto_num_workers
 from without_direction_estimation import multi_staged_association as fixed
+from tracking_video_inputs import configured_tracking_video_files
 import json
 
 
@@ -288,10 +289,7 @@ def main() -> None:
         requested_direction_weights,
     )
 
-    if os.path.isdir(video_path_in):
-        video_files = [\n            os.path.join(video_path_in, f)\n            for f in sorted(os.listdir(video_path_in))\n            if os.path.isfile(os.path.join(video_path_in, f))\n            and f.lower().endswith(('.mp4', '.avi', '.mov', '.m4v'))\n        ]
-    else:
-        video_files = [video_path_in]
+    video_files = configured_tracking_video_files(cfg, video_path_in)
     if not video_files:
         raise RuntimeError(f'Video not found: {video_path_in}')
 
