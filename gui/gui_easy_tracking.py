@@ -35,7 +35,12 @@ try:
     )
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from .config_path_recovery import prepare_config_for_gui
-    from .video_input import ask_open_analysis_video
+    from .canvas_file_drop import install_canvas_file_drop
+    from .video_input import (
+        VIDEO_DROP_SUFFIXES,
+        ask_open_analysis_video,
+        prepare_analysis_video,
+    )
 except ImportError:  # Preserve direct execution with: python gui/gui_easy_tracking.py
     from project_paths import (
         GUI_DIR,
@@ -49,7 +54,12 @@ except ImportError:  # Preserve direct execution with: python gui/gui_easy_track
     )
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from config_path_recovery import prepare_config_for_gui
-    from video_input import ask_open_analysis_video
+    from canvas_file_drop import install_canvas_file_drop
+    from video_input import (
+        VIDEO_DROP_SUFFIXES,
+        ask_open_analysis_video,
+        prepare_analysis_video,
+    )
 
 # Matches tqdm lines: anything containing "N/TOTAL [" (works for both TTY and non-TTY output)
 _TQDM_PAT = re.compile(r'(\d+)/(\d+)\s*\[')
@@ -280,6 +290,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._loaded_cfg: dict = {}
         self._loaded_config_path: str = ""
         self._loaded_easy_answers: dict = {}
+        self._tracking_video_is_dir = tk.BooleanVar(value=False)
         self._skip_flags: dict[str, bool] = {}
         self._manual_skip_keys: set[str] = set()
         self._num_confirmed = False
@@ -400,49 +411,187 @@ class EasyTrackingGUI(ctk.CTk):
     def _build_video_section(self, parent: ctk.CTkScrollableFrame) -> None:
         frame = ctk.CTkFrame(parent, corner_radius=6)
         frame.pack(fill="x", padx=12, pady=(10, 5))
-        ctk.CTkLabel(frame, text="Step 1: Select Video",
-                     font=("TkDefaultFont", 13, "bold"), anchor="w").pack(fill="x", padx=8, pady=(6, 2))
+        ctk.CTkLabel(
+            frame,
+            text="Step 1: Select Videos",
+            font=("TkDefaultFont", 13, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=8, pady=(6, 2))
 
-        row = ctk.CTkFrame(frame, corner_radius=0)
-        row.pack(fill="x", padx=8, pady=4)
-        ctk.CTkLabel(row, text="Video File", width=90, anchor="w").pack(side="left")
-        self._video_entry = ctk.CTkEntry(row)
+        training_row = ctk.CTkFrame(frame, corner_radius=0)
+        training_row.pack(fill="x", padx=8, pady=4)
+        ctk.CTkLabel(
+            training_row, text="Training Video Path", width=135, anchor="w"
+        ).pack(side="left")
+        self._video_entry = ctk.CTkEntry(training_row)
         self._video_entry.pack(side="left", expand=True, fill="x", padx=5)
-        self._video_entry.bind("<FocusOut>", lambda _e: self._update_session_label())
-        self._video_entry.bind("<Return>", lambda _e: self._update_session_label())
-        ctk.CTkButton(row, text="Browse", width=80, command=self._browse_video).pack(side="left", padx=3)
+        self._video_entry.bind("<FocusOut>", self._on_training_video_committed)
+        self._video_entry.bind("<Return>", self._on_training_video_committed)
+        ctk.CTkButton(
+            training_row,
+            text="Reference",
+            width=90,
+            command=self._browse_training_video,
+        ).pack(side="left", padx=3)
 
-        row2 = ctk.CTkFrame(frame, corner_radius=0)
-        row2.pack(fill="x", padx=8, pady=(0, 4))
-        ctk.CTkLabel(row2, text="Session", width=90, anchor="w").pack(side="left")
-        self._session_entry = ctk.CTkEntry(row2, placeholder_text="(auto)")
+        analysis_row = ctk.CTkFrame(frame, corner_radius=0)
+        analysis_row.pack(fill="x", padx=8, pady=(0, 4))
+        ctk.CTkLabel(
+            analysis_row, text="Analysis Video Path", width=135, anchor="w"
+        ).pack(side="left")
+        self._tracking_video_entry = ctk.CTkEntry(analysis_row)
+        self._tracking_video_entry.pack(side="left", expand=True, fill="x", padx=5)
+        self._tracking_video_button = ctk.CTkButton(
+            analysis_row,
+            text="Reference",
+            width=90,
+            command=self._browse_tracking_video,
+        )
+        self._tracking_video_button.pack(side="left", padx=3)
+        self._tracking_video_dir_checkbox = ctk.CTkCheckBox(
+            analysis_row,
+            text="Directory",
+            variable=self._tracking_video_is_dir,
+            command=self._on_tracking_video_mode_changed,
+            width=100,
+        )
+        self._tracking_video_dir_checkbox.pack(side="left", padx=(6, 0))
+
+        session_row = ctk.CTkFrame(frame, corner_radius=0)
+        session_row.pack(fill="x", padx=8, pady=(0, 4))
+        ctk.CTkLabel(session_row, text="Session", width=135, anchor="w").pack(side="left")
+        self._session_entry = ctk.CTkEntry(session_row, placeholder_text="(auto)")
         self._session_entry.pack(side="left", expand=True, fill="x", padx=5)
         self._session_entry.bind(
-            "<FocusOut>", lambda _e: self._sync_segmentation_status_from_outputs())
+            "<FocusOut>", lambda _e: self._sync_segmentation_status_from_outputs()
+        )
         self._session_entry.bind(
-            "<Return>", lambda _e: self._sync_segmentation_status_from_outputs())
-        ctk.CTkButton(row2, text="Browse", width=80, command=self._browse_session).pack(side="left", padx=3)
+            "<Return>", lambda _e: self._sync_segmentation_status_from_outputs()
+        )
+        ctk.CTkButton(
+            session_row, text="Reference", width=90, command=self._browse_session
+        ).pack(side="left", padx=3)
 
-        row3 = ctk.CTkFrame(frame, corner_radius=0)
-        row3.pack(fill="x", padx=8, pady=(2, 10))
-        self._seg_btn = ctk.CTkButton(row3, text="Launch Segmentation",
-                                      width=230, command=self._launch_segmentation)
+        action_row = ctk.CTkFrame(frame, corner_radius=0)
+        action_row.pack(fill="x", padx=8, pady=(2, 10))
+        self._seg_btn = ctk.CTkButton(
+            action_row,
+            text="Launch Segmentation",
+            width=230,
+            command=self._launch_segmentation,
+        )
         self._seg_btn.pack(side="left", padx=(0, 12))
-        self._seg_status = ctk.CTkLabel(row3, text="Not started", text_color="gray", anchor="w")
+        self._seg_status = ctk.CTkLabel(
+            action_row, text="Not started", text_color="gray", anchor="w"
+        )
         self._seg_status.pack(side="left")
+        self._refresh_tracking_video_controls()
 
-    def _browse_video(self) -> None:
+    def _set_training_video(self, path: str, *, sync_analysis: bool = True) -> None:
+        path = os.path.normpath(str(path).strip()) if path else ""
+        self._video_entry.delete(0, tk.END)
+        if path:
+            self._video_entry.insert(0, path)
+
+        if sync_analysis:
+            self._tracking_video_is_dir.set(False)
+            self._tracking_video_entry.configure(state="normal")
+            self._tracking_video_entry.delete(0, tk.END)
+            if path:
+                self._tracking_video_entry.insert(0, path)
+
+        self._refresh_tracking_video_controls()
+        self._update_session_label()
+
+    def _browse_training_video(self) -> None:
         prepared = ask_open_analysis_video(
-            self, title="Select video", log=lambda message: print(f"[video] {message}", flush=True)
+            self,
+            title="Select training video",
+            log=lambda message: print(f"[video] {message}", flush=True),
         )
         if prepared is None:
             return
-        self._video_entry.delete(0, tk.END)
-        self._video_entry.insert(0, prepared.path)
-        self._update_session_label()
+        self._set_training_video(prepared.path, sync_analysis=True)
+
+    def _browse_video(self) -> None:
+        """Backward-compatible alias for the former single-video UI."""
+        self._browse_training_video()
+
+    def _on_training_video_committed(self, _event=None):
+        training = self._video_entry.get().strip()
+        if training:
+            self._set_training_video(training, sync_analysis=True)
+        else:
+            self._tracking_video_entry.configure(state="normal")
+            self._tracking_video_entry.delete(0, tk.END)
+            self._tracking_video_is_dir.set(False)
+            self._refresh_tracking_video_controls()
+            self._sync_segmentation_status_from_outputs()
+        return "break"
+
+    def _browse_tracking_video(self) -> None:
+        if not self._video_entry.get().strip():
+            return
+        current = self._tracking_video_entry.get().strip()
+        if self._tracking_video_is_dir.get():
+            initial = current if os.path.isdir(current) else os.path.dirname(current)
+            if not initial:
+                initial = os.path.dirname(self._video_entry.get().strip()) or os.getcwd()
+            path = filedialog.askdirectory(initialdir=initial)
+            if not path:
+                return
+            self._tracking_video_entry.delete(0, tk.END)
+            self._tracking_video_entry.insert(0, path)
+            return
+
+        prepared = ask_open_analysis_video(
+            self,
+            title="Select analysis video",
+            log=lambda message: print(f"[video] {message}", flush=True),
+        )
+        if prepared is None:
+            return
+        self._tracking_video_entry.delete(0, tk.END)
+        self._tracking_video_entry.insert(0, prepared.path)
+
+    def _on_tracking_video_mode_changed(self) -> None:
+        if not self._video_entry.get().strip():
+            self._tracking_video_is_dir.set(False)
+            self._refresh_tracking_video_controls()
+            return
+        current = self._tracking_video_entry.get().strip()
+        self._tracking_video_entry.configure(state="normal")
+        if self._tracking_video_is_dir.get():
+            if current and not os.path.isdir(current):
+                self._tracking_video_entry.delete(0, tk.END)
+        else:
+            if not current or os.path.isdir(current):
+                training = self._video_entry.get().strip()
+                self._tracking_video_entry.delete(0, tk.END)
+                if training:
+                    self._tracking_video_entry.insert(0, training)
+        self._refresh_tracking_video_controls()
+
+    def _refresh_tracking_video_controls(self) -> None:
+        if not hasattr(self, "_tracking_video_entry"):
+            return
+        enabled = bool(self._video_entry.get().strip())
+        state = "normal" if enabled else "disabled"
+        self._tracking_video_entry.configure(state=state)
+        self._tracking_video_button.configure(state=state)
+        self._tracking_video_dir_checkbox.configure(state=state)
+
+    def _handle_dropped_training_video(self, path: str) -> None:
+        prepared = prepare_analysis_video(
+            self,
+            path,
+            log=lambda message: print(f"[video] {message}", flush=True),
+        )
+        if prepared is None:
+            return
+        self._set_training_video(prepared.path, sync_analysis=True)
 
     def _update_session_label(self) -> None:
-        # Only auto-fill if the user hasn't typed a custom path
         if not self._session_entry.get().strip():
             v = self._video_entry.get().strip()
             if v:
@@ -450,6 +599,7 @@ class EasyTrackingGUI(ctk.CTk):
                 session = os.path.join(os.path.dirname(v), f"amadeus_{stem}")
                 self._session_entry.delete(0, tk.END)
                 self._session_entry.insert(0, session)
+        self._refresh_tracking_video_controls()
         self._sync_segmentation_status_from_outputs()
 
     def _browse_session(self) -> None:
@@ -465,7 +615,6 @@ class EasyTrackingGUI(ctk.CTk):
         s = self._session_entry.get().strip()
         if s:
             return s
-        # Fallback: derive from video path
         v = self._video_entry.get().strip()
         if not v:
             return ""
@@ -474,13 +623,13 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _apply_startup_paths(self, video_path: str = "", session_path: str = "") -> None:
         if video_path:
-            self._video_entry.delete(0, tk.END)
-            self._video_entry.insert(0, video_path)
+            self._set_training_video(video_path, sync_analysis=True)
         if session_path:
             self._session_entry.delete(0, tk.END)
             self._session_entry.insert(0, session_path)
         elif video_path:
             self._update_session_label()
+        self._refresh_tracking_video_controls()
         self._sync_segmentation_status_from_outputs()
 
     @staticmethod
@@ -960,6 +1109,15 @@ class EasyTrackingGUI(ctk.CTk):
         self._display_canvas = tk.Canvas(parent, bg="#1a1a1a", highlightthickness=0)
         self._display_canvas.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
         self._display_canvas.bind("<Configure>", lambda _e: self._on_canvas_resize())
+        self._video_drop_state = install_canvas_file_drop(
+            self,
+            self._display_canvas,
+            allowed_suffixes=VIDEO_DROP_SUFFIXES,
+            on_path=self._handle_dropped_training_video,
+            status_callback=lambda message: self._canvas_status.configure(text=message)
+            if hasattr(self, "_canvas_status") else None,
+            label="video",
+        )
 
         self._next_action_label = tk.Label(
             parent,
@@ -991,7 +1149,7 @@ class EasyTrackingGUI(ctk.CTk):
         if batch_running or self._last_run_state == "running":
             message = "Have a cup of tea and take a break."
         elif not self._video_entry.get().strip():
-            message = "1. Select a video file."
+            message = "1. Select a training video."
         elif (
             self._seg_proc is not None
             and self._seg_proc.poll() is None
@@ -2161,6 +2319,9 @@ class EasyTrackingGUI(ctk.CTk):
             num_objects = num_str
         return {
             "video": self._video_entry.get().strip() if hasattr(self, "_video_entry") else "",
+            "tracking_video": self._tracking_video_entry.get().strip()
+            if hasattr(self, "_tracking_video_entry") else "",
+            "tracking_video_is_dir": bool(self._tracking_video_is_dir.get()),
             "session": self._get_session() if hasattr(self, "_session_entry") else "",
             "num_objects": num_objects,
             "variable_count": self._variable_count.get(),
@@ -2545,8 +2706,37 @@ class EasyTrackingGUI(ctk.CTk):
     def _build_config(self) -> dict | None:
         video = self._video_entry.get().strip()
         if not video:
-            messagebox.showerror("Error", "Please select a video file.")
+            messagebox.showerror("Error", "Please select a training video.")
             return None
+        if not os.path.isfile(video):
+            messagebox.showerror("Error", "Training Video Path must be a video file.")
+            return None
+
+        tracking_video = self._tracking_video_entry.get().strip()
+        tracking_video_is_dir = bool(self._tracking_video_is_dir.get())
+        if not tracking_video:
+            messagebox.showerror("Error", "Please select an analysis video or directory.")
+            return None
+        if tracking_video_is_dir:
+            if not os.path.isdir(tracking_video):
+                messagebox.showerror("Error", "Analysis Video Path must be a directory.")
+                return None
+            direct_videos = [
+                name for name in os.listdir(tracking_video)
+                if os.path.isfile(os.path.join(tracking_video, name))
+                and os.path.splitext(name)[1].lower() in VIDEO_DROP_SUFFIXES
+            ]
+            if not direct_videos:
+                messagebox.showerror(
+                    "Error",
+                    "The selected analysis directory contains no supported video files "
+                    "at its top level.",
+                )
+                return None
+        elif not os.path.isfile(tracking_video):
+            messagebox.showerror("Error", "Analysis Video Path must be a video file.")
+            return None
+
         session = self._get_session()
         if not session:
             messagebox.showerror("Error", "Session path could not be determined.")
@@ -2620,10 +2810,10 @@ class EasyTrackingGUI(ctk.CTk):
         default_cfg = {
             "SESSION_PATH":               session,
             "TRAINING_VIDEO_PATH":        video,
-            "TRACKING_VIDEO_PATH":        video,
+            "TRACKING_VIDEO_PATH":        tracking_video,
             "NUM_OBJECTS":                num_objects,
             "TRAIN_IMG_SIZE":             geometry_img_size,
-            "TRACKING_VIDEO_PATH_IS_DIR": False,
+            "TRACKING_VIDEO_PATH_IS_DIR": tracking_video_is_dir,
             "AUTO_PARAMS":                True,
             "LOCALIZED_RATIO":            0.9,
             "MIN_OVERLAP":                min_overlap,
@@ -2786,8 +2976,6 @@ class EasyTrackingGUI(ctk.CTk):
         if answer_changed("video"):
             cfg.update({
                 "TRAINING_VIDEO_PATH":        video,
-                "TRACKING_VIDEO_PATH":        video,
-                "TRACKING_VIDEO_PATH_IS_DIR": False,
                 "TRAIN_IMG_SIZE":             img_size,
                 "NUM_CROPS":                  num_crops,
                 "LOCALIZED":                  False,
@@ -2801,6 +2989,9 @@ class EasyTrackingGUI(ctk.CTk):
             training_cfg["FIRST_FRAME"] = meta_training_start
             training_cfg["LAST_FRAME"] = meta_training_end
             flags["skip_cropping"] = skip_crop
+        if answer_changed("tracking_video", "tracking_video_is_dir"):
+            cfg["TRACKING_VIDEO_PATH"] = tracking_video
+            cfg["TRACKING_VIDEO_PATH_IS_DIR"] = tracking_video_is_dir
         if answer_changed("session"):
             cfg["SESSION_PATH"] = session
             cfg["INIT_CSV_PATH"] = os.path.join(
@@ -3312,10 +3503,17 @@ class EasyTrackingGUI(ctk.CTk):
         self._manual_skip_keys.clear()
 
         # Paths
-        video = cfg.get("TRAINING_VIDEO_PATH", "")
+        video = str(cfg.get("TRAINING_VIDEO_PATH", "") or "")
         if video:
             self._video_entry.delete(0, tk.END)
             self._video_entry.insert(0, video)
+        tracking_video = str(cfg.get("TRACKING_VIDEO_PATH", "") or "") or video
+        self._tracking_video_is_dir.set(bool(cfg.get("TRACKING_VIDEO_PATH_IS_DIR", False)))
+        self._tracking_video_entry.configure(state="normal")
+        self._tracking_video_entry.delete(0, tk.END)
+        if tracking_video:
+            self._tracking_video_entry.insert(0, tracking_video)
+        self._refresh_tracking_video_controls()
         session = cfg.get("SESSION_PATH", "")
         if session:
             self._session_entry.delete(0, tk.END)
@@ -3406,11 +3604,16 @@ class EasyTrackingGUI(ctk.CTk):
             # paths that are already available in Easy Tracking; all other
             # settings remain Advanced Tracking defaults.
             video = self._video_entry.get().strip()
+            tracking_video = self._tracking_video_entry.get().strip()
             session = self._get_session()
             if session:
                 cmd += ["--session", session]
             if video:
-                cmd += ["--training-video", video, "--tracking-video", video]
+                cmd += ["--training-video", video]
+            if tracking_video:
+                cmd += ["--tracking-video", tracking_video]
+            if self._tracking_video_is_dir.get():
+                cmd += ["--tracking-video-is-dir", "1"]
 
         subprocess.Popen(cmd)
         self.after(100, self.destroy)

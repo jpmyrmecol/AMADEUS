@@ -2877,6 +2877,7 @@ def _parse_args():
     parser.add_argument("--session", default="")
     parser.add_argument("--training-video", dest="training_video", default="")
     parser.add_argument("--tracking-video", dest="tracking_video", default="")
+    parser.add_argument("--tracking-video-is-dir", type=int, choices=(0, 1), default=0)
     parser.add_argument("--load-config", dest="load_config", default="")
     parser.add_argument("--without-direction-estimation", type=int, choices=(0, 1), default=None)
     return parser.parse_args()
@@ -2890,6 +2891,8 @@ def main() -> None:
         training_video_path=args.training_video,
         tracking_video_path=args.tracking_video,
     )
+    if args.tracking_video_is_dir:
+        app.path_mode["TRACKING_VIDEO_PATH_IS_DIR"].set(True)
     if args.load_config and os.path.isfile(args.load_config):
         app.after(400, lambda p=args.load_config: app._do_load_yaml(p, show_msg=False))
     if args.without_direction_estimation is not None:
