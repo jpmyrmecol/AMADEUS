@@ -4,7 +4,7 @@
 
 <div align="center" style="line-height: 1;">
   <a href="https://doi.org/10.64898/2026.09.19.752854" target="_blank"><img alt="bioRxiv" src="https://img.shields.io/badge/bioRxiv-10.64898%2F2026.09.19.752854-2F6FA3?logo=biorxiv&logoColor=white"/></a>
-  <a href="https://x.com/jpmyrmecol" target="_blank"><img alt="X" src="https://img.shields.io/badge/X-jpmyrmecol-115E37?logo=x&logoColor=white"/></a>
+  <a href="https://x.com/jpmyrmecol" target="_blank"><img alt="X" src="https://img.shields.io/badge/X-jpmyrmecol-1A7C48?logo=x&logoColor=white"/></a>
   <a href="https://amadeus.jpmyrmecol.com/" target="_blank"><img alt="Website" src="https://img.shields.io/badge/Website-AMADEUS-D94A2B?logo=googlechrome&logoColor=white"/></a>
 </div>
 <br>
