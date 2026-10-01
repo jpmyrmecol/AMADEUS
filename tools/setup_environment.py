@@ -325,16 +325,20 @@ def prepare_profile_environment(profile: str, previous_profile: str | None = Non
 
     if previous_profile is None:
         previous_profile = _ready_marker_profile()
-    rebuild = False
+    current = PROFILES[profile]
+    rebuild = bool(
+        previous_profile is None
+        and current.install_dependencies
+        and venv_python().exists()
+    )
     if previous_profile is not None and previous_profile != profile:
         previous = PROFILES.get(previous_profile)
-        current = PROFILES[profile]
         rebuild = bool(
             (previous and previous.install_dependencies)
             or current.install_dependencies
         )
 
-    required_minor = PROFILES[profile].python_minor
+    required_minor = current.python_minor
     if not rebuild and required_minor and venv_python().exists():
         try:
             running_minor = subprocess.check_output(
@@ -527,7 +531,7 @@ def install_exact_pytorch_profile(uv_executable: str, profile: str) -> None:
     command.extend([torch_spec, torchvision_spec])
 
     dependency_note = (
-        " with AMD device runtime dependencies"
+        " with accelerator runtime dependencies"
         if selected.install_dependencies
         else " without changing other dependencies"
     )
