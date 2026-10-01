@@ -39,19 +39,6 @@ PROFILES = {
         install_dependencies=True,
         sync_extra="cpu",
     ),
-    # CUDA 12.8 is retained only as a Blackwell compatibility path when the
-    # installed driver cannot run CUDA 13.x. PyTorch 2.7.1 introduced stable
-    # Blackwell wheels for CUDA 12.8.
-    "cu128": WheelProfile(
-        Backend.NVIDIA_CUDA,
-        "cu128",
-        "https://download.pytorch.org/whl/cu128",
-        "12.8",
-        torch_version="2.7.1",
-        torchvision_version="0.22.1",
-        install_dependencies=True,
-        sync_extra="cpu",
-    ),
     # PyTorch 2.14 + CUDA 12.6 is the final prebuilt line retaining
     # Maxwell/Pascal/Volta support.
     "cu126": WheelProfile(Backend.NVIDIA_CUDA, "cu126", "https://download.pytorch.org/whl/cu126", "12.6"),
@@ -98,7 +85,7 @@ def check_support(profile: str) -> None:
         raise RuntimeError("The rocmwin100 wheel profile requires Windows x86_64.")
     if profile == "macos" and sys.platform != "darwin":
         raise RuntimeError("The macos wheel profile requires macOS.")
-    if profile in {"cu126", "cu128", "cu132"} and sys.platform == "darwin":
+    if profile in {"cu126", "cu132"} and sys.platform == "darwin":
         raise RuntimeError(f"The {profile} wheel profile is unavailable on macOS.")
 
 
