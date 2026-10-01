@@ -613,6 +613,8 @@ class ConfigGUI(ctk.CTk):
                 ["NOISE_SIZE_PERCENT", "NOISE_MAX_COUNT"],
                 bool(noise_enable_var.get()),
             )
+            if hasattr(self, "skip_paste_blobs_with_crossing"):
+                self._refresh_skip_dependent_states()
 
         noise_enable_var.trace_add("write", _toggle_noise_fields)
         _toggle_noise_fields()
@@ -626,6 +628,8 @@ class ConfigGUI(ctk.CTk):
             self._set_create_images_group_enabled("Create with crossing", ["EDGE_BLUR_KSIZE", "EDGE_BLUR_SIGMA"], is_gaussian)
             for _blur_key in ("EDGE_BLUR_KSIZE", "EDGE_BLUR_SIGMA"):
                 self._set_parameter_row_visible("Create with crossing", _blur_key, is_gaussian)
+            if hasattr(self, "skip_paste_blobs_with_crossing"):
+                self._refresh_skip_dependent_states()
 
         self._toggle_with_crossing_alpha_mode = _toggle_alpha_mode
         self._bind_combo("ALPHA_MODE", _toggle_alpha_mode)
@@ -636,6 +640,8 @@ class ConfigGUI(ctk.CTk):
             mode = str(paste_layer_widget.get()).strip().lower()
             self._set_create_images_group_enabled("Create with crossing", ["UNDER_PASTE_PROB"], mode == "mixed")
             self._set_create_images_group_enabled("Create with crossing", ["OCCLUDER_MARGIN"], mode in {"under", "mixed"})
+            if hasattr(self, "skip_paste_blobs_with_crossing"):
+                self._refresh_skip_dependent_states()
 
         self._toggle_with_crossing_paste_layer_mode = _toggle_paste_layer_mode
         self._bind_combo("PASTE_LAYER_MODE", _toggle_paste_layer_mode)
@@ -727,15 +733,6 @@ class ConfigGUI(ctk.CTk):
         )
         self.sections["Analysis"]["widgets"]["INTERACT_IOU"].configure(state="disabled")
 
-        # Analysis stages are independently skippable. Keep the checkboxes
-        # independent and only disable parameters that are irrelevant to every
-        # stage that consumes them.
-        for _skip_var in (self.skip_detection, self.skip_id_tracking, self.skip_refinement):
-            _skip_var.trace_add("write", self._refresh_analysis_skip_states)
-        _embedding_enable_var = self.sections["Analysis"]["widgets"]["ENABLE"]
-        _embedding_enable_var.trace_add("write", self._refresh_analysis_skip_states)
-        self._refresh_analysis_skip_states()
-
         # Create Video
         create_video_fields = {
             "Draw Elements": [
@@ -778,10 +775,31 @@ class ConfigGUI(ctk.CTk):
 
         def _toggle_export_images(*_):
             image_export_format_widget.configure(state=("readonly" if export_images_var.get() else "disabled"))
+            if hasattr(self, "skip_creating_video"):
+                self._refresh_skip_dependent_states()
 
         self._toggle_export_images = _toggle_export_images
         export_images_var.trace_add("write", _toggle_export_images)
         _toggle_export_images()
+
+        for _skip_var in (
+            self.skip_initial_tracking,
+            self.skip_trajectory_direction_filtering,
+            self.skip_refine_blobs_through_tracking,
+            self.skip_paste_blobs_with_crossing,
+            self.skip_paste_blobs_clustered,
+            self.skip_creating_direction_dataset,
+            self.skip_training,
+            self.skip_detection,
+            self.skip_id_tracking,
+            self.skip_refinement,
+            self.skip_creating_video,
+        ):
+            _skip_var.trace_add("write", self._refresh_skip_dependent_states)
+        self.sections["Analysis"]["widgets"]["ENABLE"].trace_add(
+            "write", self._refresh_skip_dependent_states
+        )
+        self._refresh_skip_dependent_states()
 
         self._apply_prefill_paths()
         _start_maximized(self)
@@ -1193,86 +1211,231 @@ class ConfigGUI(ctk.CTk):
             else:
                 w.configure(state=state)
 
-    def _refresh_analysis_skip_states(self, *_):
-        """Enable only Analysis controls used by at least one active stage.
+    def _refresh_skip_dependent_states(self, *_):
+        """Synchronize Advanced Tracking controls with independent stage skips.
 
-        Detection, ID Tracking, and Refinement are independent stages. Shared
-        parameters remain editable whenever any active stage still consumes
-        them; no skip checkbox changes another skip checkbox.
+        Skip variables never change one another. A parameter is disabled only
+        when every stage that consumes it is skipped.
         """
-        if "Analysis" not in self.sections:
+        if not getattr(self, "sections", None):
             return
 
+        def set_keys(section: str, keys, enabled: bool) -> None:
+            if section not in self.sections:
+                return
+            existing = self.sections[section]["widgets"]
+            present = [key for key in keys if key in existing]
+            if present:
+                self._set_create_images_group_enabled(section, present, enabled)
+
+        # Initial Tracking.
+        initial_active = not bool(self.skip_initial_tracking.get())
+        set_keys(
+            "Initial Tracking",
+            list(self.sections.get("Initial Tracking", {}).get("widgets", {}).keys()),
+            initial_active,
+        )
+
+        # Create single animal images: the two passes are independently skippable.
+        trajectory_active = not bool(self.skip_trajectory_direction_filtering.get())
+        refine_blobs_active = not bool(self.skip_refine_blobs_through_tracking.get())
+        set_keys(
+            "Create single animal images",
+            [
+                "TRAJ_MAX_DIST", "DIR_MIN_SEC", "TRAJ_MAX_JUMP",
+                "MIN_ASPECT", "DIR_MIN_DISP", "SKIP_DIR_PREVIEW",
+            ],
+            trajectory_active,
+        )
+        set_keys(
+            "Create single animal images",
+            [
+                "REFINE_FRAME_RATIO", "REFINE_EPOCHS", "REFINE_BATCH",
+                "REFINE_ITERS", "REFINE_MODEL", "REFINE_CONF",
+                "RUN_DELETE_RATIO", "SKIP_REFINE_PREVIEW",
+            ],
+            refine_blobs_active,
+        )
+
+        # Synthetic interaction generation. The clustered and mixed generators
+        # share appearance/placement parameters, while composition is mixed-only
+        # and most cluster geometry is clustered-only.
+        mixed_paste_active = not bool(self.skip_paste_blobs_with_crossing.get())
+        clustered_paste_active = not bool(self.skip_paste_blobs_clustered.get())
+        any_paste_active = mixed_paste_active or clustered_paste_active
+
+        set_keys("Create with crossing", ["NOISE_ENABLE"], any_paste_active)
+        noise_enabled = False
+        if "Create with crossing" in self.sections:
+            noise_var = self.sections["Create with crossing"]["widgets"].get("NOISE_ENABLE")
+            noise_enabled = bool(noise_var.get()) if noise_var is not None else False
+        set_keys(
+            "Create with crossing",
+            ["NOISE_SIZE_PERCENT", "NOISE_MAX_COUNT"],
+            any_paste_active and noise_enabled,
+        )
+
+        set_keys(
+            "Create with crossing",
+            [
+                "RATIO_SINGLE", "RATIO_P2", "RATIO_P3",
+                "FREE_SCALE", "FREE_RATIO_SINGLE", "FREE_RATIO_P2", "FREE_RATIO_P3",
+            ],
+            mixed_paste_active,
+        )
+
+        shared_paste_keys = [
+            "MAX_OVERLAP", "PASTE_SCALE_MIN", "PASTE_SCALE_MAX",
+            "WIDTH_SCALE_MIN", "WIDTH_SCALE_MAX", "MASK_EXPANSION_RATIO",
+            "BRIGHT_MIN", "BRIGHT_MAX", "CONTRAST_MIN", "CONTRAST_MAX",
+            "PASTE_LAYER_MODE", "OCCLUDER_MARGIN", "ALPHA_MODE",
+            "FEATHER_MIN", "FEATHER_MAX", "MAX_TRIES",
+        ]
+        set_keys("Create with crossing", shared_paste_keys, any_paste_active)
+
+        paste_widgets = self.sections.get("Create with crossing", {}).get("widgets", {})
+        paste_layer_mode = str(
+            paste_widgets.get("PASTE_LAYER_MODE").get()
+            if paste_widgets.get("PASTE_LAYER_MODE") is not None else ""
+        ).strip().lower()
+        alpha_mode = str(
+            paste_widgets.get("ALPHA_MODE").get()
+            if paste_widgets.get("ALPHA_MODE") is not None else ""
+        ).strip().lower()
+        set_keys(
+            "Create with crossing",
+            ["UNDER_PASTE_PROB"],
+            any_paste_active and paste_layer_mode == "mixed",
+        )
+        set_keys(
+            "Create with crossing",
+            ["EDGE_BLUR_KSIZE", "EDGE_BLUR_SIGMA"],
+            any_paste_active and alpha_mode == "gaussian",
+        )
+        for blur_key in ("EDGE_BLUR_KSIZE", "EDGE_BLUR_SIGMA"):
+            if ("Create with crossing", blur_key) in self._parameter_rows:
+                self._set_parameter_row_visible(
+                    "Create with crossing", blur_key, alpha_mode == "gaussian"
+                )
+
+        # CLUSTERED_RATIO also determines the non-clustered target, so it
+        # remains relevant while either paste generator runs.
+        set_keys("Create with crossing", ["CLUSTERED_RATIO"], any_paste_active)
+        set_keys(
+            "Create with crossing",
+            [
+                "CLUSTER_COUNT", "CLUSTER_FRAMES", "CLUSTER_FIT_LONG",
+                "CLUSTER_FIT_SHORT", "CLUSTER_BREAK_PROB",
+            ],
+            clustered_paste_active,
+        )
+
+        # Dataset and training stages.
+        dataset_active = not bool(self.skip_creating_direction_dataset.get())
+        set_keys(
+            "Create dataset",
+            list(self.sections.get("Create dataset", {}).get("widgets", {}).keys()),
+            dataset_active,
+        )
+
+        training_active = not bool(self.skip_training.get())
+        set_keys(
+            "Training",
+            list(self.sections.get("Training", {}).get("widgets", {}).keys()),
+            training_active,
+        )
+        for widget in getattr(self, "training_range", {}).values():
+            try:
+                widget.configure(state="normal" if training_active else "disabled")
+            except Exception:
+                pass
+
+        # Analysis stages are fully independent.
         detection_active = not bool(self.skip_detection.get())
         id_tracking_active = not bool(self.skip_id_tracking.get())
         refinement_active = not bool(self.skip_refinement.get())
         any_analysis_active = detection_active or id_tracking_active or refinement_active
 
-        # Object-detection-only controls.
-        self._set_create_images_group_enabled(
+        # Detection-only controls.
+        set_keys(
             "Analysis",
             ["DEVICE", "BATCH_SIZE", "SKIP_DETECT_PREVIEW"],
             detection_active,
         )
 
-        # WEIGHT selects the checkpoint family used by detection, tracking,
-        # and refinement. CONF/NMS_IOU are needed by detection and ID tracking.
-        self._set_create_images_group_enabled(
-            "Analysis",
-            ["WEIGHT"],
-            any_analysis_active,
-        )
-        self._set_create_images_group_enabled(
+        # Shared checkpoint/filter controls.
+        set_keys("Analysis", ["WEIGHT"], any_analysis_active)
+        set_keys(
             "Analysis",
             ["CONF", "NMS_IOU"],
             detection_active or id_tracking_active,
         )
 
-        # Parameters shared by ID Tracking and Refinement.
-        self._set_create_images_group_enabled(
+        # Shared by ID Tracking and Refinement.
+        set_keys(
             "Analysis",
             ["MATCH_IOU", "MATCH_ANGLE", "MAX_AGE"],
             id_tracking_active or refinement_active,
         )
 
         # ID-Tracking-only association costs.
-        self._set_create_images_group_enabled(
+        set_keys(
             "Analysis",
             ["IOU_WEIGHT", "DIRECTION_WEIGHT", "MISS_WEIGHT", "DISTANCE_WEIGHT"],
             id_tracking_active,
         )
 
-        # Refinement-only correction parameters.
-        self._set_create_images_group_enabled(
+        # Refinement-only correction controls.
+        set_keys(
             "Analysis",
             ["MAX_AXIS_ERR", "FLIP_SEC"],
             refinement_active,
         )
 
-        # Embedding belongs to Refinement. Its detail fields are meaningful
-        # only while Refinement and embedding are both enabled.
-        embedding_enable = self.sections["Analysis"]["widgets"]["ENABLE"]
-        self._set_create_images_group_enabled(
-            "Analysis",
-            ["ENABLE"],
-            refinement_active,
+        analysis_widgets = self.sections.get("Analysis", {}).get("widgets", {})
+        embedding_enable = analysis_widgets.get("ENABLE")
+        set_keys("Analysis", ["ENABLE"], refinement_active)
+        embedding_details_active = bool(
+            refinement_active
+            and embedding_enable is not None
+            and embedding_enable.get()
         )
-        embedding_details_active = refinement_active and bool(embedding_enable.get())
-        self._set_create_images_group_enabled(
+        set_keys(
             "Analysis",
             ["EMBED_DEVICE", "IMG_SIZE", "PREVIEW_COUNT"],
             embedding_details_active,
         )
 
-        # Fixed threshold: always display it, never make it editable.
-        self.sections["Analysis"]["widgets"]["INTERACT_IOU"].configure(state="disabled")
+        # Fixed threshold is intentionally display-only.
+        interact_iou = analysis_widgets.get("INTERACT_IOU")
+        if interact_iou is not None:
+            interact_iou.configure(state="disabled")
 
-        # Analysis range is shared by the three analysis stages.
         for widget in getattr(self, "analysis_range", {}).values():
             try:
                 widget.configure(state="normal" if any_analysis_active else "disabled")
             except Exception:
                 pass
+
+        # Create Video.
+        create_video_active = not bool(self.skip_creating_video.get())
+        set_keys(
+            "Create Video",
+            list(self.sections.get("Create Video", {}).get("widgets", {}).keys()),
+            create_video_active,
+        )
+        create_video_widgets = self.sections.get("Create Video", {}).get("widgets", {})
+        export_images = create_video_widgets.get("EXPORT_IMAGES")
+        if create_video_active and export_images is not None:
+            set_keys(
+                "Create Video",
+                ["IMAGE_FORMAT"],
+                bool(export_images.get()),
+            )
+        if hasattr(self, "_shuffle_colors_button"):
+            self._shuffle_colors_button.configure(
+                state="normal" if create_video_active else "disabled"
+            )
 
     def create_section(self, *, title: str, fields: dict, btn_parent, skip_vars=None):
         btn = ctk.CTkButton(
@@ -1691,7 +1854,7 @@ class ConfigGUI(ctk.CTk):
         self.skip_refinement.set(cfg.get("skip_refinement", False))
         self.skip_creating_video.set(cfg.get("skip_creating_video", False))
         self.delete_tmp_files.set(cfg.get("delete_tmp_files", False))
-        self._refresh_analysis_skip_states()
+        self._refresh_skip_dependent_states()
 
         self._capture_auto_param_values(cfg)
         self._refresh_default_markers()
