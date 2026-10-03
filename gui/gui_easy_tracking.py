@@ -2904,7 +2904,6 @@ class EasyTrackingGUI(ctk.CTk):
             "USE_FULL":                   effective_include_full,
             "USE_CROP":                   not skip_crop,
             "CLUSTER_FRAMES":             cluster_frames,
-            "INIT_CSV_PATH":   os.path.join(session, "initial_tracking", "track_assignments.csv"),
             "SINGLE_PASTE":    single_animal_paste,
         }
 
@@ -3072,9 +3071,7 @@ class EasyTrackingGUI(ctk.CTk):
         cfg["TRACKING_VIDEO_FILES"] = tracking_video_files
         if answer_changed("session"):
             cfg["SESSION_PATH"] = session
-            cfg["INIT_CSV_PATH"] = os.path.join(
-                session, "initial_tracking", "track_assignments.csv"
-            )
+        cfg.pop("INIT_CSV_PATH", None)
         if answer_changed("num_objects", "variable_count"):
             cfg["NUM_OBJECTS"] = num_objects
         if answer_changed("overlap"):

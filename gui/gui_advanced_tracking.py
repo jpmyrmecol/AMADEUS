@@ -2240,7 +2240,7 @@ class ConfigGUI(ctk.CTk):
         # Always <session>/segmentation/, matching where segmentation itself
         # writes (see gui_segmentation.py's _default_output_dir).
         cfg["PICKLE_PATH"], cfg["BACKGROUND_PATH"] = segmentation_paths_for_session(session, training_video_path)
-        cfg["INIT_CSV_PATH"] = os.path.join(session, "initial_tracking", "track_assignments.csv")
+        cfg.pop("INIT_CSV_PATH", None)
 
         fn = os.path.join(session, "config.yaml")
         try:

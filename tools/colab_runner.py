@@ -415,8 +415,14 @@ def _runtime_input_bundle(config: Mapping[str, object], summary, workspace_root:
                 continue
             path = os.path.abspath(str(raw))
             target_name = os.path.basename(path) or key.lower()
-            allow_missing = key == "INIT_CSV_PATH" and not bool(config.get("skip_initial_tracking", False))
-            path_mapping[_key(path)] = map_path(path, name=target_name, allow_missing=allow_missing)
+            path_mapping[_key(path)] = map_path(path, name=target_name)
+    if bool(config.get("skip_initial_tracking", False)):
+        for filename in ("track_assignments.csv", "tracking_stats.csv"):
+            path = os.path.join(drive_session, "initial_tracking", filename)
+            path_mapping[_key(path)] = map_path(
+                path,
+                name=os.path.join("initial_tracking", filename),
+            )
 
     raw_dirs = config.get("CREATE_DATASET_SOURCE_DIRS")
     if raw_dirs:
@@ -440,8 +446,6 @@ def _runtime_input_bundle(config: Mapping[str, object], summary, workspace_root:
                 continue
             if _key(source) in path_mapping:
                 runtime[key] = path_mapping[_key(source)]
-            elif key == "INIT_CSV_PATH" and not bool(runtime.get("skip_initial_tracking", False)):
-                runtime[key] = str(local_session / "initial_tracking" / os.path.basename(source))
             else:
                 raise ValueError(f"Could not map runtime config path {key}: {source}")
     if runtime.get("CREATE_DATASET_SOURCE_DIRS"):

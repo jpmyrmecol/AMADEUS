@@ -18,7 +18,6 @@ CONFIG_PATH_KEYS = (
     "TRACKING_VIDEO_PATH",
     "PICKLE_PATH",
     "BACKGROUND_PATH",
-    "INIT_CSV_PATH",
     "YOLO_DATASET_DIR",
 )
 
@@ -78,6 +77,7 @@ def resolve_config_paths(cfg: dict) -> dict:
     SESSION_PATH itself must already be absolute; it is the resolution anchor.
     Call this immediately after loading config.yaml, before reading any path key.
     """
+    cfg.pop("INIT_CSV_PATH", None)
     session_path = str(cfg.get("SESSION_PATH", "") or "")
     for key in CONFIG_PATH_KEYS:
         if key in cfg and cfg[key]:
@@ -99,6 +99,7 @@ def relativize_config_paths(cfg: dict) -> dict:
     """
     session_path = str(cfg.get("SESSION_PATH", "") or "")
     out = dict(cfg)
+    out.pop("INIT_CSV_PATH", None)
     for key in CONFIG_PATH_KEYS:
         if key in out and out[key]:
             out[key] = to_relative_path(out[key], session_path)

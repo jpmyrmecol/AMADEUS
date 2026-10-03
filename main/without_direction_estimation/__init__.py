@@ -35,7 +35,6 @@ def prepare_config(path):
     cfg['SESSION_PATH'] = str(target)
     cfg['_DIRECTIONLESS_SCHEMA'] = SCHEMA
     cfg['_SOURCE_SESSION_PATH'] = str(source)
-    cfg['INIT_CSV_PATH'] = str(target / 'initial_tracking' / Path(cfg['INIT_CSV_PATH']).name)
     cfg['YOLO_DATASET_DIR'] = str(target / 'yolo_dataset')
     cfg['training'] = {**cfg.get('training', {}), 'CLASS_NAMES': ['animal'], 'NUM_CLASSES': 1, 'USE_DIRECTION_CLASSES': True}
     # Custom direction-bearing datasets cannot silently cross the mode boundary.

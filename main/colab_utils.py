@@ -744,6 +744,14 @@ def plan_input_bundle(config_path: str, destination_parent: str) -> BundlePlan:
     referenced_values: list[tuple[str, object]] = [
         (key, cfg.get(key)) for key in CONFIG_PATH_KEYS if key not in {"TRAINING_VIDEO_PATH", "TRACKING_VIDEO_PATH"}
     ]
+    if bool(cfg.get("skip_initial_tracking", False)):
+        referenced_values.extend(
+            (
+                "initial_tracking",
+                os.path.join(source_session, "initial_tracking", filename),
+            )
+            for filename in ("track_assignments.csv", "tracking_stats.csv")
+        )
     raw_dirs = cfg.get("CREATE_DATASET_SOURCE_DIRS")
     if raw_dirs:
         referenced_values.append(("CREATE_DATASET_SOURCE_DIRS", raw_dirs))
@@ -752,8 +760,6 @@ def plan_input_bundle(config_path: str, destination_parent: str) -> BundlePlan:
         for raw in values:
             source = os.path.abspath(str(raw))
             if not os.path.exists(source):
-                if key == "INIT_CSV_PATH" and not bool(cfg.get("skip_initial_tracking", False)):
-                    continue
                 raise FileNotFoundError(f"Config references a missing input: {key}={source}")
             if _normcase_path(source) in seen:
                 continue
@@ -786,7 +792,7 @@ def plan_input_bundle(config_path: str, destination_parent: str) -> BundlePlan:
                 path_map[_normcase_path(source)] = directory_destination
                 colab_map[_normcase_path(source)] = drive_path_to_colab_path(directory_destination)
                 continue
-            if key in {"PICKLE_PATH", "BACKGROUND_PATH", "INIT_CSV_PATH"} and os.path.isdir(source):
+            if key in {"PICKLE_PATH", "BACKGROUND_PATH"} and os.path.isdir(source):
                 raise ValueError(f"Config path must be a file: {key}={source}")
             if os.path.isfile(source):
                 if _is_within(source, source_session):
@@ -804,9 +810,6 @@ def plan_input_bundle(config_path: str, destination_parent: str) -> BundlePlan:
         if isinstance(value, str) and value.strip():
             source_value = os.path.abspath(value)
             if _normcase_path(source_value) in colab_map:
-                continue
-            # Missing INIT_CSV_PATH is valid when initial tracking will create it.
-            if not os.path.exists(source_value) and key == "INIT_CSV_PATH" and not bool(cfg.get("skip_initial_tracking", False)):
                 continue
             if os.path.exists(source_value):
                 raise ValueError(f"Could not map config path {key}: {source_value}")
@@ -826,8 +829,6 @@ def plan_input_bundle(config_path: str, destination_parent: str) -> BundlePlan:
             source_value = os.path.abspath(value)
             if source_value and _normcase_path(source_value) in colab_map:
                 runtime[key] = _relative_colab(colab_map[_normcase_path(source_value)], colab_destination_session)
-            elif key == "INIT_CSV_PATH" and not os.path.exists(source_value) and not bool(cfg.get("skip_initial_tracking", False)):
-                runtime[key] = posixpath.join("initial_tracking", os.path.basename(source_value))
     if isinstance(cfg.get("CREATE_DATASET_SOURCE_DIRS"), str):
         raw = str(cfg["CREATE_DATASET_SOURCE_DIRS"])
         mapped = colab_map.get(_normcase_path(os.path.abspath(raw)))

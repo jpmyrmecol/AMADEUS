@@ -1945,7 +1945,9 @@ def main() -> None:
     cfg = load_config(sys.argv[1])
     session_path = str(cfg["SESSION_PATH"])
     pickle_path = str(cfg["PICKLE_PATH"])
-    initial_tracking_csv_path = str(cfg["INIT_CSV_PATH"])
+    initial_tracking_csv_path = os.path.join(
+        session_path, "initial_tracking", "track_assignments.csv"
+    )
     initial_tracking_stats_path = os.path.join(
         session_path, "initial_tracking", "tracking_stats.csv"
     )
