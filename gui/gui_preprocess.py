@@ -39,9 +39,9 @@ from gui.video_input import (
 )
 from main.video_compat import ffmpeg_executable
 from main.video_encoders import (
-    HARDWARE_ENCODER_LABELS,
-    detect_hardware_video_encoder,
-    hardware_encoder_args,
+    GPU_ENCODER_LABELS,
+    detect_gpu_video_encoder,
+    gpu_encoder_args,
 )
 from main.video_frame_count import detect_seekable_frame_count
 
@@ -154,7 +154,7 @@ def ffmpeg_exe() -> str:
 def _video_encoder_args(encoder: str) -> list[str]:
     if encoder == "libx264":
         return ["-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p"]
-    return hardware_encoder_args(encoder)
+    return gpu_encoder_args(encoder)
 
 
 def _rgb_hex(color: tuple[int, int, int]) -> str:
@@ -561,10 +561,10 @@ class PreprocessApp(ctk.CTk):
         self.status_clear_job: str | None = None
         self.config_save_job: str | None = None
         self.export_queue: queue.Queue = queue.Queue()
-        self.hardware_encoder_queue: queue.Queue = queue.Queue()
-        self.hardware_encoder_detection_complete = False
-        self.hardware_video_encoder: str | None = None
-        self.hardware_video_encoder_device: str | None = None
+        self.gpu_encoder_queue: queue.Queue = queue.Queue()
+        self.gpu_encoder_detection_complete = False
+        self.gpu_video_encoder: str | None = None
+        self.gpu_video_encoder_device: str | None = None
         self.export_thread: threading.Thread | None = None
         self.export_cancel = threading.Event()
         self.export_proc: subprocess.Popen | None = None
@@ -583,7 +583,7 @@ class PreprocessApp(ctk.CTk):
         self._refresh_region_list(select_index=0)
         self._sync_adjustment_controls_from_region()
         self._refresh_video_controls()
-        self._start_hardware_encoder_detection()
+        self._start_gpu_encoder_detection()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         _start_maximized(self)
 
@@ -1081,30 +1081,30 @@ class PreprocessApp(ctk.CTk):
         )
         self.output_frame_count_var.set(f"total {output_frames:,} frames")
 
-    def _start_hardware_encoder_detection(self) -> None:
+    def _start_gpu_encoder_detection(self) -> None:
         def worker() -> None:
             try:
-                detected = detect_hardware_video_encoder()
+                detected = detect_gpu_video_encoder(ffmpeg_exe())
             except Exception as exc:
-                print(f"[AMADEUS] Hardware video encoder detection failed: {exc}", file=sys.stderr)
+                print(f"[AMADEUS] GPU acceleration validation failed: {exc}", file=sys.stderr)
                 detected = None
-            self.hardware_encoder_queue.put(("result", detected))
+            self.gpu_encoder_queue.put(("result", detected))
 
         threading.Thread(target=worker, daemon=True).start()
-        self.after(100, self._poll_hardware_encoder_detection)
+        self.after(100, self._poll_gpu_encoder_detection)
 
-    def _poll_hardware_encoder_detection(self) -> None:
+    def _poll_gpu_encoder_detection(self) -> None:
         try:
-            event_type, payload = self.hardware_encoder_queue.get_nowait()
+            event_type, payload = self.gpu_encoder_queue.get_nowait()
         except queue.Empty:
-            self.after(100, self._poll_hardware_encoder_detection)
+            self.after(100, self._poll_gpu_encoder_detection)
             return
 
-        self.hardware_encoder_detection_complete = True
+        self.gpu_encoder_detection_complete = True
         detected = payload
         if detected is None:
-            self.hardware_video_encoder = None
-            self.hardware_video_encoder_device = None
+            self.gpu_video_encoder = None
+            self.gpu_video_encoder_device = None
             self.gpu_acceleration_var.set(False)
             self.gpu_acceleration_check.configure(
                 text="GPU acceleration",
@@ -1114,8 +1114,8 @@ class PreprocessApp(ctk.CTk):
             return
 
         encoder, device = detected
-        self.hardware_video_encoder = encoder
-        self.hardware_video_encoder_device = device
+        self.gpu_video_encoder = encoder
+        self.gpu_video_encoder_device = device
         self.gpu_acceleration_var.set(True)
         self.gpu_acceleration_check.configure(
             text="GPU acceleration",
@@ -1477,7 +1477,7 @@ class PreprocessApp(ctk.CTk):
             "output": {
                 "folder": self.output_folder_var.get().strip(),
                 "video_encoder_device": (
-                    self.hardware_video_encoder_device
+                    self.gpu_video_encoder_device
                     if self.gpu_acceleration_var.get()
                     else None
                 ),
@@ -1486,8 +1486,8 @@ class PreprocessApp(ctk.CTk):
                 "fps": float(self.output_fps_var.get()),
                 "use_gpu_acceleration": bool(self.gpu_acceleration_var.get()),
                 "video_encoder": (
-                    self.hardware_video_encoder
-                    if self.gpu_acceleration_var.get() and self.hardware_video_encoder
+                    self.gpu_video_encoder
+                    if self.gpu_acceleration_var.get() and self.gpu_video_encoder
                     else "libx264"
                 ),
                 "apply_view_rotation": bool(self.export_view_rotation_var.get()),
@@ -1736,7 +1736,7 @@ class PreprocessApp(ctk.CTk):
         self.delete_crop_button.configure(state=delete_state)
         export_state = (
             "normal"
-            if has_video and self.hardware_encoder_detection_complete and self.output_folder_var.get().strip()
+            if has_video and self.gpu_encoder_detection_complete and self.output_folder_var.get().strip()
             else "disabled"
         )
         if not any(region.export_enabled for region in self.regions):
@@ -2401,7 +2401,7 @@ class PreprocessApp(ctk.CTk):
             self._refresh_video_controls()
 
     def start_export(self) -> None:
-        if self.export_running or not self.hardware_encoder_detection_complete:
+        if self.export_running or not self.gpu_encoder_detection_complete:
             return
         try:
             job = self._build_export_job()
@@ -2451,10 +2451,10 @@ class PreprocessApp(ctk.CTk):
         video_encoder_device = None
         export_ffmpeg = ffmpeg_exe()
         if self.gpu_acceleration_var.get():
-            if self.hardware_video_encoder is None:
+            if self.gpu_video_encoder is None:
                 raise RuntimeError("GPU acceleration is selected, but no supported GPU encoder is available.")
-            video_encoder = self.hardware_video_encoder
-            video_encoder_device = self.hardware_video_encoder_device
+            video_encoder = self.gpu_video_encoder
+            video_encoder_device = self.gpu_video_encoder_device
             if video_encoder == "h264_vaapi" and not video_encoder_device:
                 raise RuntimeError("VAAPI was detected without a usable render device.")
 
@@ -2552,7 +2552,7 @@ class PreprocessApp(ctk.CTk):
         self.output_speed_spin.configure(state=state)
         self.output_fps_spin.configure(state=state)
         self.gpu_acceleration_check.configure(
-            state="disabled" if running or self.hardware_video_encoder is None else "normal"
+            state="disabled" if running or self.gpu_video_encoder is None else "normal"
         )
         self._set_region_list_state(state)
         self._set_crop_controls_state(not running and self._crop_control_index() is not None)
@@ -2590,7 +2590,7 @@ class PreprocessApp(ctk.CTk):
             os.makedirs(job.output_folder, exist_ok=True)
             source_reader = VideoFrameReader(job.video_path)
             try:
-                encoder_label = HARDWARE_ENCODER_LABELS.get(job.video_encoder, "CPU (libx264)")
+                encoder_label = GPU_ENCODER_LABELS.get(job.video_encoder, "CPU (libx264)")
                 self.export_queue.put(("log", f"Video encoder: {encoder_label}"))
                 total_regions = max(1, len(job.regions))
                 for region_index, region in enumerate(job.regions):
