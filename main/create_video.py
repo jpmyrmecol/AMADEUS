@@ -45,7 +45,7 @@ from video_frame_count import read_video_frame_info, warn_if_frame_count_adjuste
 from tracking_video_inputs import configured_tracking_video_files
 from gui.color import make_id_palette, resolve_color_seed
 from main.video_compat import ffmpeg_executable
-from main.video_encoders import detect_hardware_video_encoder, hardware_encoder_args
+from main.video_encoders import detect_gpu_video_encoder, gpu_encoder_args
 
 
 DIRECTION_CLASS_NAMES = [
@@ -408,9 +408,6 @@ def choose_frame_range(analysis: dict, total_frames: int) -> tuple[int, int, str
     return first_frame, last_frame, start_src, end_src
 
 
-_GPU_VIDEO_ENCODER: tuple[str, str | None] | None | bool = False
-
-
 def resolve_video_acceleration(value) -> str:
     mode = str(value if value is not None else "cpu").strip().lower()
     if mode not in {"cpu", "gpu", "auto"}:
@@ -427,45 +424,28 @@ def _ffmpeg_path() -> str | None:
 
 
 def _gpu_video_encoder() -> tuple[str, str | None] | None:
-    global _GPU_VIDEO_ENCODER
-    if _GPU_VIDEO_ENCODER is not False:
-        return _GPU_VIDEO_ENCODER
     ffmpeg = _ffmpeg_path()
     if not ffmpeg:
-        _GPU_VIDEO_ENCODER = None
-    else:
-        _GPU_VIDEO_ENCODER = detect_hardware_video_encoder()
-    return _GPU_VIDEO_ENCODER
+        return None
+    return detect_gpu_video_encoder(ffmpeg, profile="create_video")
 
 
-def _should_use_gpu_video_encoder(video_acceleration: str, video_codec: str = "auto") -> bool:
+def _selected_video_encoder(video_acceleration: str, video_codec: str) -> tuple[str, str | None]:
     mode = resolve_video_acceleration(video_acceleration)
     codec = str(video_codec or "auto").strip().lower()
     if codec not in {"auto", "h264", "mp4v"}:
         raise RuntimeError(f"Unsupported VIDEO_CODEC: {video_codec}. Use 'auto', 'h264', or 'mp4v'.")
-    if mode == "cpu":
-        return False
     if codec == "mp4v":
         if mode == "gpu":
             print("[WARN] ACCELERATION=gpu requires H.264; VIDEO_CODEC=mp4v requested, using CPU MPEG-4 encoding.")
-        return False
-    available = _gpu_video_encoder()
-    if available is None:
-        if mode == "gpu":
-            print("[WARN] ACCELERATION=gpu requested, but no supported hardware H.264 encoder is available; using CPU video encoding.")
-        return False
-    return True
-
-
-def _selected_video_encoder(video_acceleration: str, video_codec: str) -> tuple[str, str | None]:
-    codec = str(video_codec or "auto").strip().lower()
-    if codec not in {"auto", "h264", "mp4v"}:
-        raise RuntimeError(f"Unsupported VIDEO_CODEC: {video_codec}. Use 'auto', 'h264', or 'mp4v'.")
-    if _should_use_gpu_video_encoder(video_acceleration, video_codec):
+        return ("mpeg4", None)
+    if mode != "cpu":
         selected = _gpu_video_encoder()
-        assert selected is not None
-        return selected
-    return ("mpeg4" if codec == "mp4v" else "libx264", None)
+        if selected is not None:
+            return selected
+        if mode == "gpu":
+            print("[WARN] ACCELERATION=gpu requested, but GPU acceleration is unavailable with the pinned FFmpeg; using CPU libx264 encoding.")
+    return ("libx264", None)
 
 
 def make_video_from_image_sequence(
@@ -495,7 +475,7 @@ def make_video_from_image_sequence(
         "-framerate", str(float(fps)),
         "-i", os.path.join(image_dir, f"%06d.{ext}"),
         "-vf", ",".join(filters),
-        *(hardware_encoder_args(encoder, profile="create_video") if encoder.startswith("h264_") else _cpu_encoder_args(encoder)),
+        *(_cpu_encoder_args(encoder) if encoder in {"libx264", "mpeg4"} else gpu_encoder_args(encoder, profile="create_video")),
         out_path,
     ])
     print(f"[INFO] AMADEUS FFmpeg image-sequence encoder for {os.path.basename(out_path)}: {encoder}")
@@ -505,7 +485,9 @@ def make_video_from_image_sequence(
 def _cpu_encoder_args(encoder: str) -> list[str]:
     if encoder == "mpeg4":
         return ["-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p"]
-    return ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+    if encoder == "libx264":
+        return ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+    raise ValueError(f"Unsupported CPU video encoder: {encoder}")
 
 
 class FfmpegRawVideoWriter:
@@ -541,7 +523,7 @@ class FfmpegRawVideoWriter:
             "-r", str(float(fps)),
             "-i", "pipe:0",
             "-vf", ",".join(filters),
-            *(hardware_encoder_args(encoder, profile="create_video") if encoder.startswith("h264_") else _cpu_encoder_args(encoder)),
+            *(_cpu_encoder_args(encoder) if encoder in {"libx264", "mpeg4"} else gpu_encoder_args(encoder, profile="create_video")),
             path,
         ])
         self.proc = subprocess.Popen(
@@ -566,7 +548,7 @@ class FfmpegRawVideoWriter:
             self.proc.wait()
             msg = err.decode("utf-8", errors="replace").strip()
             detail = f": {msg}" if msg else ""
-            raise RuntimeError(f"FFmpeg GPU video writer stopped unexpectedly{detail}") from exc
+            raise RuntimeError(f"FFmpeg video writer stopped unexpectedly{detail}") from exc
 
     def release(self) -> None:
         if self.proc.stdin is not None and not self.proc.stdin.closed:
@@ -578,7 +560,7 @@ class FfmpegRawVideoWriter:
         if rc != 0:
             msg = err.decode("utf-8", errors="replace").strip()
             detail = f": {msg}" if msg else ""
-            raise RuntimeError(f"FFmpeg GPU video writer failed with exit code {rc}{detail}")
+            raise RuntimeError(f"FFmpeg video writer failed with exit code {rc}{detail}")
 
 
 @dataclass

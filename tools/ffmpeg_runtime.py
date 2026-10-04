@@ -131,8 +131,8 @@ def _run_encoder_inventory(executable: Path) -> str:
             f"FFmpeg could not list its encoders (exit code {completed.returncode})."
         )
     output = f"{completed.stdout}\n{completed.stderr}"
-    if not _HARDWARE_ENCODER_PATTERN.search(output):
-        raise RuntimeError("The downloaded FFmpeg build has no supported H.264 hardware encoder.")
+    if not re.search(r"\blibx264\b", output):
+        raise RuntimeError("The pinned FFmpeg build has no libx264 CPU encoder.")
     return output
 
 
@@ -269,7 +269,9 @@ def ffmpeg_build_identity() -> str:
 def ensure_ffmpeg(install_root: Path | None = None) -> str:
     """Return AMADEUS's single fixed FFmpeg build, installing it when required."""
     if platform.system() == "Darwin":
-        return _macos_ffmpeg_binary()
+        executable = _macos_ffmpeg_binary()
+        _run_encoder_inventory(Path(executable))
+        return executable
 
     asset = _asset_for_current_platform()
     if asset is None:

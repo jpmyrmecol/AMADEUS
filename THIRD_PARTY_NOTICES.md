@@ -39,14 +39,16 @@ are used by all video features. The pinned assets, archive sizes, and SHA-256
 checks are in `tools/ffmpeg_runtime.py`; the source is
 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), GPL static variant,
 build `N-126342` from 2026-08-31. Separate archives cover Windows and Linux on
-x86_64 and ARM64. The builds include NVIDIA NVENC, Intel Quick Sync, AMD AMF,
-and Linux VAAPI where supported. BtbN's static binaries target Windows 10 22H2
+x86_64 and ARM64. The GPL builds include the `libx264` CPU encoder. GPU encoder
+support depends on the target architecture. In particular, these pinned builds
+disable Intel Quick Sync on ARM64 and VAAPI on Linux ARM64. BtbN's static binaries target Windows 10 22H2
 or newer and Linux glibc 2.28 / kernel 4.18 or newer.
 
 On macOS, AMADEUS uses the platform-specific `imageio-ffmpeg==0.6.0` binary,
 which includes Apple VideoToolbox support. This dependency is installed only on
 macOS; Windows and Linux do not install an additional `imageio-ffmpeg` binary.
-The macOS binary is licensed under the BSD 2-Clause License.
+The `imageio-ffmpeg` Python package is licensed under the BSD 2-Clause License.
+The bundled FFmpeg executable has its own FFmpeg and codec licensing notices.
 
 Copyright (c) 2018-2025, imageio contributors. All rights reserved.
 
@@ -59,12 +61,26 @@ archive's `LICENSE.txt` is kept beside the installed binary. The macOS
 `imageio-ffmpeg` package is licensed under the BSD 2-Clause License.
 
 Compilation support does not guarantee that a particular encoder will work with
-every GPU or driver. AMADEUS selects the encoder from the detected GPU:
-NVIDIA NVENC on Windows and Linux, AMD AMF or Intel Quick Sync on Windows,
-VAAPI for AMD/Intel on Linux, and Apple VideoToolbox on macOS. GPU acceleration
-is enabled by default in Cropping & Trimming when a GPU is detected, without
-a trial encode. Any encoding error is reported when exporting the actual video.
-Hardware encoding applies to the final H.264 encoding step;
-cropping, rotation, and image adjustments are still performed on the CPU. The
-same selected FFmpeg binary also handles Create Video exports, including CPU
-encoding when CPU is selected or no supported GPU is detected.
+every GPU or driver. AMADEUS selects candidates from detected GPUs: NVIDIA NVENC
+on Windows and Linux, AMD AMF or Intel Quick Sync on Windows, VAAPI for AMD/Intel
+on Linux, and Apple VideoToolbox on macOS. It only tests these candidates with
+the pinned FFmpeg executable and the options used by the requested export path.
+VAAPI tests and exports use the same detected render device. VideoToolbox must
+use its hardware implementation. Results are cached per executable and export
+profile for the process lifetime.
+
+GPU acceleration is enabled by default in Cropping & Trimming only after a
+short encode succeeds. If no candidate succeeds, GPU acceleration is disabled
+and H.264 exports use CPU `libx264`. Create Video uses the same validation with
+and without direction estimation. `ACCELERATION=cpu` always uses CPU encoding.
+`auto` selects a validated GPU encoder or falls back to CPU. `gpu` retains the
+same fallback with a warning when GPU acceleration is unavailable. An explicit
+`VIDEO_CODEC=mp4v` selection retains CPU MPEG-4 encoding.
+
+GPU acceleration applies to final H.264 encoding. Cropping, rotation, image
+adjustments, and overlay rendering still run on the CPU. A short test cannot
+guarantee support for every resolution, concurrent session, or later driver
+state. Errors during an actual export are reported without silently restarting
+the entire export on the CPU. GPU test failures do not prevent application
+startup. The pinned FFmpeg inventory requires `libx264`, independently of GPU
+encoder support.

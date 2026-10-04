@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Yusuke Notomi
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Select hardware video encoders from the GPUs detected by the operating system."""
+"""Select and validate GPU encoders for AMADEUS's pinned FFmpeg exports."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 from .compute_telemetry import query_nvidia_driver_info
 
 
-HARDWARE_ENCODER_LABELS = {
+GPU_ENCODER_LABELS = {
     "h264_videotoolbox": "Apple VideoToolbox",
     "h264_nvenc": "NVIDIA NVENC",
     "h264_qsv": "Intel Quick Sync",
@@ -29,8 +29,10 @@ _WINDOWS_ENCODERS = {
 }
 
 
-def hardware_encoder_args(encoder: str, *, profile: str = "preprocess") -> list[str]:
+def gpu_encoder_args(encoder: str, *, profile: str = "preprocess") -> list[str]:
     """Return encoder options, preserving each export path's quality target."""
+    if profile not in {"preprocess", "create_video"}:
+        raise ValueError(f"Unsupported video encoding profile: {profile}")
     if encoder == "h264_nvenc":
         cq = "12" if profile == "preprocess" else "23"
         preset = "p5" if profile == "preprocess" else "fast"
@@ -50,7 +52,7 @@ def hardware_encoder_args(encoder: str, *, profile: str = "preprocess") -> list[
         return ["-c:v", encoder, "-qp", quality]
     if encoder == "h264_videotoolbox":
         return ["-c:v", encoder, "-q:v", "85", "-allow_sw", "0", "-pix_fmt", "yuv420p"]
-    raise ValueError(f"Unsupported hardware video encoder: {encoder}")
+    raise ValueError(f"Unsupported GPU video encoder: {encoder}")
 
 
 def _windows_gpu_vendors() -> tuple[str, ...]:
@@ -94,22 +96,78 @@ def _linux_gpu_devices() -> tuple[tuple[str, str], ...]:
     return tuple(devices)
 
 
-@lru_cache(maxsize=1)
-def detect_hardware_video_encoder() -> tuple[str, str | None] | None:
-    """Choose an encoder from GPU presence, without a trial FFmpeg encode."""
+def _gpu_encoder_candidates() -> tuple[tuple[str, str | None], ...]:
+    """Only consider encoder families for GPUs present on this operating system."""
     if sys.platform == "darwin":
-        return ("h264_videotoolbox", None)
+        # VideoToolbox also supports some Intel Macs. The probe requires its
+        # hardware implementation, independently of the PyTorch backend.
+        return (("h264_videotoolbox", None),)
+    if os.name != "nt" and not sys.platform.startswith("linux"):
+        return ()
+    candidates: list[tuple[str, str | None]] = []
+    # NVIDIA can provide NVENC without a DRM render node (including WSL2).
     if query_nvidia_driver_info() is not None:
-        return ("h264_nvenc", None)
+        candidates.append(("h264_nvenc", None))
     if os.name == "nt":
         vendors = _windows_gpu_vendors()
         for vendor, encoder in _WINDOWS_ENCODERS.items():
             if vendor in vendors:
-                return (encoder, None)
+                candidates.append((encoder, None))
     elif sys.platform.startswith("linux"):
         devices = _linux_gpu_devices()
         for vendor in ("10de", "1002", "8086"):
             for device_vendor, device in devices:
                 if device_vendor == vendor:
-                    return ("h264_nvenc", None) if vendor == "10de" else ("h264_vaapi", device)
+                    candidates.append(("h264_nvenc", None) if vendor == "10de" else ("h264_vaapi", device))
+    return tuple(dict.fromkeys(candidates))
+
+
+@lru_cache(maxsize=16)
+def detect_gpu_video_encoder(
+    ffmpeg: str, *, profile: str = "preprocess"
+) -> tuple[str, str | None] | None:
+    """Return a detected GPU encoder that completes a short encode, or None.
+
+    Cache by pinned executable and export profile. GPU presence and an encoder
+    inventory alone cannot establish driver/runtime availability.
+    """
+    if profile not in {"preprocess", "create_video"}:
+        raise ValueError(f"Unsupported video encoding profile: {profile}")
+    for encoder, device in _gpu_encoder_candidates():
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
+        if device is not None:
+            command.extend(["-vaapi_device", device])
+        # Tiny frames can be rejected by NVENC. Use software frames as both
+        # export paths do, so conversion/upload is validated as well.
+        command.extend([
+            "-f", "lavfi", "-i", "color=s=640x480:r=30:d=0.1,format=bgr24",
+            "-frames:v", "3", "-an",
+        ])
+        if encoder == "h264_vaapi":
+            command.extend(["-vf", "format=nv12,hwupload"])
+        command.extend([*gpu_encoder_args(encoder, profile=profile), "-f", "null", "-"])
+        try:
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = str(exc)
+        else:
+            if completed.returncode == 0:
+                return (encoder, device)
+            detail = completed.stderr.strip() or f"FFmpeg exited with code {completed.returncode}."
+        device_label = f" ({device})" if device is not None else ""
+        print(
+            f"[AMADEUS] GPU acceleration test failed for {encoder}{device_label} "
+            f"using {ffmpeg}: {detail}",
+            file=sys.stderr,
+        )
     return None
