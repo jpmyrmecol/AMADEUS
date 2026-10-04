@@ -59,9 +59,12 @@ archive's `LICENSE.txt` is kept beside the installed binary. The macOS
 `imageio-ffmpeg` package is licensed under the BSD 2-Clause License.
 
 Compilation support does not guarantee that a particular encoder will work with
-every GPU or driver. AMADEUS tests NVIDIA NVENC, Intel Quick Sync, AMD AMF,
-Linux VAAPI, or Apple VideoToolbox by encoding a short sample before enabling
-hardware encoding. Hardware encoding applies to the final H.264 encoding step;
+every GPU or driver. AMADEUS selects the encoder from the detected GPU:
+NVIDIA NVENC on Windows and Linux, AMD AMF or Intel Quick Sync on Windows,
+VAAPI for AMD/Intel on Linux, and Apple VideoToolbox on macOS. GPU acceleration
+is enabled by default in Cropping & Trimming when a GPU is detected, without
+a trial encode. Any encoding error is reported when exporting the actual video.
+Hardware encoding applies to the final H.264 encoding step;
 cropping, rotation, and image adjustments are still performed on the CPU. The
 same selected FFmpeg binary also handles Create Video exports, including CPU
-encoding when no compatible hardware encoder is available.
+encoding when CPU is selected or no supported GPU is detected.

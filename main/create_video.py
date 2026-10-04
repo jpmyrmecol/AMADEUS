@@ -434,7 +434,7 @@ def _gpu_video_encoder() -> tuple[str, str | None] | None:
     if not ffmpeg:
         _GPU_VIDEO_ENCODER = None
     else:
-        _GPU_VIDEO_ENCODER = detect_hardware_video_encoder(ffmpeg)
+        _GPU_VIDEO_ENCODER = detect_hardware_video_encoder()
     return _GPU_VIDEO_ENCODER
 
 

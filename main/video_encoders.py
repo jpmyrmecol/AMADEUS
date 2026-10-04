@@ -1,14 +1,17 @@
 # Copyright (C) 2026 Yusuke Notomi
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Shared hardware encoder selection for AMADEUS video exports."""
+"""Select hardware video encoders from the GPUs detected by the operating system."""
 
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
+
+from .compute_telemetry import query_nvidia_driver_info
 
 
 HARDWARE_ENCODER_LABELS = {
@@ -19,15 +22,11 @@ HARDWARE_ENCODER_LABELS = {
     "h264_vaapi": "VAAPI (AMD/Intel)",
 }
 
-_ENCODER_CACHE: dict[str, tuple[str, str | None] | None] = {}
-
-
-def hardware_encoder_candidates() -> tuple[str, ...]:
-    if sys.platform == "darwin":
-        return ("h264_videotoolbox",)
-    if os.name == "nt":
-        return ("h264_nvenc", "h264_qsv", "h264_amf")
-    return ("h264_nvenc", "h264_qsv", "h264_amf", "h264_vaapi")
+_WINDOWS_ENCODERS = {
+    "10de": "h264_nvenc",
+    "1002": "h264_amf",
+    "8086": "h264_qsv",
+}
 
 
 def hardware_encoder_args(encoder: str, *, profile: str = "preprocess") -> list[str]:
@@ -54,59 +53,63 @@ def hardware_encoder_args(encoder: str, *, profile: str = "preprocess") -> list[
     raise ValueError(f"Unsupported hardware video encoder: {encoder}")
 
 
-def _vaapi_device_candidates() -> tuple[str, ...]:
-    if not sys.platform.startswith("linux"):
+def _windows_gpu_vendors() -> tuple[str, ...]:
+    """Read PCI vendor IDs without depending on a PyTorch compute backend."""
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty PNPDeviceID",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"[AMADEUS] GPU detection failed: {exc}", file=sys.stderr)
         return ()
-    return tuple(
-        sorted(str(path) for path in Path("/dev/dri").glob("renderD*") if path.is_char_device())
-    )
+    if completed.returncode != 0:
+        print(f"[AMADEUS] GPU detection failed: {completed.stderr.strip()}", file=sys.stderr)
+        return ()
+    devices = completed.stdout.upper()
+    return tuple(vendor for vendor in _WINDOWS_ENCODERS if f"VEN_{vendor.upper()}" in devices)
 
 
-def detect_hardware_video_encoder(ffmpeg: str) -> tuple[str, str | None] | None:
-    """Return the first encoder/device pair that completes a real short encode."""
-    cached = _ENCODER_CACHE.get(ffmpeg, ...)
-    if cached is not ...:
-        return cached
+def _linux_gpu_devices() -> tuple[tuple[str, str], ...]:
+    """Return PCI vendor IDs and their accessible DRM render devices."""
+    devices: list[tuple[str, str]] = []
+    for path in sorted(Path("/dev/dri").glob("renderD*")):
+        if not path.is_char_device():
+            continue
+        vendor_path = Path("/sys/class/drm") / path.name / "device" / "vendor"
+        try:
+            vendor = vendor_path.read_text().strip().lower().removeprefix("0x")
+        except OSError:
+            continue
+        devices.append((vendor, str(path)))
+    return tuple(devices)
 
-    for encoder in hardware_encoder_candidates():
-        devices = _vaapi_device_candidates() if encoder == "h264_vaapi" else (None,)
-        for device in devices:
-            command = [ffmpeg, "-hide_banner", "-loglevel", "error"]
-            if device is not None:
-                command.extend(["-vaapi_device", device])
-            # Tiny frames can be rejected by NVENC even on a supported GPU.
-            command.extend([
-                "-f", "lavfi", "-i", "color=s=640x480:r=30:d=0.2", "-frames:v", "2",
-            ])
-            if encoder == "h264_vaapi":
-                command.extend(["-vf", "format=nv12,hwupload"])
-            command.extend([*hardware_encoder_args(encoder), "-f", "null", "-"])
-            try:
-                completed = subprocess.run(
-                    command,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=20,
-                    check=False,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
-            except (OSError, subprocess.SubprocessError) as exc:
-                detail = str(exc)
-            else:
-                if completed.returncode == 0:
-                    result = (encoder, device)
-                    _ENCODER_CACHE[ffmpeg] = result
-                    return result
-                detail = completed.stderr.strip() or f"FFmpeg exited with code {completed.returncode}."
-            device_label = f" ({device})" if device is not None else ""
-            print(
-                f"[AMADEUS] Hardware video encoder probe failed for {encoder}{device_label} "
-                f"using {ffmpeg}: {detail}",
-                file=sys.stderr,
-            )
 
-    _ENCODER_CACHE[ffmpeg] = None
+@lru_cache(maxsize=1)
+def detect_hardware_video_encoder() -> tuple[str, str | None] | None:
+    """Choose an encoder from GPU presence, without a trial FFmpeg encode."""
+    if sys.platform == "darwin":
+        return ("h264_videotoolbox", None)
+    if query_nvidia_driver_info() is not None:
+        return ("h264_nvenc", None)
+    if os.name == "nt":
+        vendors = _windows_gpu_vendors()
+        for vendor, encoder in _WINDOWS_ENCODERS.items():
+            if vendor in vendors:
+                return (encoder, None)
+    elif sys.platform.startswith("linux"):
+        devices = _linux_gpu_devices()
+        for vendor in ("10de", "1002", "8086"):
+            for device_vendor, device in devices:
+                if device_vendor == vendor:
+                    return ("h264_nvenc", None) if vendor == "10de" else ("h264_vaapi", device)
     return None

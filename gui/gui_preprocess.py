@@ -157,16 +157,6 @@ def _video_encoder_args(encoder: str) -> list[str]:
     return hardware_encoder_args(encoder)
 
 
-def _detect_hardware_video_encoder() -> tuple[str, str | None] | None:
-    try:
-        ffmpeg = ffmpeg_exe()
-    except Exception as exc:
-        print(f"[AMADEUS] Pinned FFmpeg is unavailable: {exc}", file=sys.stderr)
-        return None
-    result = detect_hardware_video_encoder(ffmpeg)
-    return result
-
-
 def _rgb_hex(color: tuple[int, int, int]) -> str:
     return f"#{color[0]:02x}{color[1]:02x}{color[2]:02x}"
 
@@ -572,6 +562,7 @@ class PreprocessApp(ctk.CTk):
         self.config_save_job: str | None = None
         self.export_queue: queue.Queue = queue.Queue()
         self.hardware_encoder_queue: queue.Queue = queue.Queue()
+        self.hardware_encoder_detection_complete = False
         self.hardware_video_encoder: str | None = None
         self.hardware_video_encoder_device: str | None = None
         self.export_thread: threading.Thread | None = None
@@ -846,7 +837,7 @@ class PreprocessApp(ctk.CTk):
 
         self.gpu_acceleration_check = ctk.CTkCheckBox(
             export,
-            text="Checking hardware video encoding...",
+            text="GPU acceleration",
             variable=self.gpu_acceleration_var,
             command=self._schedule_crop_trimming_config_save,
             state="disabled",
@@ -1093,7 +1084,7 @@ class PreprocessApp(ctk.CTk):
     def _start_hardware_encoder_detection(self) -> None:
         def worker() -> None:
             try:
-                detected = _detect_hardware_video_encoder()
+                detected = detect_hardware_video_encoder()
             except Exception as exc:
                 print(f"[AMADEUS] Hardware video encoder detection failed: {exc}", file=sys.stderr)
                 detected = None
@@ -1109,25 +1100,29 @@ class PreprocessApp(ctk.CTk):
             self.after(100, self._poll_hardware_encoder_detection)
             return
 
+        self.hardware_encoder_detection_complete = True
         detected = payload
         if detected is None:
             self.hardware_video_encoder = None
             self.hardware_video_encoder_device = None
             self.gpu_acceleration_var.set(False)
             self.gpu_acceleration_check.configure(
-                text="Hardware video encoding unavailable",
+                text="GPU acceleration",
                 state="disabled",
             )
+            self._refresh_video_controls()
             return
 
         encoder, device = detected
         self.hardware_video_encoder = encoder
         self.hardware_video_encoder_device = device
-        label = HARDWARE_ENCODER_LABELS.get(encoder, encoder)
+        self.gpu_acceleration_var.set(True)
         self.gpu_acceleration_check.configure(
-            text=f"Use hardware encoding ({label})",
+            text="GPU acceleration",
             state="disabled" if self.export_running else "normal",
         )
+        self._refresh_video_controls()
+        self._schedule_crop_trimming_config_save()
 
     def _bind_events(self) -> None:
         self.canvas.bind("<Configure>", lambda _event: self.fit_canvas_to_window())
@@ -1739,7 +1734,11 @@ class PreprocessApp(ctk.CTk):
             widget.configure(state=normal)
         delete_state = "normal" if has_video and self.active_region_idx > 0 else "disabled"
         self.delete_crop_button.configure(state=delete_state)
-        export_state = "normal" if has_video and self.output_folder_var.get().strip() else "disabled"
+        export_state = (
+            "normal"
+            if has_video and self.hardware_encoder_detection_complete and self.output_folder_var.get().strip()
+            else "disabled"
+        )
         if not any(region.export_enabled for region in self.regions):
             export_state = "disabled"
         self.export_button.configure(state=export_state if not self.export_running else "disabled")
@@ -2402,7 +2401,7 @@ class PreprocessApp(ctk.CTk):
             self._refresh_video_controls()
 
     def start_export(self) -> None:
-        if self.export_running:
+        if self.export_running or not self.hardware_encoder_detection_complete:
             return
         try:
             job = self._build_export_job()
