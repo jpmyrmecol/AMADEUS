@@ -74,8 +74,9 @@ def detect_hardware_video_encoder(ffmpeg: str) -> tuple[str, str | None] | None:
             command = [ffmpeg, "-hide_banner", "-loglevel", "error"]
             if device is not None:
                 command.extend(["-vaapi_device", device])
+            # Tiny frames can be rejected by NVENC even on a supported GPU.
             command.extend([
-                "-f", "lavfi", "-i", "color=s=128x128:r=30:d=0.2", "-frames:v", "2",
+                "-f", "lavfi", "-i", "color=s=640x480:r=30:d=0.2", "-frames:v", "2",
             ])
             if encoder == "h264_vaapi":
                 command.extend(["-vf", "format=nv12,hwupload"])
@@ -84,17 +85,28 @@ def detect_hardware_video_encoder(ffmpeg: str) -> tuple[str, str | None] | None:
                 completed = subprocess.run(
                     command,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=20,
                     check=False,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
-            except (OSError, subprocess.SubprocessError):
-                continue
-            if completed.returncode == 0:
-                result = (encoder, device)
-                _ENCODER_CACHE[ffmpeg] = result
-                return result
+            except (OSError, subprocess.SubprocessError) as exc:
+                detail = str(exc)
+            else:
+                if completed.returncode == 0:
+                    result = (encoder, device)
+                    _ENCODER_CACHE[ffmpeg] = result
+                    return result
+                detail = completed.stderr.strip() or f"FFmpeg exited with code {completed.returncode}."
+            device_label = f" ({device})" if device is not None else ""
+            print(
+                f"[AMADEUS] Hardware video encoder probe failed for {encoder}{device_label} "
+                f"using {ffmpeg}: {detail}",
+                file=sys.stderr,
+            )
 
     _ENCODER_CACHE[ffmpeg] = None
     return None

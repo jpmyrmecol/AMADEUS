@@ -152,6 +152,8 @@ def ffmpeg_exe() -> str:
 
 
 def _video_encoder_args(encoder: str) -> list[str]:
+    if encoder == "libx264":
+        return ["-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p"]
     return hardware_encoder_args(encoder)
 
 
