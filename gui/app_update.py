@@ -79,6 +79,7 @@ def _fetch_latest_version() -> str:
     request = urllib.request.Request(
         LATEST_RELEASE_URL,
         headers={"User-Agent": "AMADEUS-Updater", "Accept": "text/html"},
+        method="HEAD",
     )
     with urllib.request.urlopen(
         request,
