@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import subprocess
+import math
 from dataclasses import dataclass
 from typing import Iterable
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, FIRST_COMPLETED, wait
@@ -30,6 +31,8 @@ from without_direction_estimation.obb_detection import (
     build_tracking_out_dir,
     draw_direction_triangle_for_obb,
     load_config,
+    obb_center,
+    obb_major_axis,
     obb_to_xyxy,
     parse_weight_spec,
     tqdm_it,
@@ -37,6 +40,7 @@ from without_direction_estimation.obb_detection import (
 from checkpoint_utils import weight_to_checkpoint_number
 from without_direction_estimation.multi_staged_association import (
     _artifact_path,
+    final_result_csv_path,
     resolve_weight_from_tracking_dir,
 )
 from experiment_utils import (
@@ -52,6 +56,8 @@ from main.video_encoders import detect_gpu_video_encoder, gpu_encoder_args
 
 
 DIRECTION_CLASS_NAMES = ['animal']
+
+DRAW_MODES = {"obb", "ellipse"}
 
 
 def resolve_num_workers(cfg: dict, section_name: str | None = None, default: int | None = 1, cap: int | None = None) -> int:
@@ -148,6 +154,38 @@ def ensure_clockwise(pts: np.ndarray) -> np.ndarray:
 def draw_obb(img, pts: np.ndarray, color, thickness=2):
     poly = np.round(ensure_clockwise(pts)).astype(np.int32).reshape(-1, 1, 2)
     cv2.polylines(img, [poly], True, color, int(thickness), cv2.LINE_AA)
+
+
+def normalize_drawing_mode(value: str | None) -> str:
+    mode = str(value if value is not None else "obb").strip().lower()
+    if mode not in DRAW_MODES:
+        choices = ", ".join(sorted(DRAW_MODES))
+        raise RuntimeError(f"Unsupported DRAW_MODE: {value}. Use one of: {choices}.")
+    return mode
+
+
+def ellipse_parameters_from_obb(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray, float, float]:
+    """Return center, major axis, major length, and minor length for an OBB ellipse."""
+    center = np.asarray(obb_center(pts), dtype=float)
+    major_axis, major_length, minor_length = obb_major_axis(pts)
+    major_axis = np.asarray(major_axis, dtype=float)
+    norm = float(np.linalg.norm(major_axis))
+    if norm <= 1e-06 or major_length <= 0.0 or minor_length <= 0.0:
+        return center, np.zeros(2, dtype=float), float(major_length), float(minor_length)
+    return center, major_axis / norm, float(major_length), float(minor_length)
+
+
+def draw_ellipse(img, pts: np.ndarray, color, thickness=2):
+    center, major_axis, major_length, minor_length = ellipse_parameters_from_obb(pts)
+    if major_length <= 0.0 or minor_length <= 0.0 or not np.isfinite(major_axis).all():
+        return
+    angle = math.degrees(math.atan2(float(major_axis[1]), float(major_axis[0])))
+    center_i32 = tuple(np.round(center).astype(np.int32))
+    axes_i32 = (
+        max(1, int(round(major_length / 2.0))),
+        max(1, int(round(minor_length / 2.0))),
+    )
+    cv2.ellipse(img, center_i32, axes_i32, angle, 0.0, 360.0, color, int(thickness), cv2.LINE_AA)
 
 
 def _tracking_csv_pair(out_dir: str, suffix: str) -> tuple[str, str]:
@@ -483,6 +521,7 @@ class _FrameRenderCtx:
     draw_labels: bool
     label_font_scale: float
     label_thickness: int
+    drawing_mode: str = "obb"
 
 
 def _render_video_frame(
@@ -506,7 +545,10 @@ def _render_video_frame(
         slot = ctx.color_slots[frame_idx][tid] if ctx.color_slots is not None else tid % len(ctx.colors)
         color = ctx.colors[slot]
         if ctx.draw_obb_flag:
-            draw_obb(frame, pts, color, ctx.obb_thickness)
+            if ctx.drawing_mode == "ellipse":
+                draw_ellipse(frame, pts, color, ctx.obb_thickness)
+            else:
+                draw_obb(frame, pts, color, ctx.obb_thickness)
         frame_box_count += 1
         boxes_drawn += 1
 
@@ -565,7 +607,9 @@ def render_video_for_weight(
     num_io_workers: int = 4,
     num_render_workers: int = 1,
     variable_population: bool = False,
+    drawing_mode: str = "obb",
     color_seed: int | None = None,
+    video_output_dir: str | None = None,
 ) -> None:
     obb_csv, class_csv = find_tracking_csvs(out_dir)
     obb_df = pd.read_csv(obb_csv)
@@ -611,7 +655,9 @@ def render_video_for_weight(
     if not cap.isOpened():
         raise RuntimeError(src_video)
 
-    video_path_out = os.path.join(out_dir, video_filename)
+    video_output_dir = video_output_dir or out_dir
+    os.makedirs(video_output_dir, exist_ok=True)
+    video_path_out = os.path.join(video_output_dir, video_filename)
     export_images_enabled = bool(save_png_frames or save_jpg_frames)
     writer = None
     n_written = 0
@@ -620,6 +666,7 @@ def render_video_for_weight(
     current_frame_idx = first_frame
     jpg_params = [int(cv2.IMWRITE_JPEG_QUALITY), int(jpg_quality)]
     video_acceleration = resolve_video_acceleration(video_acceleration)
+    drawing_mode = normalize_drawing_mode(drawing_mode)
 
     def _write_png(path: str, img: np.ndarray) -> None:
         if not cv2.imwrite(path, img):
@@ -650,6 +697,7 @@ def render_video_for_weight(
         draw_labels=draw_labels,
         label_font_scale=label_font_scale,
         label_thickness=label_thickness,
+        drawing_mode=drawing_mode,
     )
 
     batch: list = []
@@ -751,7 +799,7 @@ def render_video_for_weight(
     if export_raw_yolo_video:
         raw_dir = os.path.join(out_dir, "yolo_raw")
         if os.path.isdir(raw_dir):
-            raw_video_out = os.path.join(out_dir, "yolo_raw_obb.mp4")
+            raw_video_out = os.path.join(video_output_dir, "yolo_raw_obb_" + os.path.splitext(video_filename)[0] + ".mp4")
             make_video_from_image_sequence(
                 raw_dir, first_frame, output_fps, raw_video_out, "png",
                 video_acceleration=video_acceleration,
@@ -778,6 +826,7 @@ def _render_single_video_job(spec: dict) -> None:
         jpg_image_dir=jpg_image_dir,
         num_objects=spec['num_objects'],
         variable_population=spec.get('variable_population', False),
+        drawing_mode=spec.get('drawing_mode', 'obb'),
         color_seed=spec.get('color_seed'),
         draw_obb_flag=spec['draw_obb_flag'],
         draw_arrow=spec['draw_arrow'],
@@ -801,7 +850,29 @@ def _render_single_video_job(spec: dict) -> None:
         video_acceleration=spec['video_acceleration'],
         num_io_workers=spec['num_io_workers'],
         num_render_workers=spec['num_render_workers'],
+        video_filename=spec.get('video_filename', 'tracking.mp4'),
+        video_output_dir=spec.get('video_output_dir'),
     )
+
+
+def resolve_render_video_filename(
+    session_path: str,
+    model_name: str,
+    dataset_name: str,
+    run_name: str,
+    video_name: str,
+) -> str:
+    """Use the same stem as the final CSV in the session results directory."""
+    for family in ("id_resolved", "filled"):
+        csv_path = final_result_csv_path(
+            session_path, model_name, dataset_name, run_name, video_name, family,
+        )
+        if os.path.exists(csv_path):
+            return os.path.splitext(os.path.basename(csv_path))[0] + ".mp4"
+    csv_path = final_result_csv_path(
+        session_path, model_name, dataset_name, run_name, video_name, "filled",
+    )
+    return os.path.splitext(os.path.basename(csv_path))[0] + ".mp4"
 
 
 def resolve_render_out_dir(
@@ -859,6 +930,7 @@ def main():
     )
 
     draw_obb_flag = bool(track_video.get("DRAW_OBB", True))
+    drawing_mode = normalize_drawing_mode(track_video.get("DRAW_MODE", "obb"))
     draw_arrow = bool(track_video.get("DRAW_ARROW", True))
     draw_labels = bool(track_video.get("DRAW_LABELS", False))
     export_raw_yolo_video = bool(track_video.get("EXPORT_RAW", False))
@@ -951,10 +1023,15 @@ def main():
                 'variable_population': bool(cfg.get('VARIABLE_NUM_OBJECTS', False)),
                 'src_video': src_video,
                 'out_dir': out_dir,
+                'video_output_dir': os.path.join(session_path, "results"),
+                'video_filename': resolve_render_video_filename(
+                    session_path, model_name, dataset_name, run_name, video_name,
+                ),
                 'png_image_dir': os.path.join(out_dir, "images"),
                 'jpg_image_dir': os.path.join(out_dir, "images_jpg"),
                 'num_objects': num_objects,
                 'draw_obb_flag': draw_obb_flag,
+                'drawing_mode': drawing_mode,
                 'draw_arrow': draw_arrow,
                 'draw_labels': draw_labels,
                 'output_fps': output_fps,
