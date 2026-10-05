@@ -239,10 +239,12 @@ def prepare_refine_workspace(without_crossing_dir: str, refine_root: str | None 
     for name in sorted(os.listdir(without_crossing_dir)):
         if is_refine_workspace_name(name):
             continue
-        move_path_without_deleting_original(
-            os.path.join(without_crossing_dir, name),
-            os.path.join(original_dir, name),
-        )
+        src_path = os.path.join(without_crossing_dir, name)
+        dst_path = os.path.join(original_dir, name)
+        if name == "preview" and os.path.isdir(src_path):
+            shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
+            continue
+        move_path_without_deleting_original(src_path, dst_path)
     return refine_root, original_dir
 
 
