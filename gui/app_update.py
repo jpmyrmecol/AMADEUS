@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import queue
 import re
@@ -15,6 +14,7 @@ import sys
 import tempfile
 import threading
 import tkinter as tk
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -39,7 +39,8 @@ except ImportError:  # Preserve direct execution with: python gui/gui_home.py
     )
 
 
-LATEST_RELEASE_URL = "https://api.github.com/repos/jpmyrmecol/AMADEUS/releases/latest"
+LATEST_RELEASE_URL = "https://github.com/jpmyrmecol/AMADEUS/releases/latest"
+LATEST_RELEASE_TAG_PATH = "/jpmyrmecol/AMADEUS/releases/tag/"
 ARCHIVE_URL_TEMPLATE = "https://github.com/jpmyrmecol/AMADEUS/archive/refs/tags/{tag}.zip"
 REQUEST_TIMEOUT_SECONDS = 30
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
@@ -77,22 +78,24 @@ def _request(url: str) -> urllib.request.Request:
 def _fetch_latest_version() -> str:
     request = urllib.request.Request(
         LATEST_RELEASE_URL,
-        headers={
-            "User-Agent": "AMADEUS-Updater",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers={"User-Agent": "AMADEUS-Updater", "Accept": "text/html"},
     )
     with urllib.request.urlopen(
         request,
         timeout=REQUEST_TIMEOUT_SECONDS,
         context=_https_context(),
     ) as response:
-        payload = response.read(64 * 1024 + 1)
-    if len(payload) > 64 * 1024:
-        raise ValueError("GitHub returned an unexpectedly large release response.")
-    release = json.loads(payload.decode("utf-8"))
-    tag = str(release.get("tag_name", "")).strip()
+        final_url = response.geturl()
+
+    parsed = urllib.parse.urlparse(final_url)
+    if parsed.scheme != "https" or parsed.netloc.lower() != "github.com":
+        raise ValueError(f"GitHub redirected the latest release to an unexpected URL: {final_url}")
+    if not parsed.path.startswith(LATEST_RELEASE_TAG_PATH):
+        raise ValueError(f"GitHub did not redirect to a release tag: {final_url}")
+
+    tag = urllib.parse.unquote(parsed.path[len(LATEST_RELEASE_TAG_PATH):]).strip("/")
+    if not tag or "/" in tag:
+        raise ValueError(f"GitHub returned an invalid release tag URL: {final_url}")
     _version_tuple(tag)
     return tag.removeprefix("v").removeprefix("V")
 
