@@ -5,9 +5,9 @@
 
 from __future__ import annotations
 
-import json
 import re
 import ssl
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +16,8 @@ import certifi
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-LATEST_RELEASE_URL = "https://api.github.com/repos/jpmyrmecol/AMADEUS/releases/latest"
+LATEST_RELEASE_URL = "https://github.com/jpmyrmecol/AMADEUS/releases/latest"
+LATEST_RELEASE_TAG_PATH = "/jpmyrmecol/AMADEUS/releases/tag/"
 VERSION_PATTERN = re.compile(
     r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z", re.IGNORECASE
 )
@@ -62,18 +63,20 @@ def fetch_latest_version(*, timeout: float = 2.0) -> str:
     """Return the version of GitHub's latest published AMADEUS Release."""
     request = urllib.request.Request(
         LATEST_RELEASE_URL,
-        headers={
-            "User-Agent": "AMADEUS-Version-Check",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers={"User-Agent": "AMADEUS-Version-Check", "Accept": "text/html"},
     )
     with urllib.request.urlopen(request, timeout=timeout, context=_https_context()) as response:
-        payload = response.read(64 * 1024 + 1)
-    if len(payload) > 64 * 1024:
-        raise ValueError("GitHub returned an unexpectedly large release response.")
-    release = json.loads(payload.decode("utf-8"))
-    tag = str(release.get("tag_name", "")).strip()
+        final_url = response.geturl()
+
+    parsed = urllib.parse.urlparse(final_url)
+    if parsed.scheme != "https" or parsed.netloc.lower() != "github.com":
+        raise ValueError(f"GitHub redirected the latest release to an unexpected URL: {final_url}")
+    if not parsed.path.startswith(LATEST_RELEASE_TAG_PATH):
+        raise ValueError(f"GitHub did not redirect to a release tag: {final_url}")
+
+    tag = urllib.parse.unquote(parsed.path[len(LATEST_RELEASE_TAG_PATH):]).strip("/")
+    if not tag or "/" in tag:
+        raise ValueError(f"GitHub returned an invalid release tag URL: {final_url}")
     version_tuple(tag)
     return tag.removeprefix("v").removeprefix("V")
 
