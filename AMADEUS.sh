@@ -175,7 +175,8 @@ if [ "$(uname -s)" = Darwin ]; then
 else
     setup_python=3.10
 fi
-if ! "$UV_EXE" run --no-project --python "$setup_python" python tools/setup_environment.py --uv "$UV_EXE"; then
+# Setup may rebuild .venv; keep the bootstrap interpreter outside that environment.
+if ! "$UV_EXE" run --no-project --isolated --python "$setup_python" python tools/setup_environment.py --uv "$UV_EXE"; then
     echo "[ERROR] AMADEUS environment setup failed. See the diagnostic above." >&2
     exit 1
 fi

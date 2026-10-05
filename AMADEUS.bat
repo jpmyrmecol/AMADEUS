@@ -76,7 +76,8 @@ if not defined UV_EXE (
     exit /b 1
 )
 
-"%UV_EXE%" run --no-project --python 3.10 python tools\setup_environment.py --uv "%UV_EXE%"
+REM Setup may rebuild .venv; run it outside that environment to avoid locking its Python.
+"%UV_EXE%" run --no-project --isolated --python 3.10 python tools\setup_environment.py --uv "%UV_EXE%"
 exit /b %errorlevel%
 
 :environment_ready
