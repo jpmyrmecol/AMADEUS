@@ -64,6 +64,7 @@ def fetch_latest_version(*, timeout: float = 2.0) -> str:
     request = urllib.request.Request(
         LATEST_RELEASE_URL,
         headers={"User-Agent": "AMADEUS-Version-Check", "Accept": "text/html"},
+        method="HEAD",
     )
     with urllib.request.urlopen(request, timeout=timeout, context=_https_context()) as response:
         final_url = response.geturl()
