@@ -17,21 +17,27 @@ show_version_status() {
     current="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
     echo "[AMADEUS] Version: v$current"
 
-    release_json=""
+    latest_url=""
     if command -v curl >/dev/null 2>&1; then
-        release_json="$(curl -fsSL --connect-timeout 1 --max-time 2 \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/jpmyrmecol/AMADEUS/releases/latest" 2>/dev/null || true)"
+        latest_url="$(curl -fsSIL -o /dev/null -w '%{url_effective}' \
+            --connect-timeout 1 --max-time 2 \
+            "https://github.com/jpmyrmecol/AMADEUS/releases/latest" 2>/dev/null || true)"
     elif command -v wget >/dev/null 2>&1; then
-        release_json="$(wget -qO- --timeout=2 --tries=1 \
-            --header="Accept: application/vnd.github+json" \
-            --header="X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/jpmyrmecol/AMADEUS/releases/latest" 2>/dev/null || true)"
+        latest_url="$(wget --spider --server-response --timeout=2 --tries=1 \
+            "https://github.com/jpmyrmecol/AMADEUS/releases/latest" 2>&1 | \
+            awk '/^[[:space:]]*Location:/ { url=$2 } END { print url }' || true)"
     fi
-    latest="$(printf '%s\n' "$release_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-    latest="${latest#v}"
-    latest="${latest#V}"
+
+    latest=""
+    case "$latest_url" in
+        https://github.com/jpmyrmecol/AMADEUS/releases/tag/*)
+            latest="${latest_url#https://github.com/jpmyrmecol/AMADEUS/releases/tag/}"
+            latest="${latest%%\?*}"
+            latest="${latest%/}"
+            latest="${latest#v}"
+            latest="${latest#V}"
+            ;;
+    esac
 
     if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
        [[ ! "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
