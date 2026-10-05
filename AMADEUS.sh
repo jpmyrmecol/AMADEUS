@@ -25,7 +25,7 @@ show_version_status() {
     elif command -v wget >/dev/null 2>&1; then
         latest_url="$(wget --spider --server-response --timeout=2 --tries=1 \
             "https://github.com/jpmyrmecol/AMADEUS/releases/latest" 2>&1 | \
-            awk '/^[[:space:]]*Location:/ { url=$2 } END { print url }' || true)"
+            awk '/^[[:space:]]*Location:/ { url=$2; sub(/\\r$/, "", url) } END { print url }' || true)"
     fi
 
     latest=""
