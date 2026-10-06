@@ -22,12 +22,44 @@ def default_roi_set() -> dict:
     return {"enabled": False, "points": [], "frame_start": 0, "frame_end": -1}
 
 
+def _fractional_roi_points(image_shape: tuple, low: float, high: float) -> list[list[int]]:
+    height, width = image_shape[:2]
+    x0, x1 = round((width - 1) * low), round((width - 1) * high)
+    y0, y1 = round((height - 1) * low), round((height - 1) * high)
+    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+
+
 def initial_roi_points(image_shape: tuple) -> list[list[int]]:
     """A centered rectangle spanning half the image width and height."""
+    return _fractional_roi_points(image_shape, 0.25, 0.75)
+
+
+def _refresh_saved_inactive_default_roi(
+    roi_sets: list[dict], reverse: bool, image_shape: tuple | None
+) -> None:
+    """Replace only obsolete, untouched default ROI geometry.
+
+    Older GUI versions eagerly saved their generated default rectangle even
+    while ROI use was disabled. Reopening such a session would therefore
+    restore the obsolete geometry instead of using the current initial ROI.
+    Preserve every enabled, ranged, reversed, multi-set, or custom polygon.
+    """
+    if image_shape is None or reverse or len(roi_sets) != 1:
+        return
+    roi = roi_sets[0]
+    if (
+        roi["enabled"]
+        or roi["frame_start"] != 0
+        or roi["frame_end"] != -1
+        or not roi["points"]
+    ):
+        return
+
     height, width = image_shape[:2]
-    x0, x1 = round((width - 1) * 0.25), round((width - 1) * 0.75)
-    y0, y1 = round((height - 1) * 0.25), round((height - 1) * 0.75)
-    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    full_frame = [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]]
+    previous_default = _fractional_roi_points(image_shape, 0.10, 0.90)
+    if roi["points"] in (full_frame, previous_default):
+        roi["points"] = initial_roi_points(image_shape)
 
 
 def normalize_roi_set(roi: dict, image_shape: tuple | None = None) -> dict:
@@ -68,11 +100,10 @@ def load_roi_settings(settings: dict, image_shape: tuple | None = None) -> tuple
     if schema is not None and schema != ROI_SCHEMA:
         raise ValueError(f"Unsupported ROI schema: {schema!r}")
     if schema == ROI_SCHEMA:
-        return (
-            [normalize_roi_set(roi, image_shape) for roi in raw_sets] or [default_roi_set()],
-            bool(settings.get("roi_reverse", False)),
-            [],
-        )
+        normalized = [normalize_roi_set(roi, image_shape) for roi in raw_sets] or [default_roi_set()]
+        reverse = bool(settings.get("roi_reverse", False))
+        _refresh_saved_inactive_default_roi(normalized, reverse, image_shape)
+        return normalized, reverse, []
 
     reverse_values = {bool(roi.get("reverse", False)) for roi in raw_sets}
     if len(reverse_values) > 1:
