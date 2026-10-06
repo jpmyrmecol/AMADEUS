@@ -574,9 +574,7 @@ def _load_tracking_seg_config(
             )
         cfg.background_bgr = bg
 
-    roi_sets, roi_reverse, notices = load_roi_settings(settings, frame_shape)
-    for notice in notices:
-        print(f'[ROI migration] {notice} Reopen segmentation and run Analyze again.', flush=True)
+    roi_sets, roi_reverse = load_roi_settings(settings, frame_shape)
     roi_mask = build_static_roi_mask(roi_sets, frame_shape, roi_reverse)
     return _TrackingSegContext(cfg=cfg, roi_mask=roi_mask)
 

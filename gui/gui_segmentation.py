@@ -56,7 +56,7 @@ from gui.video_input import (
 )
 from main.path_utils import resolve_config_paths
 from main.roi import (
-    ROI_SCHEMA, RoiMigrationError, default_roi_set, initial_roi_points,
+    default_roi_set, initial_roi_points,
     normalize_roi_set, load_roi_settings, roi_is_active, roi_signature,
     build_single_roi_mask as _build_single_roi_mask,
     build_roi_mask_for_frame as _build_roi_mask_for_frame,
@@ -1823,7 +1823,6 @@ class CrossingReviewApp(ctk.CTk):
                 settings[key] = var.get()
             except Exception:
                 pass
-        settings["roi_schema"] = ROI_SCHEMA
         settings["roi_sets"] = [normalize_roi_set(r) for r in self.roi_sets]
         settings["additional_outlier_sets"] = [dict(r) for r in self.additional_outlier_sets]
 
@@ -2022,9 +2021,8 @@ class CrossingReviewApp(ctk.CTk):
         self._apply_frame_ranges_from_settings(settings)
         self._toggle_area_outlier_method_controls()
 
-        legacy_roi_config = settings.get("roi_schema") != ROI_SCHEMA
         image_shape = (self.reader.height, self.reader.width) if self.reader is not None else None
-        self.roi_sets, reverse, _notices = load_roi_settings(settings, image_shape)
+        self.roi_sets, reverse = load_roi_settings(settings, image_shape)
         self.roi_reverse_var.set(reverse)
         self.roi_edit_var.set(False)
         self._roi_drag_mode = None
@@ -2114,7 +2112,7 @@ class CrossingReviewApp(ctk.CTk):
             self.analysis_is_stale = True
             self.analysis_ready_var.set("analysis: not computed")
 
-        if legacy_additional_config or legacy_roi_config:
+        if legacy_additional_config:
             self.analysis_blobs_by_frame.clear()
             self.analysis_frames = []
             self.analysis_signature = None
@@ -2368,7 +2366,6 @@ class CrossingReviewApp(ctk.CTk):
     def _load_config_dict(self, path: str, config: dict) -> None:
         """Apply an already-parsed segmentation_gui_config.json and remember its path."""
         settings = config["settings"]
-        _sets, _reverse, notices = load_roi_settings(settings)
         self.config_path = path
         self._applying_config = True
         try:
@@ -2386,11 +2383,6 @@ class CrossingReviewApp(ctk.CTk):
         self._absolute_zoomed = False
         self._absolute_dragging = False
         self._update_area_control_ranges()
-        if notices:
-            self.set_status(
-                "ROI settings converted. " + " ".join(notices) +
-                " Review the polygons and run Analyze again.", auto_clear=False,
-            )
         # Persist the loaded state (and any replacement video path) immediately.
 
     def _find_existing_config_for_video(
@@ -3337,9 +3329,6 @@ class CrossingReviewApp(ctk.CTk):
             try:
                 self._load_config_dict(config_path, config)
                 return
-            except RoiMigrationError as exc:
-                messagebox.showerror("ROI migration", str(exc), parent=self)
-                return
             except Exception as exc:
                 self.set_status(f"Failed to load existing config ({config_path}): {exc}")
         self.config_path = None
@@ -3415,7 +3404,7 @@ class CrossingReviewApp(ctk.CTk):
         if self.roi_set_combo is not None:
             self._update_roi_set_selector_values()
             self._update_roi_set_selector()
-        self._set_default_roi_to_full_frame(enable=False, emit_status=False)
+        self._set_default_roi(enable=False, emit_status=False)
         self.additional_outlier_sets = [self._default_additional_outlier_set()]
         self.additional_outlier_active_set_idx = 0
         self._update_additional_outlier_set_selector_values()
@@ -3804,7 +3793,7 @@ class CrossingReviewApp(ctk.CTk):
         self.canvas.configure(cursor="crosshair" if self.roi_edit_var.get() else "")
         self._draw_roi_canvas()
 
-    def _set_default_roi_to_full_frame(self, enable: bool = False, emit_status: bool = False):
+    def _set_default_roi(self, enable: bool = False, emit_status: bool = False):
         if self.reader is None:
             return
         self.roi_sets[self.roi_active_set_idx] = {
@@ -6583,9 +6572,6 @@ def main():
                 path, config = found
                 try:
                     app._load_config_dict(path, config)
-                    return
-                except RoiMigrationError as exc:
-                    messagebox.showerror("ROI migration", str(exc), parent=app)
                     return
                 except Exception as exc:
                     app.set_status(f"Failed to load existing config ({path}): {exc}")
