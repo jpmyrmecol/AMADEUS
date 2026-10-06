@@ -1,18 +1,11 @@
 # Copyright (C) 2026 Yusuke Notomi
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Pure, dependency-light foreground-mask segmentation helpers.
+"""Foreground-mask segmentation helpers for the tracking pipeline.
 
-This intentionally duplicates (rather than imports) the small pixel-math
-functions gui/gui_segmentation.py keeps privately (_segment_cpu,
-_build_single_roi_mask, _build_roi_mask_for_frame, _expand_mask): that
-module imports
-cv2/numpy lazily (see its _ensure_video_modules()) to keep GUI startup
-fast, so importing from it here at module load time would reintroduce an
-eager cv2 import into the GUI's import chain. These functions are small,
-stable, and pixel-level only, so keeping a second copy here for the
-tracking pipeline is lower-risk than coupling the two modules' import
-timing together.
+Pixel math remains separate from the GUI so its OpenCV imports stay lazy.
+Polygon ROI math lives in main.roi, which imports image libraries only when
+rasterizing a mask and is therefore safe to share with the GUI at startup.
 """
 
 from __future__ import annotations
@@ -21,6 +14,7 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
+from main.roi import build_single_roi_mask, build_roi_mask_for_frame
 
 
 @dataclass
@@ -243,51 +237,13 @@ def merge_corridors(inside, src_roi, group, dists) -> np.ndarray:
     return bridge & np.isin(labels, np.unique(labels[sources]))
 
 
-def build_single_roi_mask(image_shape: tuple, roi: dict) -> "np.ndarray | None":
-    """Mirrors gui_segmentation._build_single_roi_mask."""
-    img_h, img_w = image_shape[:2]
-    mask = np.zeros((img_h, img_w), dtype=np.uint8)
-    shape = roi.get("shape", "circle")
-    if shape == "circle":
-        cx = max(0, min(img_w - 1, int(roi.get("x", 0))))
-        cy = max(0, min(img_h - 1, int(roi.get("y", 0))))
-        radius = max(0, int(roi.get("w", 0)))
-        if radius <= 0:
-            return None
-        cv2.circle(mask, (cx, cy), radius, 255, thickness=cv2.FILLED)
-    else:
-        x = max(0, min(img_w, int(roi.get("x", 0))))
-        y = max(0, min(img_h, int(roi.get("y", 0))))
-        w = max(0, int(roi.get("w", 0)))
-        h_val = max(0, int(roi.get("h", 0)))
-        x2 = max(x, min(img_w, x + w))
-        y2 = max(y, min(img_h, y + h_val))
-        if x2 <= x or y2 <= y:
-            return None
-        mask[y:y2, x:x2] = 255
-    return mask
+def build_static_roi_mask(roi_sets: list, image_shape: tuple, reverse: bool = False) -> "np.ndarray | None":
+    """Union enabled polygons, ignoring frame ranges on a different tracking video.
 
-
-def build_static_roi_mask(roi_sets: list, image_shape: tuple) -> "np.ndarray | None":
-    """Intersection mask of all enabled ROI sets, ignoring frame_start/frame_end.
-
-    Unlike gui_segmentation.build_roi_mask_for_frame, this is used to reapply
-    an arena-boundary ROI to a *different* video than the one segmentation
-    was configured on -- the original frame_start/frame_end gating refers to
-    that video's own frame numbering and has no meaning here, so every
-    enabled ROI is treated as always active.
+    The segmentation video's frame numbering does not apply to another video.
+    Reverse ROI is applied once to the complete union.
     """
-    combined: "np.ndarray | None" = None
-    for roi in roi_sets:
-        if not roi.get("enabled", False):
-            continue
-        partial = build_single_roi_mask(image_shape, roi)
-        if partial is None:
-            continue
-        if bool(roi.get("reverse", False)):
-            partial = cv2.bitwise_not(partial)
-        combined = partial if combined is None else cv2.bitwise_and(combined, partial)
-    return combined
+    return build_roi_mask_for_frame(roi_sets, image_shape, None, reverse)
 
 
 def compute_foreground_mask(
@@ -320,7 +276,7 @@ def compute_foreground_mask(
 
     if cfg.expand_px > 0:
         mask = expand_mask(mask, cfg.expand_px, cfg.expand_merge_only)
-        if roi_mask is not None:
-            mask = cv2.bitwise_and(mask, roi_mask)
+    if roi_mask is not None:
+        mask = cv2.bitwise_and(mask, roi_mask)
 
     return mask

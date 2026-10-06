@@ -55,6 +55,12 @@ from gui.video_input import (
     video_conversion_record,
 )
 from main.path_utils import resolve_config_paths
+from main.roi import (
+    ROI_SCHEMA, RoiMigrationError, default_roi_set, initial_roi_points,
+    normalize_roi_set, load_roi_settings, roi_is_active, roi_signature,
+    build_single_roi_mask as _build_single_roi_mask,
+    build_roi_mask_for_frame as _build_roi_mask_for_frame,
+)
 from main.video_frame_count import detect_seekable_frame_count
 
 APP_TITLE = "AMADEUS: Segmentation"
@@ -111,17 +117,11 @@ DEFAULT_TRAINING_MAX_FRAME_INDEX = 19999
 LONG_VIDEO_FRAME_COUNT_THRESHOLD = DEFAULT_TRAINING_MAX_FRAME_INDEX + 1
 # Lower and upper IQR multiplier controls share the same maximum.
 AREA_IQR_SLIDER_MAX = 10.0
-# Geometry sliders span the loaded image; the spinbox keeps a far wider limit so a
-# value outside the frame can still be typed. Radii reach twice the long edge,
-# which covers a circle centred anywhere in the image (diagonal < 1.5 x long edge).
-ROI_ENTRY_MAX_PX = 1000000
-ROI_RADIUS_SLIDER_LONG_EDGE_FACTOR = 2
 REGION_EXPAND_SLIDER_MAX_PX = 50
 REGION_EXPAND_ENTRY_MAX_PX = 1000
-# Grabbing the ROI outline is judged in canvas pixels, so the tolerance stays the
-# same on screen at any zoom level.
-ROI_EDGE_GRAB_CANVAS_PX = 8
-TK_CONTROL_MASK = 0x0004
+# Handles and hit tolerance stay the same size on screen at any zoom level.
+ROI_HANDLE_RADIUS_CANVAS_PX = 6
+ROI_HANDLE_GRAB_CANVAS_PX = 10
 # The Min blob area slider spans a range fixed once per video; the spinbox keeps
 # the wider limit so a larger area can still be typed.
 MIN_AREA_ENTRY_MAX = 100000
@@ -384,7 +384,8 @@ class _SegConfig:
     invert_mask: bool
     expand_px: int                         # outward growth of every blob outline, in pixels
     expand_merge_only: bool                # keep only the growth that merges separate regions
-    roi_sets: list                         # geometry dicts; per-frame mask built inside _segment_with_config
+    roi_sets: list                         # polygon snapshots; masks use the shared ROI implementation
+    roi_reverse: bool                      # reverse the completed union, never individual sets
     additional_outlier_sets: list          # segmentation settings; converted to blobs per frame
     background_bgr: Optional[np.ndarray]  # read-only shared reference
     additional_backgrounds: dict[str, np.ndarray] = field(default_factory=dict)
@@ -445,7 +446,7 @@ def _segment_mask_with_settings(
 
     if local_cfg.invert_mask:
         mask = cv2.bitwise_not(mask)
-    roi_mask = _build_roi_mask_for_frame(local_cfg.roi_sets, frame_bgr.shape[:2], frame_idx)
+    roi_mask = _build_roi_mask_for_frame(local_cfg.roi_sets, frame_bgr.shape[:2], frame_idx, local_cfg.roi_reverse)
     if roi_mask is not None:
         mask = cv2.bitwise_and(mask, roi_mask)
 
@@ -462,8 +463,8 @@ def _segment_mask_with_settings(
 
     if expand and local_cfg.expand_px > 0:
         mask = _expand_mask(mask, local_cfg.expand_px, local_cfg.expand_merge_only)
-        if roi_mask is not None:
-            mask = cv2.bitwise_and(mask, roi_mask)
+    if roi_mask is not None:
+        mask = cv2.bitwise_and(mask, roi_mask)
     return mask
 
 
@@ -802,51 +803,6 @@ def contour_area(cnt: np.ndarray) -> float:
     return float(abs(cv2.contourArea(cnt)))
 
 
-def _build_single_roi_mask(image_shape: tuple, roi: dict) -> "Optional[np.ndarray]":
-    img_h, img_w = image_shape[:2]
-    mask = np.zeros((img_h, img_w), dtype=np.uint8)
-    shape = roi.get("shape", "circle")
-    if shape == "circle":
-        cx = max(0, min(img_w - 1, int(roi.get("x", 0))))
-        cy = max(0, min(img_h - 1, int(roi.get("y", 0))))
-        radius = max(0, int(roi.get("w", 0)))
-        if radius <= 0:
-            return None
-        cv2.circle(mask, (cx, cy), radius, 255, thickness=cv2.FILLED)
-    else:
-        x = max(0, min(img_w, int(roi.get("x", 0))))
-        y = max(0, min(img_h, int(roi.get("y", 0))))
-        w = max(0, int(roi.get("w", 0)))
-        h_val = max(0, int(roi.get("h", 0)))
-        x2 = max(x, min(img_w, x + w))
-        y2 = max(y, min(img_h, y + h_val))
-        if x2 <= x or y2 <= y:
-            return None
-        mask[y:y2, x:x2] = 255
-    return mask
-
-
-def _build_roi_mask_for_frame(roi_sets: list, image_shape: tuple, frame_idx: int) -> "Optional[np.ndarray]":
-    """Intersection mask of all enabled ROI sets that cover frame_idx. -1 in frame_end = last frame."""
-    combined: "Optional[np.ndarray]" = None
-    for roi in roi_sets:
-        if not roi.get("enabled", False):
-            continue
-        fs = int(roi.get("frame_start", 0))
-        fe = int(roi.get("frame_end", -1))
-        if frame_idx < fs:
-            continue
-        if fe >= 0 and frame_idx > fe:
-            continue
-        partial = _build_single_roi_mask(image_shape, roi)
-        if partial is None:
-            continue
-        if bool(roi.get("reverse", False)):
-            partial = cv2.bitwise_not(partial)
-        combined = partial if combined is None else cv2.bitwise_and(combined, partial)
-    return combined
-
-
 # Merge-only corridors below are the exact shortest connection between two
 # regions; one pixel of slack is what keeps that set connected once it is
 # rasterized. Distances there use DIST_MASK_5 rather than DIST_MASK_PRECISE:
@@ -854,6 +810,16 @@ def _build_roi_mask_for_frame(roi_sets: list, image_shape: tuple, frame_idx: int
 # segmentation run has to give the same mask every time.
 _BRIDGE_TOLERANCE_PX = 1.0
 _BRIDGE_DIST_MASK = 5
+
+
+def _draw_roi_polygons(base, roi_sets: list, frame_idx: int, reverse: bool = False):
+    drawn = False
+    for roi in roi_sets:
+        if roi_is_active(roi, frame_idx) and roi["points"]:
+            cv2.polylines(base, [np.asarray(roi["points"], dtype=np.int32)], True, ROI_COLOR, 2, cv2.LINE_AA)
+            drawn = True
+    if drawn and reverse:
+        cv2.putText(base, "REV", (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, ROI_COLOR, 1, cv2.LINE_AA)
 
 
 def _disk_kernel(radius: int) -> np.ndarray:
@@ -1221,15 +1187,11 @@ class CrossingReviewApp(ctk.CTk):
         self.fill_holes_var = tk.BooleanVar(value=True)
         self.invert_mask_var = tk.BooleanVar(value=False)
         self.roi_enabled_var = tk.BooleanVar(value=False)
-        self.roi_shape_var = tk.StringVar(value="circle")
-        self.roi_x_var = tk.IntVar(value=0)
-        self.roi_y_var = tk.IntVar(value=0)
-        self.roi_w_var = tk.IntVar(value=0)
-        self.roi_h_var = tk.IntVar(value=0)
+        self.roi_edit_var = tk.BooleanVar(value=False)
         self.roi_reverse_var = tk.BooleanVar(value=False)
         self.roi_frame_start_var = tk.IntVar(value=0)
         self.roi_frame_end_var = tk.IntVar(value=-1)
-        self.roi_sets: list[dict] = [{"enabled": False, "reverse": False, "shape": "circle", "x": 0, "y": 0, "w": 0, "h": 0, "frame_start": 0, "frame_end": -1}]
+        self.roi_sets: list[dict] = [default_roi_set()]
         self.roi_active_set_idx: int = 0
         self._switching_roi_set: bool = False
         self.roi_set_combo: Optional[ctk.CTkComboBox] = None
@@ -1351,7 +1313,8 @@ class CrossingReviewApp(ctk.CTk):
         self.last_drag_canvas: Optional[np.ndarray] = None
         self._roi_drag_mode: Optional[str] = None
         self._roi_drag_anchor: Optional[tuple[float, float]] = None
-        self._roi_scale_center: Optional[tuple[float, float]] = None
+        self._roi_drag_vertex: Optional[int] = None
+        self._roi_drag_points: list[list[int]] = []
 
         self._build_ui()
         self._bind_events()
@@ -1476,15 +1439,18 @@ class CrossingReviewApp(ctk.CTk):
         ctk.CTkButton(_roi_set_row, text="-", width=28, command=self._remove_roi_set).pack(side="left", padx=2)
         ctk.CTkCheckBox(roi, text="Use this ROI", variable=self.roi_enabled_var, command=self._toggle_roi_params).pack(anchor="w", padx=6, pady=(4, 4))
         self.roi_params_frame = ctk.CTkFrame(roi, corner_radius=0)
-        ctk.CTkCheckBox(self.roi_params_frame, text="Reverse ROI", variable=self.roi_reverse_var).pack(anchor="w", padx=6, pady=(2, 4))
-        self._pack_combobox(self.roi_params_frame, "ROI shape", self.roi_shape_var, ["rectangle", "circle"])
-        self.roi_x_scale = self._pack_scale_entry(self.roi_params_frame, "ROI x / center x", self.roi_x_var, 0, ROI_ENTRY_MAX_PX, 1, slider_hi=10000)
-        self.roi_y_scale = self._pack_scale_entry(self.roi_params_frame, "ROI y / center y", self.roi_y_var, 0, ROI_ENTRY_MAX_PX, 1, slider_hi=10000)
-        self.roi_w_scale = self._pack_scale_entry(self.roi_params_frame, "ROI width / radius", self.roi_w_var, 0, ROI_ENTRY_MAX_PX, 1, slider_hi=10000)
-        self.roi_h_scale = self._pack_scale_entry(self.roi_params_frame, "ROI height (rect)", self.roi_h_var, 0, ROI_ENTRY_MAX_PX, 1, slider_hi=10000)
+        self.roi_params_frame.pack(fill="x", padx=0, pady=(0, 4))
+        roi_actions = ctk.CTkFrame(self.roi_params_frame, corner_radius=0)
+        roi_actions.pack(fill="x", padx=6, pady=(2, 4))
+        self.roi_edit_button = ctk.CTkButton(roi_actions, text="Edit ROI", width=110, command=self._toggle_roi_edit)
+        self.roi_edit_button.pack(side="left", padx=(0, 4))
+        self.roi_reset_button = ctk.CTkButton(roi_actions, text="Reset ROI", width=110, command=self.reset_roi)
+        self.roi_reset_button.pack(side="left")
+        ctk.CTkLabel(self.roi_params_frame, text="Edit: drag a vertex to reshape, inside to move.\nDrag outside the polygon to pan.",
+                        justify="left", anchor="w", wraplength=340).pack(fill="x", padx=6, pady=(0, 4))
         self.roi_frame_start_scale = self._pack_scale_entry(self.roi_params_frame, "From frame", self.roi_frame_start_var, 0, 999999, 1)
         self.roi_frame_end_scale = self._pack_scale_entry(self.roi_params_frame, "To frame (-1=end)", self.roi_frame_end_var, -1, 999999, 1, slider_lo=0, end_sentinel=-1)
-        ctk.CTkButton(self.roi_params_frame, text="Reset ROI", command=self.reset_roi).pack(fill="x", padx=6, pady=(2, 6))
+        ctk.CTkCheckBox(self.roi_params_frame, text="Reverse ROI", variable=self.roi_reverse_var).pack(anchor="w", padx=6, pady=(4, 6))
         self._toggle_roi_params()
 
         additional = self.additional_outlier_section
@@ -1819,6 +1785,7 @@ class CrossingReviewApp(ctk.CTk):
             "training_frame_start": self.training_frame_start_var,
             "training_frame_end": self.training_frame_end_var,
             "training_frame_interval": self.training_frame_interval_var,
+            "roi_reverse": self.roi_reverse_var,
             "additional_outlier_enabled": self.additional_outlier_enabled_var,
             "additional_outlier_frame_start": self.additional_outlier_frame_start_var,
             "additional_outlier_frame_end": self.additional_outlier_frame_end_var,
@@ -1858,7 +1825,8 @@ class CrossingReviewApp(ctk.CTk):
                 settings[key] = var.get()
             except Exception:
                 pass
-        settings["roi_sets"] = [dict(r) for r in self.roi_sets]
+        settings["roi_schema"] = ROI_SCHEMA
+        settings["roi_sets"] = [normalize_roi_set(r) for r in self.roi_sets]
         settings["additional_outlier_sets"] = [dict(r) for r in self.additional_outlier_sets]
 
         analysis_iqr_stats = {
@@ -1871,7 +1839,7 @@ class CrossingReviewApp(ctk.CTk):
         }
 
         return {
-            "version": 4,
+            "version": 5,
             "app": APP_TITLE,
             "settings": settings,
             # Empty unless this video is an analysis copy; read back from the
@@ -1918,23 +1886,9 @@ class CrossingReviewApp(ctk.CTk):
         return self.frame_count - 1 if end == -1 else min(self.frame_count - 1, end)
 
     def _update_geometry_control_ranges(self) -> None:
-        """Fit the ROI and frame sliders to the loaded video.
-
-        The spinbox keeps the wide limit, so a coordinate outside the frame or a
-        radius beyond twice the long edge can still be entered as a number.
-        """
+        """Fit the ROI frame-range sliders to the loaded video."""
         if self.reader is None:
             return
-        width = max(1, int(self.reader.width))
-        height = max(1, int(self.reader.height))
-        radius_max = ROI_RADIUS_SLIDER_LONG_EDGE_FACTOR * max(width, height)
-        for scale, slider_upper in (
-            (self.roi_x_scale, width),
-            (self.roi_y_scale, height),
-            (self.roi_w_scale, radius_max),
-            (self.roi_h_scale, height),
-        ):
-            scale.set_value_range(0, ROI_ENTRY_MAX_PX, clamp_current=False, slider_upper=slider_upper)
         last = max(0, int(self.frame_count) - 1)
         for scale in (self.roi_frame_start_scale, self.additional_outlier_frame_start_scale):
             scale.set_value_range(0, last)
@@ -2070,15 +2024,13 @@ class CrossingReviewApp(ctk.CTk):
         self._apply_frame_ranges_from_settings(settings)
         self._toggle_area_outlier_method_controls()
 
-        roi_sets_data = settings["roi_sets"]
-        if not isinstance(roi_sets_data, list):
-            raise ValueError("settings.roi_sets must be a list.")
-        loaded_roi_sets = [dict(item) for item in roi_sets_data if isinstance(item, dict)]
-        self.roi_sets = (
-            [self._normalize_roi_set(item) for item in loaded_roi_sets]
-            if loaded_roi_sets
-            else [self._default_roi_set()]
-        )
+        legacy_roi_config = settings.get("roi_schema") != ROI_SCHEMA
+        image_shape = (self.reader.height, self.reader.width) if self.reader is not None else None
+        self.roi_sets, reverse, _notices = load_roi_settings(settings, image_shape)
+        self.roi_reverse_var.set(reverse)
+        self.roi_edit_var.set(False)
+        self._roi_drag_mode = None
+        self.current_mask_cache.clear()
         self.roi_active_set_idx = 0
         self._update_roi_set_selector_values()
         self._switching_roi_set = True
@@ -2164,7 +2116,7 @@ class CrossingReviewApp(ctk.CTk):
             self.analysis_is_stale = True
             self.analysis_ready_var.set("analysis: not computed")
 
-        if legacy_additional_config:
+        if legacy_additional_config or legacy_roi_config:
             self.analysis_blobs_by_frame.clear()
             self.analysis_frames = []
             self.analysis_signature = None
@@ -2418,6 +2370,13 @@ class CrossingReviewApp(ctk.CTk):
     def _load_config_dict(self, path: str, config: dict) -> None:
         """Apply an already-parsed segmentation_gui_config.json and remember its path."""
         settings = config["settings"]
+        _sets, _reverse, notices = load_roi_settings(settings)
+        if notices and not messagebox.askokcancel(
+            "ROI migration", "\n\n".join(notices) +
+            "\n\nReview the polygons and run Analyze again after loading. "
+            "The saved configuration is changed only when you save or export. Continue?", parent=self,
+        ):
+            return
         self.config_path = path
         self._applying_config = True
         try:
@@ -3309,16 +3268,14 @@ class CrossingReviewApp(ctk.CTk):
         seg_vars = [
             self.threshold_var, self.dark_threshold_var, self.bright_threshold_var, self.diff_threshold_var, self.min_area_var, self.blur_ksize_var,
             self.open_iter_var, self.close_iter_var, self.fill_holes_var, self.invert_mask_var,
-            self.roi_enabled_var, self.roi_reverse_var, self.roi_shape_var, self.roi_x_var, self.roi_y_var, self.roi_w_var, self.roi_h_var,
-            self.roi_frame_start_var, self.roi_frame_end_var,
             self.additional_outlier_enabled_var, self.additional_outlier_frame_start_var, self.additional_outlier_frame_end_var,
             self.region_expand_px_var, self.region_expand_merge_only_var,
         ]
         for var in seg_vars:
             var.trace_add("write", lambda *_: self._mark_analysis_stale(redraw=True))
-        for var in [self.roi_enabled_var, self.roi_reverse_var, self.roi_shape_var, self.roi_x_var, self.roi_y_var, self.roi_w_var, self.roi_h_var,
-                    self.roi_frame_start_var, self.roi_frame_end_var]:
+        for var in [self.roi_enabled_var, self.roi_frame_start_var, self.roi_frame_end_var]:
             var.trace_add("write", self._on_roi_var_changed)
+        self.roi_reverse_var.trace_add("write", self._on_roi_reverse_changed)
         for var in [
             self.additional_outlier_enabled_var,
             self.additional_outlier_frame_start_var,
@@ -3382,6 +3339,9 @@ class CrossingReviewApp(ctk.CTk):
             config_path, config = found
             try:
                 self._load_config_dict(config_path, config)
+                return
+            except RoiMigrationError as exc:
+                messagebox.showerror("ROI migration", str(exc), parent=self)
                 return
             except Exception as exc:
                 self.set_status(f"Failed to load existing config ({config_path}): {exc}")
@@ -3571,6 +3531,8 @@ class CrossingReviewApp(ctk.CTk):
     def set_frame(self, frame_idx: int, reset_view: bool = False):
         if self.reader is None or self.frame_count <= 0:
             return
+        if self._roi_drag_mode is not None:
+            self.on_canvas_release()
         if self.reader.frame_count != self.frame_count:
             self.frame_count = self.reader.frame_count
             self.frame_spin.configure(from_=0, to=max(0, self.frame_count - 1))
@@ -3707,20 +3669,7 @@ class CrossingReviewApp(ctk.CTk):
     def _segmentation_signature(self) -> tuple:
         self._sync_roi_vars_to_set(self.roi_active_set_idx)
         self._sync_additional_outlier_vars_to_set()
-        roi_signature = tuple(
-            (
-                int(bool(r.get("enabled", False))),
-                int(bool(r.get("reverse", False))),
-                str(r.get("shape", "circle")),
-                int(r.get("x", 0)),
-                int(r.get("y", 0)),
-                int(r.get("w", 0)),
-                int(r.get("h", 0)),
-                int(r.get("frame_start", 0)),
-                int(r.get("frame_end", -1)),
-            )
-            for r in self.roi_sets
-        )
+        roi_key = roi_signature(self.roi_sets, self.roi_reverse_var.get())
         additional_signature = tuple(
             (
                 int(bool(item.get("enabled", False))),
@@ -3755,7 +3704,7 @@ class CrossingReviewApp(ctk.CTk):
             int(bool(self.invert_mask_var.get())),
             int(self.region_expand_px_var.get()),
             int(bool(self.region_expand_merge_only_var.get())),
-            roi_signature,
+            roi_key,
             additional_signature,
             int(self.additional_outlier_revision),
             protected_bounds,
@@ -3831,27 +3780,52 @@ class CrossingReviewApp(ctk.CTk):
     def _toggle_roi_params(self):
         if not hasattr(self, "roi_params_frame"):
             return
-        if self.roi_enabled_var.get():
-            if not self.roi_params_frame.winfo_ismapped():
-                self.roi_params_frame.pack(fill="x", padx=0, pady=(0, 4))
-        else:
-            self.roi_params_frame.pack_forget()
+        if self.roi_enabled_var.get() and not self._switching_roi_set and not self._applying_config:
+            self._ensure_roi_points()
+        state = "normal" if self.reader is not None else "disabled"
+        self.roi_edit_button.configure(state=state, text="Edit ROI: ON" if self.roi_edit_var.get() else "Edit ROI")
+        self.roi_reset_button.configure(state=state)
+        if hasattr(self, "canvas"):
+            self.canvas.configure(cursor="crosshair" if self.roi_edit_var.get() else "")
+
+    def _ensure_roi_points(self) -> bool:
+        roi = self.roi_sets[self.roi_active_set_idx]
+        if roi["points"] or self.reader is None:
+            return False
+        roi["points"] = initial_roi_points((self.reader.height, self.reader.width))
+        return True
+
+    def _toggle_roi_edit(self):
+        if self.reader is None:
+            return
+        self.on_canvas_release()
+        self.roi_edit_var.set(not self.roi_edit_var.get())
+        if self.roi_edit_var.get():
+            self.stop_playback()
+            if self._ensure_roi_points():
+                self._on_roi_geometry_changed()
+        self._toggle_roi_params()
+        self.canvas.configure(cursor="crosshair" if self.roi_edit_var.get() else "")
+        self._draw_roi_canvas()
 
     def _set_default_roi_to_full_frame(self, enable: bool = False, emit_status: bool = False):
         if self.reader is None:
             return
-        cx = int(self.reader.width // 2)
-        cy = int(self.reader.height // 2)
-        radius = int(max(self.reader.width, self.reader.height) // 2)
-        self.roi_shape_var.set("circle")
-        self.roi_x_var.set(cx)
-        self.roi_y_var.set(cy)
-        self.roi_w_var.set(radius)
-        self.roi_h_var.set(0)
+        self.roi_sets[self.roi_active_set_idx] = {
+            **default_roi_set(), "enabled": bool(enable),
+            "points": initial_roi_points((self.reader.height, self.reader.width)),
+        }
+        self._switching_roi_set = True
+        try:
+            self._sync_set_to_roi_vars(self.roi_active_set_idx)
+        finally:
+            self._switching_roi_set = False
         self.roi_reverse_var.set(False)
-        self.roi_enabled_var.set(bool(enable))
+        self.roi_edit_var.set(False)
+        self._roi_drag_mode = None
+        self._toggle_roi_params()
         if emit_status:
-            self.set_status(f"Default circular ROI: center=({cx},{cy}), radius={radius}")
+            self.set_status("Default rectangular polygon ROI")
 
     def _on_segmentation_mode_changed(self):
         if self._applying_config:
@@ -3930,37 +3904,21 @@ class CrossingReviewApp(ctk.CTk):
     def reset_roi(self):
         if self.reader is None:
             return
-        cx = int(self.reader.width // 2)
-        cy = int(self.reader.height // 2)
-        radius = int(max(self.reader.width, self.reader.height) // 2)
-        self.roi_shape_var.set("circle")
-        self.roi_x_var.set(cx)
-        self.roi_y_var.set(cy)
-        self.roi_w_var.set(radius)
-        self.roi_h_var.set(0)
-        self.roi_reverse_var.set(False)
-        self.roi_enabled_var.set(True)
-        self.set_status(f"ROI reset: circle center=({cx},{cy}), radius={radius}")
+        self.on_canvas_release()
+        roi = self.roi_sets[self.roi_active_set_idx]
+        roi["points"] = initial_roi_points((self.reader.height, self.reader.width))
+        self._on_roi_geometry_changed()
+        self.set_status("Selected ROI reset to its initial rectangle")
 
     # ROI set management
 
     @staticmethod
     def _default_roi_set() -> dict:
-        return {"enabled": False, "reverse": False, "shape": "circle", "x": 0, "y": 0, "w": 0, "h": 0, "frame_start": 0, "frame_end": -1}
+        return default_roi_set()
 
     @staticmethod
     def _normalize_roi_set(roi: dict) -> dict:
-        return {
-            "enabled": bool(roi.get("enabled", False)),
-            "reverse": bool(roi.get("reverse", False)),
-            "shape": roi.get("shape", "circle") if roi.get("shape", "circle") in {"rectangle", "circle"} else "circle",
-            "x": int(roi.get("x", 0)),
-            "y": int(roi.get("y", 0)),
-            "w": int(roi.get("w", 0)),
-            "h": int(roi.get("h", 0)),
-            "frame_start": int(roi.get("frame_start", 0)),
-            "frame_end": int(roi.get("frame_end", -1)),
-        }
+        return normalize_roi_set(roi)
 
     @staticmethod
     def _default_additional_outlier_set() -> dict:
@@ -4010,38 +3968,43 @@ class CrossingReviewApp(ctk.CTk):
         }
 
     def _on_roi_var_changed(self, *_):
-        if not self._switching_roi_set:
-            self._sync_roi_vars_to_set(self.roi_active_set_idx)
+        if self._switching_roi_set or self._applying_config:
+            return
+        if self.roi_enabled_var.get():
+            self._ensure_roi_points()
+        self._sync_roi_vars_to_set(self.roi_active_set_idx)
+        self._on_roi_geometry_changed()
+
+    def _on_roi_reverse_changed(self, *_):
+        if not self._switching_roi_set and not self._applying_config:
+            self._on_roi_geometry_changed()
+
+    def _on_roi_geometry_changed(self):
+        self.current_mask_cache.clear()
+        self._area_reference_key = None
+        self._mark_analysis_stale(redraw=self._roi_drag_mode is None)
+        if self._roi_drag_mode is not None:
+            # Motion events repaint only vector outlines. Segmentation and area
+            # controls are recomputed once the mouse is released.
+            self._draw_roi_canvas()
 
     def _sync_roi_vars_to_set(self, idx: int):
-        if idx < 0 or idx >= len(self.roi_sets):
-            return
-        self.roi_sets[idx] = {
-            "enabled": bool(self.roi_enabled_var.get()),
-            "reverse": bool(self.roi_reverse_var.get()),
-            "shape": self.roi_shape_var.get(),
-            "x": int(self.roi_x_var.get()),
-            "y": int(self.roi_y_var.get()),
-            "w": int(self.roi_w_var.get()),
-            "h": int(self.roi_h_var.get()),
-            "frame_start": int(self.roi_frame_start_var.get()),
-            "frame_end": int(self.roi_frame_end_var.get()),
-        }
+        if 0 <= idx < len(self.roi_sets):
+            self.roi_sets[idx] = {
+                **self.roi_sets[idx],
+                "enabled": bool(self.roi_enabled_var.get()),
+                "frame_start": int(self.roi_frame_start_var.get()),
+                "frame_end": int(self.roi_frame_end_var.get()),
+            }
 
     def _sync_set_to_roi_vars(self, idx: int):
         if idx < 0 or idx >= len(self.roi_sets):
             return
-        roi = self._normalize_roi_set(self.roi_sets[idx])
+        roi = normalize_roi_set(self.roi_sets[idx])
         self.roi_sets[idx] = roi
-        self.roi_enabled_var.set(bool(roi.get("enabled", False)))
-        self.roi_reverse_var.set(bool(roi.get("reverse", False)))
-        self.roi_shape_var.set(roi.get("shape", "circle"))
-        self.roi_x_var.set(int(roi.get("x", 0)))
-        self.roi_y_var.set(int(roi.get("y", 0)))
-        self.roi_w_var.set(int(roi.get("w", 0)))
-        self.roi_h_var.set(int(roi.get("h", 0)))
-        self.roi_frame_start_var.set(int(roi.get("frame_start", 0)))
-        self.roi_frame_end_var.set(int(roi.get("frame_end", -1)))
+        self.roi_enabled_var.set(roi["enabled"])
+        self.roi_frame_start_var.set(roi["frame_start"])
+        self.roi_frame_end_var.set(roi["frame_end"])
 
     def _update_roi_set_selector_values(self):
         if self.roi_set_combo is None:
@@ -4065,6 +4028,7 @@ class CrossingReviewApp(ctk.CTk):
     def _switch_roi_set(self, new_idx: int):
         if new_idx == self.roi_active_set_idx:
             return
+        self.on_canvas_release()
         self._sync_roi_vars_to_set(self.roi_active_set_idx)
         self._switching_roi_set = True
         try:
@@ -4074,7 +4038,7 @@ class CrossingReviewApp(ctk.CTk):
         finally:
             self._switching_roi_set = False
         self._toggle_roi_params()
-        self._mark_analysis_stale(redraw=True)
+        self.redraw_current_frame()
 
     def _add_roi_set(self):
         if len(self.roi_sets) >= 8:
@@ -4082,10 +4046,7 @@ class CrossingReviewApp(ctk.CTk):
         self._sync_roi_vars_to_set(self.roi_active_set_idx)
         new_roi: dict = self._default_roi_set()
         if self.reader is not None:
-            cx = self.reader.width // 2
-            cy = self.reader.height // 2
-            r = max(self.reader.width, self.reader.height) // 2
-            new_roi.update({"x": cx, "y": cy, "w": r})
+            new_roi["points"] = initial_roi_points((self.reader.height, self.reader.width))
         self.roi_sets.append(new_roi)
         self._update_roi_set_selector_values()
         self._switch_roi_set(len(self.roi_sets) - 1)
@@ -4093,6 +4054,7 @@ class CrossingReviewApp(ctk.CTk):
     def _remove_roi_set(self):
         if len(self.roi_sets) <= 1:
             return
+        self.on_canvas_release()
         old_idx = self.roi_active_set_idx
         self.roi_sets.pop(old_idx)
         new_idx = min(old_idx, len(self.roi_sets) - 1)
@@ -4105,7 +4067,7 @@ class CrossingReviewApp(ctk.CTk):
         finally:
             self._switching_roi_set = False
         self._toggle_roi_params()
-        self._mark_analysis_stale(redraw=True)
+        self._on_roi_geometry_changed()
 
     def _toggle_result_import_params(self):
         if self.result_import_params_frame is None:
@@ -4342,87 +4304,73 @@ class CrossingReviewApp(ctk.CTk):
     def _additional_outlier_needs_background(self) -> bool:
         return bool(self._additional_outlier_background_methods())
 
-    def _active_roi_geometry(self) -> Optional[tuple[str, float, float, float, float]]:
-        """The ROI as drawn on the current frame, or None when none is drawn."""
-        if self.frame_bgr_cache is None or not self.roi_enabled_var.get():
+    def _active_roi_geometry(self) -> Optional[list[list[int]]]:
+        """The selected polygon is editable even when disabled or outside its range."""
+        if self.frame_bgr_cache is None or not self.roi_edit_var.get():
             return None
-        start = int(self.roi_frame_start_var.get())
-        end = int(self.roi_frame_end_var.get())
-        if self.current_frame < start or (end >= 0 and self.current_frame > end):
-            return None
-        return (
-            self.roi_shape_var.get(),
-            float(self.roi_x_var.get()), float(self.roi_y_var.get()),
-            float(self.roi_w_var.get()), float(self.roi_h_var.get()),
-        )
+        return self.roi_sets[self.roi_active_set_idx]["points"] or None
 
-    def _roi_outline_hit(self, ix: float, iy: float) -> bool:
-        geom = self._active_roi_geometry()
-        if geom is None:
+    def _start_roi_drag(self, ix: float, iy: float) -> bool:
+        points = self._active_roi_geometry()
+        if not points:
             return False
-        shape, x, y, w, h = geom
-        tol = max(1.0, ROI_EDGE_GRAB_CANVAS_PX / max(1e-9, self.scale))
-        if shape == "circle":
-            return w > 0 and abs(math.hypot(ix - x, iy - y) - w) <= tol
-        if w <= 0 or h <= 0:
+        distances = [math.hypot(ix - x, iy - y) * self.scale for x, y in points]
+        nearest = min(range(len(points)), key=distances.__getitem__)
+        if distances[nearest] <= ROI_HANDLE_GRAB_CANVAS_PX:
+            self._roi_drag_mode = "vertex"
+            self._roi_drag_vertex = nearest
+        elif cv2.pointPolygonTest(np.asarray(points, dtype=np.int32), (ix, iy), False) >= 0:
+            self._roi_drag_mode = "move"
+            self._roi_drag_vertex = None
+        else:
             return False
-        on_band = (x - tol) <= ix <= (x + w + tol) and (y - tol) <= iy <= (y + h + tol)
-        in_core = (x + tol) < ix < (x + w - tol) and (y + tol) < iy < (y + h - tol)
-        return on_band and not in_core
-
-    def _start_roi_drag(self, ix: float, iy: float, *, scaling: bool) -> bool:
-        if not self._roi_outline_hit(ix, iy):
-            return False
-        self._roi_drag_mode = None
-        self._set_roi_drag_mode(scaling, ix, iy)
+        self._roi_drag_anchor = (ix, iy)
+        self._roi_drag_points = [list(point) for point in points]
         return True
 
-    def _set_roi_drag_mode(self, scaling: bool, ix: float, iy: float) -> None:
-        """Switch between moving and resizing, including mid-drag on a Ctrl press.
-
-        Resizing pins the centre where the ROI stands at that moment, so taking
-        over a move never shifts x/y and the centre cannot drift as the size is
-        rounded to whole pixels.
-        """
-        mode = "scale" if scaling else "move"
-        if mode == self._roi_drag_mode:
-            return
-        self._roi_drag_mode = mode
-        self._roi_drag_anchor = (ix, iy)
-        self._roi_scale_center = None
-        geom = self._active_roi_geometry()
-        if mode == "scale" and geom is not None:
-            shape, x, y, w, h = geom
-            self._roi_scale_center = (x, y) if shape == "circle" else (x + w / 2.0, y + h / 2.0)
-
     def _update_roi_drag(self, ix: float, iy: float) -> None:
-        geom = self._active_roi_geometry()
-        if geom is None or self._roi_drag_anchor is None:
+        if self._roi_drag_mode is None or self._roi_drag_anchor is None or self.reader is None:
             return
-        shape, x, y, w, h = geom
+        ax, ay = self._roi_drag_anchor
+        dx, dy = round(ix - ax), round(iy - ay)
+        points = [list(point) for point in self._roi_drag_points]
+        width, height = self.reader.width, self.reader.height
         if self._roi_drag_mode == "move":
-            ax, ay = self._roi_drag_anchor
-            dx, dy = int(round(ix - ax)), int(round(iy - ay))
-            if dx == 0 and dy == 0:
-                return
-            self.roi_x_var.set(max(0, int(x) + dx))
-            self.roi_y_var.set(max(0, int(y) + dy))
-            self._roi_drag_anchor = (ax + dx, ay + dy)
+            dx = max(-min(p[0] for p in points), min(width - 1 - max(p[0] for p in points), dx))
+            dy = max(-min(p[1] for p in points), min(height - 1 - max(p[1] for p in points), dy))
+            points = [[x + dx, y + dy] for x, y in points]
+        else:
+            index = self._roi_drag_vertex
+            x, y = points[index]
+            points[index] = [max(0, min(width - 1, x + dx)), max(0, min(height - 1, y + dy))]
+        roi = self.roi_sets[self.roi_active_set_idx]
+        if points != roi["points"]:
+            roi["points"] = points
+            self._on_roi_geometry_changed()
+
+    def _draw_roi_canvas(self):
+        self.canvas.delete("roi_editor")
+        if self.frame_bgr_cache is None:
             return
-        if self._roi_scale_center is None:
-            return
-        # The size follows the cursor's offset from the pinned centre: inside the
-        # ROI shrinks it, outside grows it, and a still cursor holds one value.
-        cx, cy = self._roi_scale_center
-        if shape == "circle":
-            self.roi_w_var.set(max(1, int(round(math.hypot(ix - cx, iy - cy)))))
-            return
-        new_w = max(1, int(round(abs(ix - cx) * 2.0)))
-        new_h = max(1, int(round(abs(iy - cy) * 2.0)))
-        self.roi_w_var.set(new_w)
-        self.roi_h_var.set(new_h)
-        self.roi_x_var.set(max(0, int(round(cx - new_w / 2.0))))
-        self.roi_y_var.set(max(0, int(round(cy - new_h / 2.0))))
+        color = "#%02x%02x%02x" % tuple(reversed(ROI_COLOR))
+        active_any = False
+        for index, roi in enumerate(self.roi_sets):
+            active = roi_is_active(roi, self.current_frame)
+            editing = self.roi_edit_var.get() and index == self.roi_active_set_idx
+            if not roi["points"] or not (active or editing):
+                continue
+            active_any = active_any or active
+            coordinates = [(x * self.scale + self.offset_x, y * self.scale + self.offset_y) for x, y in roi["points"]]
+            flat = [value for point in coordinates for value in point]
+            self.canvas.create_polygon(*flat, fill="", outline=color, width=3 if editing else 2,
+                                       dash=() if active else (5, 4), tags="roi_editor")
+            if editing:
+                radius = ROI_HANDLE_RADIUS_CANVAS_PX
+                for x, y in coordinates:
+                    self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius,
+                                            fill="white", outline=color, width=2, tags="roi_editor")
+        if active_any and self.roi_reverse_var.get():
+            self.canvas.create_text(12, 12, text="REV", anchor="nw", fill=color, tags="roi_editor")
 
     def _parallel_read_frames(
         self,
@@ -5227,39 +5175,11 @@ class CrossingReviewApp(ctk.CTk):
         roi_sets: list,
         frame_idx: int,
         result_obbs: "Optional[np.ndarray]" = None,
+        roi_reverse: bool = False,
     ) -> np.ndarray:
         """Render a single frame with ORANGE/CYAN overlay -- same visual as the GUI preview."""
         base = frame_bgr.copy()
-        _ih, _iw = base.shape[:2]
-
-        for _roi in roi_sets:
-            if not _roi.get("enabled", False):
-                continue
-            _fs = int(_roi.get("frame_start", 0))
-            _fe = int(_roi.get("frame_end", -1))
-            if frame_idx < _fs or (_fe >= 0 and frame_idx > _fe):
-                continue
-            _shape = _roi.get("shape", "circle")
-            _rev = bool(_roi.get("reverse", False))
-            if _shape == "circle":
-                _cx = max(0, min(_iw - 1, int(_roi.get("x", 0))))
-                _cy = max(0, min(_ih - 1, int(_roi.get("y", 0))))
-                _r = max(0, int(_roi.get("w", 0)))
-                if _r > 0:
-                    cv2.circle(base, (_cx, _cy), _r, ROI_COLOR, 2, cv2.LINE_AA)
-                    if _rev:
-                        cv2.putText(base, "REV", (min(_iw - 1, _cx + _r + 4), _cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, ROI_COLOR, 1, cv2.LINE_AA)
-            else:
-                _rx = max(0, min(_iw, int(_roi.get("x", 0))))
-                _ry = max(0, min(_ih, int(_roi.get("y", 0))))
-                _rw = max(0, int(_roi.get("w", 0)))
-                _rh = max(0, int(_roi.get("h", 0)))
-                _rx2 = min(_iw, _rx + _rw)
-                _ry2 = min(_ih, _ry + _rh)
-                if _rx2 > _rx and _ry2 > _ry:
-                    cv2.rectangle(base, (_rx, _ry), (max(_rx, _rx2 - 1), max(_ry, _ry2 - 1)), ROI_COLOR, 2, cv2.LINE_AA)
-                    if _rev:
-                        cv2.putText(base, "REV", (_rx, max(14, _ry - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, ROI_COLOR, 1, cv2.LINE_AA)
+        _draw_roi_polygons(base, roi_sets, frame_idx, roi_reverse)
 
         if show_overlay:
             overlay = np.zeros_like(base)
@@ -5281,7 +5201,7 @@ class CrossingReviewApp(ctk.CTk):
 
         return base
 
-    def _build_preview_rgb(self) -> np.ndarray:
+    def _build_preview_rgb(self, *, draw_roi: bool = True) -> np.ndarray:
         if self.frame_bgr_cache is None:
             return np.zeros((480, 640, 3), dtype=np.uint8)
 
@@ -5301,36 +5221,8 @@ class CrossingReviewApp(ctk.CTk):
 
         base = frame_bgr.copy()
 
-        _ih, _iw = frame_bgr.shape[:2]
-        _cur = self.current_frame
-        for _roi in self.roi_sets:
-            if not _roi.get("enabled", False):
-                continue
-            _fs = int(_roi.get("frame_start", 0))
-            _fe = int(_roi.get("frame_end", -1))
-            if _cur < _fs or (_fe >= 0 and _cur > _fe):
-                continue
-            _shape = _roi.get("shape", "circle")
-            _rev = bool(_roi.get("reverse", False))
-            if _shape == "circle":
-                _cx = max(0, min(_iw - 1, int(_roi.get("x", 0))))
-                _cy = max(0, min(_ih - 1, int(_roi.get("y", 0))))
-                _r = max(0, int(_roi.get("w", 0)))
-                if _r > 0:
-                    cv2.circle(base, (_cx, _cy), _r, ROI_COLOR, 2, cv2.LINE_AA)
-                    if _rev:
-                        cv2.putText(base, "REV", (min(_iw - 1, _cx + _r + 4), _cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, ROI_COLOR, 1, cv2.LINE_AA)
-            else:
-                _rx = max(0, min(_iw, int(_roi.get("x", 0))))
-                _ry = max(0, min(_ih, int(_roi.get("y", 0))))
-                _rw = max(0, int(_roi.get("w", 0)))
-                _rh = max(0, int(_roi.get("h", 0)))
-                _rx2 = min(_iw, _rx + _rw)
-                _ry2 = min(_ih, _ry + _rh)
-                if _rx2 > _rx and _ry2 > _ry:
-                    cv2.rectangle(base, (_rx, _ry), (max(_rx, _rx2 - 1), max(_ry, _ry2 - 1)), ROI_COLOR, 2, cv2.LINE_AA)
-                    if _rev:
-                        cv2.putText(base, "REV", (_rx, max(14, _ry - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, ROI_COLOR, 1, cv2.LINE_AA)
+        if draw_roi:
+            _draw_roi_polygons(base, self.roi_sets, self.current_frame, self.roi_reverse_var.get())
 
         if self.show_overlay_var.get():
             overlay = np.zeros_like(base)
@@ -5357,8 +5249,12 @@ class CrossingReviewApp(ctk.CTk):
 
     def _draw_canvas(self, preserve_view: bool):
         self._update_area_control_ranges()
-        preview_rgb = self._build_preview_rgb()
+        if self._roi_drag_mode is not None:
+            self._draw_roi_canvas()
+            return
+        preview_rgb = self._build_preview_rgb(draw_roi=False)
         self._present_image(preview_rgb, preserve_view=preserve_view)
+        self._draw_roi_canvas()
 
     def redraw_current_frame(self):
         if self.frame_bgr_cache is not None:
@@ -5367,6 +5263,7 @@ class CrossingReviewApp(ctk.CTk):
     def on_mousewheel(self, event):
         if self.frame_bgr_cache is None:
             return
+        self.on_canvas_release()
         if hasattr(event, "delta") and event.delta > 0:
             factor = ZOOM_IN_FACTOR
         elif hasattr(event, "delta") and event.delta < 0:
@@ -5386,7 +5283,8 @@ class CrossingReviewApp(ctk.CTk):
 
     def on_canvas_press(self, event):
         ix, iy = self._canvas_to_image(float(event.x), float(event.y))
-        if self._start_roi_drag(ix, iy, scaling=bool(int(getattr(event, "state", 0)) & TK_CONTROL_MASK)):
+        self.last_drag_canvas = None
+        if self._start_roi_drag(ix, iy):
             self.stop_playback()
             return
         self.last_drag_canvas = np.array([event.x, event.y], dtype=float)
@@ -5394,7 +5292,6 @@ class CrossingReviewApp(ctk.CTk):
     def on_canvas_drag(self, event):
         if self._roi_drag_mode is not None:
             ix, iy = self._canvas_to_image(float(event.x), float(event.y))
-            self._set_roi_drag_mode(bool(int(getattr(event, "state", 0)) & TK_CONTROL_MASK), ix, iy)
             self._update_roi_drag(ix, iy)
             return
         if self.last_drag_canvas is None:
@@ -5410,7 +5307,8 @@ class CrossingReviewApp(ctk.CTk):
         if self._roi_drag_mode is not None:
             self._roi_drag_mode = None
             self._roi_drag_anchor = None
-            self._roi_scale_center = None
+            self._roi_drag_vertex = None
+            self._roi_drag_points = []
             self._update_area_control_ranges()
             self.redraw_current_frame()
             return
@@ -5491,7 +5389,7 @@ class CrossingReviewApp(ctk.CTk):
         if self.frame_bgr_cache is None or not self._current_blobs:
             self._hide_tooltip()
             return
-        if self.last_drag_canvas is not None:
+        if self.last_drag_canvas is not None or self._roi_drag_mode is not None:
             self._hide_tooltip()
             return
         ix, iy = self._canvas_to_image(float(event.x), float(event.y))
@@ -5980,7 +5878,8 @@ class CrossingReviewApp(ctk.CTk):
             invert_mask=bool(self.invert_mask_var.get()),
             expand_px=max(0, int(self.region_expand_px_var.get())),
             expand_merge_only=bool(self.region_expand_merge_only_var.get()),
-            roi_sets=[dict(r) for r in self.roi_sets],
+            roi_sets=[normalize_roi_set(r) for r in self.roi_sets],
+            roi_reverse=bool(self.roi_reverse_var.get()),
             additional_outlier_sets=[dict(r) for r in self.additional_outlier_sets],
             background_bgr=self.background_bgr,  # read-only; no copy needed
             additional_backgrounds=self._additional_outlier_backgrounds_for_config(),
@@ -6594,8 +6493,8 @@ class CrossingReviewApp(ctk.CTk):
         show_overlay = self.show_overlay_var.get()
         show_contours = self.show_contours_var.get()
         show_centers = self.show_centers_var.get()
-        roi_sets_snapshot = [dict(r) for r in self.roi_sets]
         seg_cfg = self._capture_seg_config()
+        roi_sets_snapshot = seg_cfg.roi_sets
         result_match = self._result_match
         show_result_obb = bool(self.result_import_show_obb_var.get())
         export_bounds = self._bounds_from_fixed_stats(self.analysis_iqr_stats)
@@ -6646,6 +6545,7 @@ class CrossingReviewApp(ctk.CTk):
                             roi_sets=roi_sets_snapshot,
                             frame_idx=fid,
                             result_obbs=result_obbs,
+                            roi_reverse=seg_cfg.roi_reverse,
                         )
                         writer.write(labeled)
                         if n == 1 or n % 30 == 0 or fid == end_frame:
@@ -6696,6 +6596,9 @@ def main():
                 path, config = found
                 try:
                     app._load_config_dict(path, config)
+                    return
+                except RoiMigrationError as exc:
+                    messagebox.showerror("ROI migration", str(exc), parent=app)
                     return
                 except Exception as exc:
                     app.set_status(f"Failed to load existing config ({path}): {exc}")

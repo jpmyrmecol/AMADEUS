@@ -69,6 +69,7 @@ main/path_utils.py
 main/random_utils.py
 main/refinement.py
 main/refinement_variable.py
+main/roi.py
 main/segmentation_core.py
 main/segmentation_metadata.py
 main/tracking_artifacts.py

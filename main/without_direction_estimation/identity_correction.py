@@ -49,6 +49,7 @@ from without_direction_estimation.obb_detection import iou_obb
 from random_utils import derive_seed, make_numpy_rng, make_python_rng, normalize_seed
 from segmentation_metadata import segmentation_paths_for_session
 from segmentation_core import SegConfig, build_static_roi_mask, compute_foreground_mask
+from main.roi import load_roi_settings
 
 # Constants (paper-specified, not exposed to GUI)
 _EMBED_DIM = 8
@@ -586,7 +587,10 @@ def _load_tracking_seg_config(
             )
         cfg.background_bgr = bg
 
-    roi_mask = build_static_roi_mask(settings.get('roi_sets', []) or [], frame_shape)
+    roi_sets, roi_reverse, notices = load_roi_settings(settings, frame_shape)
+    for notice in notices:
+        print(f'[ROI migration] {notice} Reopen segmentation and run Analyze again.', flush=True)
+    roi_mask = build_static_roi_mask(roi_sets, frame_shape, roi_reverse)
     return _TrackingSegContext(cfg=cfg, roi_mask=roi_mask)
 
 
