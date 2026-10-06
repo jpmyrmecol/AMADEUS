@@ -983,7 +983,10 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _open_results(self) -> None:
         try:
-            open_results_directory(self._get_session())
+            open_results_directory(
+                self._get_session(),
+                without_direction_estimation=self._without_direction.get(),
+            )
         except (OSError, ValueError) as exc:
             messagebox.showwarning("Open results", str(exc), parent=self)
 

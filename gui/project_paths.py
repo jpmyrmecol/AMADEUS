@@ -58,7 +58,9 @@ def with_pythonpath(
     return environment
 
 
-def open_results_directory(session_path: str) -> Path:
+def open_results_directory(
+    session_path: str, *, without_direction_estimation: bool = False,
+) -> Path:
     """Create and open the session results directory in the OS file manager.
 
     On Linux, ``xdg-open`` is preferred. If it is unavailable or cannot open
@@ -67,7 +69,10 @@ def open_results_directory(session_path: str) -> Path:
     session = str(session_path or "").strip()
     if not session:
         raise ValueError("Session path is empty.")
-    results = Path(session).expanduser() / "results"
+    session_dir = Path(session).expanduser()
+    if without_direction_estimation and session_dir.name != "without_direction_estimation":
+        session_dir /= "without_direction_estimation"
+    results = session_dir / "results"
     results.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
         os.startfile(str(results))

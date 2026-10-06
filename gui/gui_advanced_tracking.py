@@ -812,7 +812,10 @@ class ConfigGUI(ctk.CTk):
 
     def open_results(self):
         try:
-            open_results_directory(self.basic_entries["SESSION_PATH"].get())
+            open_results_directory(
+                self.basic_entries["SESSION_PATH"].get(),
+                without_direction_estimation=self.without_direction.get(),
+            )
         except (OSError, ValueError) as exc:
             messagebox.showwarning("Open results", str(exc), parent=self)
 
