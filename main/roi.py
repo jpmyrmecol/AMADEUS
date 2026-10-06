@@ -23,9 +23,10 @@ def default_roi_set() -> dict:
 
 
 def initial_roi_points(image_shape: tuple) -> list[list[int]]:
+    """A centered rectangle spanning half the image width and height."""
     height, width = image_shape[:2]
-    x0, x1 = round((width - 1) * 0.1), round((width - 1) * 0.9)
-    y0, y1 = round((height - 1) * 0.1), round((height - 1) * 0.9)
+    x0, x1 = round((width - 1) * 0.25), round((width - 1) * 0.75)
+    y0, y1 = round((height - 1) * 0.25), round((height - 1) * 0.75)
     return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
 
 
@@ -57,8 +58,8 @@ def load_roi_settings(settings: dict, image_shape: tuple | None = None) -> tuple
     """Read polygon settings or explicitly migrate the former per-set schema.
 
     Rectangles retain their inclusive raster boundaries. Circles become their
-    bounding quadrilaterals. The GUI asks before accepting that approximation
-    or the change from a legacy intersection to a union.
+    bounding quadrilaterals. Returned notices describe that approximation and
+    the change from a legacy intersection to a union.
     """
     raw_sets = settings.get("roi_sets", [])
     if not isinstance(raw_sets, list) or any(not isinstance(roi, dict) for roi in raw_sets):

@@ -1437,15 +1437,13 @@ class CrossingReviewApp(ctk.CTk):
         self.roi_set_combo.pack(side="left", padx=(4, 2))
         ctk.CTkButton(_roi_set_row, text="+", width=28, command=self._add_roi_set).pack(side="left", padx=2)
         ctk.CTkButton(_roi_set_row, text="-", width=28, command=self._remove_roi_set).pack(side="left", padx=2)
-        ctk.CTkCheckBox(roi, text="Use this ROI", variable=self.roi_enabled_var, command=self._toggle_roi_params).pack(anchor="w", padx=6, pady=(4, 4))
+        roi_use_row = ctk.CTkFrame(roi, corner_radius=0)
+        roi_use_row.pack(fill="x", padx=6, pady=(4, 4))
+        ctk.CTkCheckBox(roi_use_row, text="Use this ROI", variable=self.roi_enabled_var, command=self._toggle_roi_params).pack(side="left")
+        self.roi_edit_button = ctk.CTkButton(roi_use_row, text="Edit ROI", width=110, command=self._toggle_roi_edit)
+        self.roi_edit_button.pack(side="left", padx=(10, 0))
         self.roi_params_frame = ctk.CTkFrame(roi, corner_radius=0)
         self.roi_params_frame.pack(fill="x", padx=0, pady=(0, 4))
-        roi_actions = ctk.CTkFrame(self.roi_params_frame, corner_radius=0)
-        roi_actions.pack(fill="x", padx=6, pady=(2, 4))
-        self.roi_edit_button = ctk.CTkButton(roi_actions, text="Edit ROI", width=110, command=self._toggle_roi_edit)
-        self.roi_edit_button.pack(side="left", padx=(0, 4))
-        self.roi_reset_button = ctk.CTkButton(roi_actions, text="Reset ROI", width=110, command=self.reset_roi)
-        self.roi_reset_button.pack(side="left")
         ctk.CTkLabel(self.roi_params_frame, text="Edit: drag a vertex to reshape, inside to move.\nDrag outside the polygon to pan.",
                         justify="left", anchor="w", wraplength=340).pack(fill="x", padx=6, pady=(0, 4))
         self.roi_frame_start_scale = self._pack_scale_entry(self.roi_params_frame, "From frame", self.roi_frame_start_var, 0, 999999, 1)
@@ -2371,12 +2369,6 @@ class CrossingReviewApp(ctk.CTk):
         """Apply an already-parsed segmentation_gui_config.json and remember its path."""
         settings = config["settings"]
         _sets, _reverse, notices = load_roi_settings(settings)
-        if notices and not messagebox.askokcancel(
-            "ROI migration", "\n\n".join(notices) +
-            "\n\nReview the polygons and run Analyze again after loading. "
-            "The saved configuration is changed only when you save or export. Continue?", parent=self,
-        ):
-            return
         self.config_path = path
         self._applying_config = True
         try:
@@ -2394,6 +2386,11 @@ class CrossingReviewApp(ctk.CTk):
         self._absolute_zoomed = False
         self._absolute_dragging = False
         self._update_area_control_ranges()
+        if notices:
+            self.set_status(
+                "ROI settings converted. " + " ".join(notices) +
+                " Review the polygons and run Analyze again.", auto_clear=False,
+            )
         # Persist the loaded state (and any replacement video path) immediately.
 
     def _find_existing_config_for_video(
@@ -3784,7 +3781,6 @@ class CrossingReviewApp(ctk.CTk):
             self._ensure_roi_points()
         state = "normal" if self.reader is not None else "disabled"
         self.roi_edit_button.configure(state=state, text="Edit ROI: ON" if self.roi_edit_var.get() else "Edit ROI")
-        self.roi_reset_button.configure(state=state)
         if hasattr(self, "canvas"):
             self.canvas.configure(cursor="crosshair" if self.roi_edit_var.get() else "")
 
@@ -3900,15 +3896,6 @@ class CrossingReviewApp(ctk.CTk):
                 self.background_ready_var.set("background: not computed")
                 self.set_status(f"Background build failed: {exc}", auto_clear=False)
                 messagebox.showerror("Background extraction", str(exc))
-
-    def reset_roi(self):
-        if self.reader is None:
-            return
-        self.on_canvas_release()
-        roi = self.roi_sets[self.roi_active_set_idx]
-        roi["points"] = initial_roi_points((self.reader.height, self.reader.width))
-        self._on_roi_geometry_changed()
-        self.set_status("Selected ROI reset to its initial rectangle")
 
     # ROI set management
 
