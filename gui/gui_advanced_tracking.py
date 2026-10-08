@@ -744,7 +744,7 @@ class ConfigGUI(ctk.CTk):
                 ("WEIGHT", "Checkpoints", "last"),
                 ("FRAME_STEP", "Frame Step", 1),
                 ("FPS", "FPS (blank=auto)", ""),
-                ("ACCELERATION", "GPU acceleration", "cpu"),
+                ("ACCELERATION", "GPU acceleration", "auto"),
                 ("EXPORT_RAW", "Export RAW YOLO Video", False),
                 ("EXPORT_IMAGES", "Export Images", False),
                 ("IMAGE_FORMAT", "Export Image Format", "jpeg"),

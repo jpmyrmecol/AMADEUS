@@ -3023,7 +3023,7 @@ class EasyTrackingGUI(ctk.CTk):
             "WEIGHT":               "last",
             "FRAME_STEP":           1,
             "FPS":                  None,
-            "ACCELERATION":         "cpu",
+            "ACCELERATION":         "auto",
             "EXPORT_RAW":           False,
             "EXPORT_IMAGES":        False,
             "IMAGE_FORMAT":         "jpeg",

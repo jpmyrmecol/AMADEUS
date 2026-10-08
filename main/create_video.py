@@ -409,7 +409,7 @@ def choose_frame_range(analysis: dict, total_frames: int) -> tuple[int, int, str
 
 
 def resolve_video_acceleration(value) -> str:
-    mode = str(value if value is not None else "cpu").strip().lower()
+    mode = str(value if value is not None else "auto").strip().lower()
     if mode not in {"cpu", "gpu", "auto"}:
         raise RuntimeError(f"Unsupported ACCELERATION: {value}. Use 'cpu', 'gpu', or 'auto'.")
     return mode
@@ -454,7 +454,7 @@ def make_video_from_image_sequence(
     fps: float,
     out_path: str,
     extension: str,
-    video_acceleration: str = "cpu",
+    video_acceleration: str = "auto",
 ):
     ext = str(extension).strip().lower().lstrip(".")
     if ext not in {"png", "jpg", "jpeg"}:
@@ -1014,7 +1014,7 @@ def main():
     save_jpg_frames = export_images and image_export_format == "jpeg"
     jpg_quality = int(track_video.get("JPEG_QUALITY", 95))
     video_codec = str(track_video.get("VIDEO_CODEC", "auto")).strip().lower()
-    video_acceleration = resolve_video_acceleration(track_video.get("ACCELERATION", "cpu"))
+    video_acceleration = resolve_video_acceleration(track_video.get("ACCELERATION", "auto"))
     obb_thickness = int(track_video.get("OBB_WIDTH", 1))
     triangle_outline_thickness = int(track_video.get("ARROW_WIDTH", 0))
     label_font_scale = float(track_video.get("LABEL_SCALE", 0.5))
