@@ -1236,6 +1236,9 @@ class PreprocessApp(ctk.CTk):
         self.canvas.bind("<Leave>", self._on_canvas_leave, add="+")
         self.frame_slider.bind("<Double-Button-1>", self._on_frame_slider_double_click, add="+")
         self.trim_canvas.bind("<Configure>", lambda _event: self._draw_trim_markers(), add="+")
+        # CTk buttons/canvases often keep keyboard focus in an Entry when clicked.
+        # Commit the timeline readout on any outside click, regardless of FocusOut.
+        self.bind_all("<ButtonPress-1>", self._on_seek_click_away, add="+")
         self.bind_all("<Left>", self._on_frame_navigation_key, add="+")
         self.bind_all("<Right>", self._on_frame_navigation_key, add="+")
 
@@ -1890,6 +1893,22 @@ class PreprocessApp(ctk.CTk):
         self._refresh_video_controls()
         self._schedule_crop_trimming_config_save()
         self.set_status(f"Deleted {name}.")
+
+    def _on_seek_click_away(self, event) -> None:
+        """Commit an inline frame/time edit when clicking elsewhere in the GUI."""
+        field = self._active_seek_field
+        if field is None:
+            return
+        clicked_path = str(event.widget)
+        active_entry = self.frame_seek_entry if field == "frame" else self.time_seek_entry
+        # Check child widgets too: CTkEntry and CTkLabel use internal Tk widgets.
+        # Exclude both readout labels because their own click bindings switch
+        # editors before this application-wide handler is invoked.
+        for widget in (active_entry, self.frame_label, self.time_label):
+            widget_path = str(widget)
+            if clicked_path == widget_path or clicked_path.startswith(widget_path + "."):
+                return
+        self._commit_seek_edit(field)
 
     def _begin_seek_edit(self, field: str) -> None:
         if self.reader is None or self.export_running:
