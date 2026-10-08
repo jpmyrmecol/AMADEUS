@@ -50,6 +50,7 @@ from experiment_utils import (
 from weight_utils import deduplicate_best_epoch_weights
 from video_frame_count import read_video_frame_info, warn_if_frame_count_adjusted
 from tracking_video_inputs import configured_tracking_video_files
+from video_frame_rows import CsvFrameRows, StreamingColorSlots, indexed_assign_types, peak_visible_obb_count
 from gui.color import make_id_palette, resolve_color_seed
 from main.video_compat import ffmpeg_executable
 from main.video_encoders import detect_gpu_video_encoder, gpu_encoder_args
@@ -231,18 +232,6 @@ def infer_ids_from_obb_df(df: pd.DataFrame) -> list[int]:
     return sorted(ids)
 
 
-def build_row_lookup_dict(df: pd.DataFrame | None) -> dict[int, dict]:
-    if df is None or "position" not in df.columns:
-        return {}
-    work = df.copy()
-    work["position"] = pd.to_numeric(work["position"], errors="coerce")
-    work = work.dropna(subset=["position"])
-    if work.empty:
-        return {}
-    work["position"] = work["position"].astype(int)
-    return work.set_index("position").to_dict(orient="index")
-
-
 @dataclass(frozen=True)
 class TrackColumns:
     x_cols: list[str]
@@ -321,15 +310,6 @@ def purge_images(image_dir: str, extensions: Iterable[str]) -> int:
             os.remove(os.path.join(image_dir, name))
             removed += 1
     return removed
-
-
-def summarize_frame_coverage(selected_frames: list[int], obb_rows: dict[int, dict]) -> tuple[int, int, int]:
-    selected_set = set(selected_frames)
-    csv_frame_set = set(obb_rows.keys())
-    matched = len(selected_set & csv_frame_set)
-    missing = len(selected_set - csv_frame_set)
-    extra = len(csv_frame_set - selected_set)
-    return matched, missing, extra
 
 
 def choose_frame_range(analysis: dict, total_frames: int) -> tuple[int, int, str, str]:
@@ -612,34 +592,35 @@ def render_video_for_weight(
     video_output_dir: str | None = None,
 ) -> None:
     obb_csv, class_csv = find_tracking_csvs(out_dir)
-    obb_df = pd.read_csv(obb_csv)
-    class_df = pd.read_csv(class_csv)
-    assign_pkl = resolve_assign_type_pickle(out_dir, obb_csv)
-    assign_type_df = pd.read_pickle(assign_pkl) if os.path.exists(assign_pkl) else None
-
-    obb_rows = build_row_lookup_dict(obb_df)
-    class_rows = build_row_lookup_dict(class_df)
-    assign_type_rows = build_row_lookup_dict(assign_type_df)
-
-    ids = infer_ids_from_obb_df(obb_df)
+    ids = infer_ids_from_obb_df(pd.read_csv(obb_csv, nrows=0))
     if not ids and not variable_population:
         ids = list(range(num_objects))
     track_cols = build_track_columns(ids)
-    color_slots = None
+    selected_frames = range(first_frame, last_frame + 1, frame_step)
+
+    color_slots = {} if variable_population else None
+    slot_allocator = None
+    on_obb_row = None
     if variable_population:
-        from variable_population import allocate_color_slots
-        present = {frame: [tid for tid in ids if get_obb_from_dict(row, track_cols[tid]) is not None]
-                   for frame, row in obb_rows.items()}
-        peak, color_slots = allocate_color_slots(present)
+        peak = peak_visible_obb_count(obb_csv, track_cols)
+        slot_allocator = StreamingColorSlots(peak)
         colors = make_id_palette(peak, color_space="bgr", seed=color_seed) if peak else []
         print(f"[INFO] Variable population: {len(ids)} lifetime IDs; peak visible={peak}; colors={len(colors)}")
 
-    selected_frames = list(range(first_frame, last_frame + 1, frame_step))
-    matched_frames, missing_frames, extra_csv_frames = summarize_frame_coverage(selected_frames, obb_rows)
-    print(
-        f"[INFO] {os.path.basename(src_video)}: selected_frames={len(selected_frames)}, "
-        f"csv_frames_matched={matched_frames}, csv_frames_missing={missing_frames}, csv_frames_extra={extra_csv_frames}"
-    )
+        def on_obb_row(_frame: int, row: dict) -> None:
+            visible = (tid for tid in ids if get_obb_from_dict(row, track_cols[tid]) is not None)
+            slot_allocator.observe(visible)
+
+    obb_reader = CsvFrameRows(obb_csv, on_row=on_obb_row, selection=selected_frames)
+    class_reader = CsvFrameRows(class_csv) if draw_arrow else None
+    assign_pkl = resolve_assign_type_pickle(out_dir, obb_csv)
+    assign_index = indexed_assign_types(assign_pkl) if draw_labels and os.path.exists(assign_pkl) else None
+
+    # Only the currently rendered batch is materialized as Python dictionaries.
+    obb_rows: dict[int, dict] = {}
+    class_rows: dict[int, dict] = {}
+    assign_type_rows: dict[int, dict] = {}
+    expected_variable_boxes = 0
 
     if save_png_frames:
         removed_pngs = purge_images(png_image_dir, [".png"])
@@ -678,7 +659,11 @@ def render_video_for_weight(
 
     render_workers = max(1, int(num_render_workers))
     io_workers = max(1, int(num_io_workers)) if export_images_enabled else 1
-    RENDER_BATCH = max(16, render_workers * 4)
+    # Cap decoded/rendered frame buffers independently of the video length.
+    frame_bytes = max(1, int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) * int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) * 3)
+    RENDER_BATCH = max(1, min(max(16, render_workers * 4), (256 * 1024 * 1024) // (3 * frame_bytes)))
+    render_workers = min(render_workers, RENDER_BATCH)
+    max_pending_images = max(1, min(io_workers * 2, (256 * 1024 * 1024) // frame_bytes))
 
     ctx = _FrameRenderCtx(
         ids=ids,
@@ -732,7 +717,7 @@ def render_video_for_weight(
                         pending_futures.append(io_pool.submit(_write_png, os.path.join(png_image_dir, f"{fid:06d}.png"), rendered))
                     if save_jpg_frames:
                         pending_futures.append(io_pool.submit(_write_jpg, os.path.join(jpg_image_dir, f"{fid:06d}.jpg"), rendered))
-                    if len(pending_futures) > io_workers * 8:
+                    if len(pending_futures) >= max_pending_images:
                         done, _ = wait(pending_futures, return_when=FIRST_COMPLETED)
                         for f in done:
                             f.result()
@@ -742,6 +727,11 @@ def render_video_for_weight(
                         n_frames_with_boxes += 1
                         n_boxes_drawn += boxes
                 batch.clear()
+                obb_rows.clear()
+                class_rows.clear()
+                assign_type_rows.clear()
+                if color_slots is not None:
+                    color_slots.clear()
 
             for target_frame_idx in selected_frames:
                 if current_frame_idx != target_frame_idx:
@@ -751,6 +741,20 @@ def render_video_for_weight(
                 if not ok:
                     print(f"[WARN] Failed to read frame {target_frame_idx} from {src_video}")
                     break
+
+                obb_row = obb_reader.take(target_frame_idx)
+                if obb_row is not None:
+                    obb_rows[target_frame_idx] = obb_row
+                    if color_slots is not None:
+                        slots = slot_allocator.current()
+                        color_slots[target_frame_idx] = slots
+                        expected_variable_boxes += len(slots)
+                if class_reader is not None:
+                    class_row = class_reader.take(target_frame_idx)
+                    if class_row is not None:
+                        class_rows[target_frame_idx] = class_row
+                if assign_index is not None and target_frame_idx in assign_index.index:
+                    assign_type_rows[target_frame_idx] = assign_index.loc[target_frame_idx].to_dict()
 
                 batch.append((target_frame_idx, np.ascontiguousarray(frame)))
                 if len(batch) >= RENDER_BATCH:
@@ -767,6 +771,15 @@ def render_video_for_weight(
         cap.release()
         if writer is not None:
             writer.release()
+
+    obb_reader.finish()
+    matched_frames = obb_reader.selected_count
+    missing_frames = len(selected_frames) - matched_frames
+    extra_csv_frames = obb_reader.count - matched_frames
+    print(
+        f"[INFO] {os.path.basename(src_video)}: selected_frames={len(selected_frames)}, "
+        f"csv_frames_matched={matched_frames}, csv_frames_missing={missing_frames}, csv_frames_extra={extra_csv_frames}"
+    )
 
     if export_images_enabled:
         if save_png_frames:
@@ -788,7 +801,6 @@ def render_video_for_weight(
         f"[SUMMARY] {os.path.basename(src_video)}: written_frames={n_written}, "
         f"frames_with_obb={n_frames_with_boxes}, total_obbs_drawn={n_boxes_drawn}"
     )
-    expected_variable_boxes = sum(len(color_slots.get(f, {})) for f in selected_frames) if color_slots is not None else 0
     if n_written > 0 and n_boxes_drawn == 0 and (not variable_population or expected_variable_boxes > 0):
         raise RuntimeError(
             "No OBB was drawn in any written image. "
