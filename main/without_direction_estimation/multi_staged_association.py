@@ -410,16 +410,23 @@ def build_detection_frames(df: pd.DataFrame, first_frame: int, last_frame: int, 
             frames[f] = empty_frame()
         return frames
 
-    work = df.copy()
-    work = work[(work['frame'] >= int(first_frame)) & (work['frame'] <= int(last_frame))]
-    work['score'] = pd.to_numeric(work['score'], errors='coerce')
-    work = work[np.isfinite(work['score']) & (work['score'] >= float(score_threshold))].copy()
+    scores = pd.to_numeric(df['score'], errors='coerce')
+    keep = (
+        (df['frame'] >= int(first_frame))
+        & (df['frame'] <= int(last_frame))
+        & np.isfinite(scores)
+        & (scores >= float(score_threshold))
+    )
+    columns = ['frame', 'score', 'det_index', 'direction', 'x0', 'x1', 'x2', 'x3', 'y0', 'y1', 'y2', 'y3']
+    work = df.loc[keep, columns].copy()
     if work.empty:
         for f in range(int(first_frame), int(last_frame) + 1):
             frames[f] = empty_frame()
         return frames
 
-    work = work.sort_values(['frame', 'score', 'det_index'], ascending=[True, False, True]).reset_index(drop=True)
+    work['score'] = scores.loc[keep].to_numpy()
+    work.sort_values(['frame', 'score', 'det_index'], ascending=[True, False, True], inplace=True)
+
     for f, g in work.groupby('frame', sort=True):
         vals = g[['x0', 'x1', 'x2', 'x3', 'y0', 'y1', 'y2', 'y3']].to_numpy(dtype=np.float32)
         pts = ensure_clockwise_batch(np.stack([vals[:, :4], vals[:, 4:]], axis=2))
@@ -2236,6 +2243,8 @@ def _run_single_tracking_job(spec: dict) -> None:
     direction_rows_df = load_blob_pickle(direction_pickle)
     detection_frames = build_detection_frames(
         direction_rows_df, info['first_frame'], info['last_frame'], conf_th)
+
+    del direction_rows_df
 
     common_kw = dict(
         num_objects=num_objects,

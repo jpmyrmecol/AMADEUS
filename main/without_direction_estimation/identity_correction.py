@@ -1156,7 +1156,7 @@ def extract_and_cache_crops(
         raise RuntimeError(f'Failed to open video for embedding crops: {video_path}')
 
     # Preserve only bounded worker frames in memory. Keep the full crop
-    # collection in HDF5, with each row written by the owning thread.
+    # collection in HDF5, with each row written by the main thread.
     with h5py.File(h5_path, 'w') as hf:
         crops_arr = hf.create_dataset('crops', shape=(total_images, img_size, img_size), dtype=np.uint8)
         num_w = _worker_count(num_workers, total_images)
