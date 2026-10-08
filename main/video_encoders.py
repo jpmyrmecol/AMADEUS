@@ -90,7 +90,8 @@ def bitrate_limited_encoder_args(encoder: str, max_bitrate: int) -> list[str]:
     if maximum <= 0:
         raise ValueError("Video bitrate limit must be positive.")
     average = max(1, int(maximum * 0.9))
-    limits = ["-b:v", str(average), "-maxrate:v", str(maximum), "-bufsize:v", str(maximum)]
+    # Allow two seconds of VBV buffering for complex frames without raising the peak rate.
+    limits = ["-b:v", str(average), "-maxrate:v", str(maximum), "-bufsize:v", str(maximum * 2)]
     if encoder == "libx264":
         # Optional SEI packets include x264's encoder identification. Their
         # fixed overhead can exceed a low source bitrate for short trims.
