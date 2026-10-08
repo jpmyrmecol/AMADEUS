@@ -203,11 +203,11 @@ def _isolation_by_frame(
     obb_buf: dict,
     dir_buf: dict,
     num_objects: int,
-) -> dict[tuple[int, int], bool]:
-    """Precompute per-(obj_id, frame) isolation with AABB pruning.  [A]
+) -> tuple[int, np.ndarray]:
+    """Precompute isolation flags by object and frame with AABB pruning.  [A]
 
-    Returns {(obj_id, frame): True/False} only for entries where both
-    valid_heading and valid_obb hold (matching the guards in
+    Returns (first_frame, boolean array indexed by [obj_id, frame-first_frame]).
+    True entries require both valid_heading and valid_obb, matching the guards in
     _build_fragments_for_object).  For the blocker side only valid_obb is
     required, mirroring the original inner loop.  AABB non-overlap is a cheap
     sufficient condition for IoU=0 -- only AABB-overlapping pairs call iou_obb.
@@ -216,7 +216,9 @@ def _isolation_by_frame(
     for obj_id in range(num_objects):
         all_frames.update(obb_buf.get(obj_id, {}).keys())
 
-    result: dict[tuple[int, int], bool] = {}
+    first_frame = min(all_frames, default=0)
+    last_frame = max(all_frames, default=-1)
+    flags = np.zeros((num_objects, last_frame - first_frame + 1), dtype=np.bool_)
 
     for fr in all_frames:
         # All objects with valid OBB at this frame (used as potential blockers).
@@ -255,9 +257,9 @@ def _isolation_by_frame(
                 if iou_obb(obb_a, obb_b) > 0:
                     is_isolated = False
                     break
-            result[(obj_id, fr)] = is_isolated
+            flags[obj_id, fr - first_frame] = is_isolated
 
-    return result
+    return first_frame, flags
 
 
 def _build_fragments_for_object(
@@ -265,7 +267,7 @@ def _build_fragments_for_object(
     dir_buf: dict,
     obj_id: int,
     num_objects: int,
-    isolation_map: dict[tuple[int, int], bool] | None = None,
+    isolation_map: tuple[int, np.ndarray] | None = None,
 ) -> list[Fragment]:
     obj_frames = sorted(obb_buf.get(obj_id, {}).keys())
     if not obj_frames:
@@ -285,7 +287,7 @@ def _build_fragments_for_object(
             continue
         if isolation_map is not None:
             # [A] Use precomputed per-frame isolation map (AABB-pruned).
-            is_isolated = isolation_map.get((obj_id, fr), False)
+            is_isolated = bool(isolation_map[1][obj_id, fr - isolation_map[0]])
         else:
             is_isolated = True
             for other_id in range(num_objects):
@@ -1134,141 +1136,140 @@ def extract_and_cache_crops(
 
     total_frames_needed = sorted(frame_to_crops.keys())
     total_images = sum(len(v) for v in frame_to_crops.values())
-    crops_arr = np.zeros((total_images, img_size, img_size), dtype=np.uint8)
-
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f'Failed to open video for embedding crops: {video_path}')
 
-    num_w = _worker_count(num_workers, total_images)
-    executor = ThreadPoolExecutor(max_workers=num_w) if num_w > 1 else None
-    max_pending = max(1, num_w * 8)
-    pending = set()
+    # Preserve only bounded worker frames in memory. Keep the full crop
+    # collection in HDF5, with each row written by the owning thread.
+    with h5py.File(h5_path, 'w') as hf:
+        crops_arr = hf.create_dataset('crops', shape=(total_images, img_size, img_size), dtype=np.uint8)
+        num_w = _worker_count(num_workers, total_images)
+        executor = ThreadPoolExecutor(max_workers=num_w) if num_w > 1 else None
+        max_pending = max(1, num_w * 8)
+        pending = set()
 
-    prev_cv_threads = None
-    if num_w > 1:
-        prev_cv_threads = cv2.getNumThreads()
-        cv2.setNumThreads(1)
+        prev_cv_threads = None
+        if num_w > 1:
+            prev_cv_threads = cv2.getNumThreads()
+            cv2.setNumThreads(1)
 
-    def crop_spec(
-        item: tuple[Fragment, int],
-        frame_obbs: dict,
-        frame_obb_info: dict[int, tuple[tuple, np.ndarray, tuple[int, int, int, int]]],
-        frame_shape: tuple[int, int],
-    ) -> tuple[int, tuple, float, list]:
-        frag, fi = item
-        row = int(frag.crop_indices[fi])
-        obb_t = frame_obbs[frag.obj_id]
-        other_obbs = _pruned_other_obbs_for_crop(
-            frag.obj_id, frame_obbs, frame_obb_info, frame_shape, img_size
-        )
-        return row, obb_t, float(frag.headings[fi]), other_obbs
+        def crop_spec(
+            item: tuple[Fragment, int],
+            frame_obbs: dict,
+            frame_obb_info: dict[int, tuple[tuple, np.ndarray, tuple[int, int, int, int]]],
+            frame_shape: tuple[int, int],
+        ) -> tuple[int, tuple, float, list]:
+            frag, fi = item
+            row = int(frag.crop_indices[fi])
+            obb_t = frame_obbs[frag.obj_id]
+            other_obbs = _pruned_other_obbs_for_crop(
+                frag.obj_id, frame_obbs, frame_obb_info, frame_shape, img_size
+            )
+            return row, obb_t, float(frag.headings[fi]), other_obbs
 
-    def crop_job(
-        row: int, frame_gray: np.ndarray, obb_t: tuple, h_deg: float, other_obbs: list,
-        frame_labels: "tuple[np.ndarray, int] | None",
-    ) -> tuple[int, np.ndarray]:
-        return row, _extract_crop_from_gray(
-            frame_gray, background_gray, obb_t, h_deg, img_size, other_obbs,
-            frame_labels=frame_labels,
-        )
+        def crop_job(
+            row: int, frame_gray: np.ndarray, obb_t: tuple, h_deg: float, other_obbs: list,
+            frame_labels: "tuple[np.ndarray, int] | None",
+        ) -> tuple[int, np.ndarray]:
+            return row, _extract_crop_from_gray(
+                frame_gray, background_gray, obb_t, h_deg, img_size, other_obbs,
+                frame_labels=frame_labels,
+            )
 
-    def consume_done(done: set) -> None:
-        for fut in done:
-            row, crop = fut.result()
-            crops_arr[int(row)] = crop
+        def consume_done(done: set) -> None:
+            for fut in done:
+                row, crop = fut.result()
+                crops_arr[int(row)] = crop
 
-    def flush_pending(block: bool) -> None:
-        nonlocal pending
-        if not pending:
-            return
-        if block:
-            done, pending = wait(pending, return_when=FIRST_COMPLETED)
-        else:
-            done = {fut for fut in pending if fut.done()}
-            pending -= done
-        if done:
-            consume_done(done)
-
-    # cur_frame_idx is the next frame index expected from cap.read().
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    cur_frame_idx = 0
-    sequential_grab_skip_max = 64
-
-    def read_target_frame(target_fr: int) -> tuple[bool, np.ndarray | None]:
-        nonlocal cur_frame_idx
-        target_fr = int(target_fr)
-        if target_fr < cur_frame_idx:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, target_fr)
-            cur_frame_idx = target_fr
-        elif target_fr > cur_frame_idx:
-            gap = target_fr - cur_frame_idx
-            if gap <= sequential_grab_skip_max:
-                ok = True
-                for _ in range(gap):
-                    ok = bool(cap.grab())
-                    cur_frame_idx += 1
-                    if not ok:
-                        break
-                if not ok:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, target_fr)
-                    cur_frame_idx = target_fr
+        def flush_pending(block: bool) -> None:
+            nonlocal pending
+            if not pending:
+                return
+            if block:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
             else:
+                done = {fut for fut in pending if fut.done()}
+                pending -= done
+            if done:
+                consume_done(done)
+
+        # cur_frame_idx is the next frame index expected from cap.read().
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        cur_frame_idx = 0
+        sequential_grab_skip_max = 64
+
+        def read_target_frame(target_fr: int) -> tuple[bool, np.ndarray | None]:
+            nonlocal cur_frame_idx
+            target_fr = int(target_fr)
+            if target_fr < cur_frame_idx:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, target_fr)
                 cur_frame_idx = target_fr
+            elif target_fr > cur_frame_idx:
+                gap = target_fr - cur_frame_idx
+                if gap <= sequential_grab_skip_max:
+                    ok = True
+                    for _ in range(gap):
+                        ok = bool(cap.grab())
+                        cur_frame_idx += 1
+                        if not ok:
+                            break
+                    if not ok:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, target_fr)
+                        cur_frame_idx = target_fr
+                else:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, target_fr)
+                    cur_frame_idx = target_fr
 
-        ret, frame_bgr = cap.read()
-        if ret:
-            cur_frame_idx = target_fr + 1
-            return True, frame_bgr
-        cur_frame_idx = target_fr
-        return False, None
+            ret, frame_bgr = cap.read()
+            if ret:
+                cur_frame_idx = target_fr + 1
+                return True, frame_bgr
+            cur_frame_idx = target_fr
+            return False, None
 
-    try:
-        with tqdm_it(total=len(total_frames_needed), desc='Embedding extract crops', unit='frame') as pbar:
-            for target_fr in total_frames_needed:
-                ret, frame_bgr = read_target_frame(target_fr)
-                if not ret or frame_bgr is None:
-                    raise RuntimeError(f'Failed to read frame {target_fr} for embedding crops: {video_path}')
+        try:
+            with tqdm_it(total=len(total_frames_needed), desc='Embedding extract crops', unit='frame') as pbar:
+                for target_fr in total_frames_needed:
+                    ret, frame_bgr = read_target_frame(target_fr)
+                    if not ret or frame_bgr is None:
+                        raise RuntimeError(f'Failed to read frame {target_fr} for embedding crops: {video_path}')
 
-                frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-                # Segmentation + connected-components labeling is computed
-                # once per frame here and shared by every individual's crop
-                # below, instead of being recomputed per individual.
-                frame_labels = _compute_frame_labels(frame_bgr, seg_config)
-                frame_obbs = {
-                    oid: obb_buf[oid][target_fr]
-                    for oid in obb_buf
-                    if target_fr in obb_buf[oid]
-                }
-                frame_obb_info = _build_frame_obb_info(frame_obbs)
-                for item in frame_to_crops[target_fr]:
-                    row, obb_t, h_deg, other_obbs = crop_spec(
-                        item, frame_obbs, frame_obb_info, frame_gray.shape[:2]
-                    )
-                    if executor is None:
-                        row, crop = crop_job(row, frame_gray, obb_t, h_deg, other_obbs, frame_labels)
-                        crops_arr[row] = crop
-                    else:
-                        pending.add(executor.submit(crop_job, row, frame_gray, obb_t, h_deg, other_obbs, frame_labels))
-                        if len(pending) >= max_pending:
-                            flush_pending(block=True)
+                    frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+                    # Segmentation + connected-components labeling is computed
+                    # once per frame here and shared by every individual's crop
+                    # below, instead of being recomputed per individual.
+                    frame_labels = _compute_frame_labels(frame_bgr, seg_config)
+                    frame_obbs = {
+                        oid: obb_buf[oid][target_fr]
+                        for oid in obb_buf
+                        if target_fr in obb_buf[oid]
+                    }
+                    frame_obb_info = _build_frame_obb_info(frame_obbs)
+                    for item in frame_to_crops[target_fr]:
+                        row, obb_t, h_deg, other_obbs = crop_spec(
+                            item, frame_obbs, frame_obb_info, frame_gray.shape[:2]
+                        )
+                        if executor is None:
+                            row, crop = crop_job(row, frame_gray, obb_t, h_deg, other_obbs, frame_labels)
+                            crops_arr[row] = crop
+                        else:
+                            pending.add(executor.submit(crop_job, row, frame_gray, obb_t, h_deg, other_obbs, frame_labels))
+                            if len(pending) >= max_pending:
+                                flush_pending(block=True)
 
-                if executor is not None:
-                    flush_pending(block=False)
-                pbar.update(1)
+                    if executor is not None:
+                        flush_pending(block=False)
+                    pbar.update(1)
 
-            while pending:
-                flush_pending(block=True)
-    finally:
-        if executor is not None:
-            executor.shutdown(wait=True)
-        if prev_cv_threads is not None:
-            cv2.setNumThreads(prev_cv_threads)
-        cap.release()
-
-    with h5py.File(h5_path, 'w') as hf:
-        hf.create_dataset('crops', data=crops_arr)
+                while pending:
+                    flush_pending(block=True)
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
+            if prev_cv_threads is not None:
+                cv2.setNumThreads(prev_cv_threads)
+            cap.release()
         _write_crop_cache_metadata(hf, fragments, background_path, _seg_config_signature(seg_config))
     return h5_path
 

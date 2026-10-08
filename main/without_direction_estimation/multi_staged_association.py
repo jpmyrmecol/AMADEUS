@@ -1307,6 +1307,7 @@ def _track_detection_pass(
     # history remains populated during missing runs with the Kalman-predicted
     # OBB, so the exact frame MAX_AGE steps behind is always addressable.
     reference_obb_history: list[dict[int, np.ndarray]] = [dict() for _ in range(num_objects)]
+    latest_reference_index = 0
     # Per-track state for detecting spurious VEL-DIST excursions.
     vel_dist_prev: list[dict | None] = [None] * num_objects
     # Per-track state for sharp-turn NaN-chain detection.
@@ -1475,6 +1476,9 @@ def _track_detection_pass(
         )
 
     def remember_reference(tid: int, abs_fid: int, pts: np.ndarray | None) -> None:
+        # S6 only uses references up to MAX_AGE processing steps old.
+        if frame_order_index[int(abs_fid)] <= latest_reference_index - max_age:
+            return
         if valid_obb(pts):
             reference_obb_history[int(tid)][int(abs_fid)] = ensure_clockwise(pts).copy()
 
@@ -1594,6 +1598,7 @@ def _track_detection_pass(
         tqdm_it(processing_order[start_idx + 1:], desc=f'ID tracking ({direction_label})', unit='frame'),
         start=start_idx + 1,
     ):
+        latest_reference_index = processing_idx
         yolo_obbs, yolo_scores, yolo_classes = detection_frames[abs_fid]
         predicted_obbs = []
         for tid in range(num_objects):
@@ -1901,6 +1906,12 @@ def _track_detection_pass(
             remember_reference(tid, abs_fid, pts)
             _raw_h = det_dir if det_dir is not None and np.isfinite(det_dir) else None
             _dfc_cur[tid] = None
+
+        expired_index = processing_idx - max_age
+        if expired_index >= 0:
+            expired_frame = processing_order[expired_index]
+            for refs in reference_obb_history:
+                refs.pop(expired_frame, None)
 
     print(f'{"Backward" if reverse else "Forward"} tracking finished.')
 
