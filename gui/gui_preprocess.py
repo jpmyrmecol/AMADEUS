@@ -496,7 +496,6 @@ class ExportJob:
     out_frame: int
     regions: tuple[ExportRegion, ...]
     video_encoder_device: str | None = None
-    source_bitrate: int = 0
 
 
 class ExportCancelled(RuntimeError):
@@ -2824,27 +2823,6 @@ class PreprocessApp(ctk.CTk):
             detail = stderr_text.strip() or f"ffmpeg exited with code {return_code}"
             raise RuntimeError(f"Export failed for {region.display_name}:\n{detail}")
 
-    def _export_region_below_source_bitrate(
-        self, job: ExportJob, region: ExportRegion, region_index: int,
-    ) -> None:
-        max_bitrate = max(1, int(job.source_bitrate * 0.95))
-        for attempt in range(3):
-            if self.export_cancel.is_set():
-                raise ExportCancelled()
-            self._encode_export_region(job, region, region_index, max_bitrate)
-            measured = video_stream_bitrate(job.ffmpeg, region.output_path, cancel_event=self.export_cancel)
-            if measured <= job.source_bitrate:
-                self.export_queue.put((
-                    "log", f"{region.display_name}: video bitrate {measured / 1000:.1f} kb/s "
-                    f"(source {job.source_bitrate / 1000:.1f} kb/s)",
-                ))
-                return
-            self._delete_partial(region.output_path)
-            max_bitrate = max(1, int(max_bitrate * job.source_bitrate / measured * 0.9))
-            if attempt < 2:
-                self.export_queue.put(("log", f"{region.display_name}: reducing bitrate and retrying."))
-        raise RuntimeError(f"Could not export {region.display_name} at or below the source video bitrate.")
-
     def _export_worker(self, job: ExportJob) -> None:
         outputs: list[str] = []
         warnings: list[str] = []
@@ -2852,15 +2830,20 @@ class PreprocessApp(ctk.CTk):
         try:
             os.makedirs(job.output_folder, exist_ok=True)
             self.export_queue.put(("log", "Measuring source video bitrate..."))
-            job = replace(job, source_bitrate=video_stream_bitrate(
+            source_bitrate = video_stream_bitrate(
                 job.ffmpeg, job.video_path, cancel_event=self.export_cancel,
-            ))
+            )
+            max_bitrate = max(1, int(source_bitrate * 0.95))
             if self.export_cancel.is_set():
                 raise ExportCancelled()
             source_reader = VideoFrameReader(job.video_path)
             try:
                 encoder_label = GPU_ENCODER_LABELS.get(job.video_encoder, "CPU (libx264)")
                 self.export_queue.put(("log", f"Video encoder: {encoder_label}"))
+                self.export_queue.put((
+                    "log", f"Video bitrate limit: {max_bitrate / 1000:.1f} kb/s "
+                    f"(source {source_bitrate / 1000:.1f} kb/s)",
+                ))
                 for region_index, region in enumerate(job.regions):
                     if self.export_cancel.is_set():
                         raise ExportCancelled()
@@ -2868,7 +2851,7 @@ class PreprocessApp(ctk.CTk):
                     self.export_queue.put(("log", f"Exporting {region.display_name}: {region.output_path}"))
                     start_time = time.perf_counter()
                     try:
-                        self._export_region_below_source_bitrate(job, region, region_index)
+                        self._encode_export_region(job, region, region_index, max_bitrate)
                     except ExportCancelled:
                         raise
                     except RuntimeError as exc:
@@ -2879,7 +2862,7 @@ class PreprocessApp(ctk.CTk):
                         self._delete_partial(current_output)
                         self.export_queue.put(("log", f"GPU export failed: {exc}. Retrying with CPU (libx264)."))
                         job = replace(job, video_encoder="libx264", video_encoder_device=None)
-                        self._export_region_below_source_bitrate(job, region, region_index)
+                        self._encode_export_region(job, region, region_index, max_bitrate)
                     outputs.append(region.output_path)
                     elapsed = time.perf_counter() - start_time
                     self.export_queue.put(("log", f"Completed {region.display_name} in {elapsed:.1f}s"))
