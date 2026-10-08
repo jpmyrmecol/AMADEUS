@@ -31,7 +31,7 @@ _WINDOWS_ENCODERS = {
 }
 
 
-CROP_TRIMMING_QUALITY = "21"  # CRF (libx264) / CQ (NVENC)
+CROP_TRIMMING_QUALITY = "18"  # CRF (libx264) / CQ (NVENC)
 
 
 class GpuVideoEncodingError(RuntimeError):
