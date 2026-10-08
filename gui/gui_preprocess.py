@@ -3055,10 +3055,10 @@ class PreprocessApp(ctk.CTk):
             self.export_proc = None
 
     def on_close(self) -> None:
+        if self.export_running and not messagebox.askyesno("Export running", "Cancel export and close?"):
+            return
         self._stop_export_shimmer()
         if self.export_running:
-            if not messagebox.askyesno("Export running", "Cancel export and close?"):
-                return
             self.cancel_export()
             deadline = time.time() + 1.5
             while self.export_thread is not None and self.export_thread.is_alive() and time.time() < deadline:
