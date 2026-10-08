@@ -31,6 +31,9 @@ _WINDOWS_ENCODERS = {
 }
 
 
+CROP_TRIMMING_QUALITY = "21"  # CRF (libx264) / CQ (NVENC)
+
+
 class GpuVideoEncodingError(RuntimeError):
     """A selected GPU encoder failed during the actual video export."""
 
@@ -91,10 +94,10 @@ def bitrate_limited_encoder_args(encoder: str, max_bitrate: int) -> list[str]:
     if encoder == "libx264":
         # Optional SEI packets include x264's encoder identification. Their
         # fixed overhead can exceed a low source bitrate for short trims.
-        return ["-c:v", encoder, "-preset", "medium", "-crf", "18", *limits,
+        return ["-c:v", encoder, "-preset", "medium", "-crf", CROP_TRIMMING_QUALITY, *limits,
                 "-pix_fmt", "yuv420p", "-bsf:v", "filter_units=remove_types=6"]
     if encoder == "h264_nvenc":
-        return ["-c:v", encoder, "-preset", "p5", "-tune", "hq", "-rc:v", "vbr", "-cq:v", "18", *limits, "-pix_fmt", "yuv420p"]
+        return ["-c:v", encoder, "-preset", "p5", "-tune", "hq", "-rc:v", "vbr", "-cq:v", CROP_TRIMMING_QUALITY, *limits, "-pix_fmt", "yuv420p"]
     if encoder == "h264_qsv":
         return ["-c:v", encoder, "-preset", "medium", *limits, "-pix_fmt", "nv12"]
     if encoder == "h264_amf":
