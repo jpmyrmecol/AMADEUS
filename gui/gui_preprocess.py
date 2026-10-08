@@ -171,18 +171,28 @@ def _fourcc_to_string(value: float) -> str:
 
 
 def _format_seconds(seconds: float) -> str:
-    seconds = max(0.0, float(seconds))
-    whole = int(seconds)
-    ms = int(round((seconds - whole) * 1000.0))
-    if ms >= 1000:
-        whole += 1
-        ms -= 1000
-    h = whole // 3600
-    m = (whole % 3600) // 60
-    s = whole % 60
-    if h:
-        return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
-    return f"{m:02d}:{s:02d}.{ms:03d}"
+    """Format timeline time to whole seconds."""
+    whole = max(0, int(float(seconds)))
+    h, rem = divmod(whole, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{sec:02d}"
+
+
+def _parse_seek_seconds(value: str) -> int:
+    """Accept seconds, MM:SS or HH:MM:SS with no fractional seconds."""
+    parts = str(value).strip().split(":")
+    if not 1 <= len(parts) <= 3 or any(not p.isdecimal() for p in parts):
+        raise ValueError("Enter a time as HH:MM:SS, MM:SS or seconds.")
+    numbers = [int(part) for part in parts]
+    if len(numbers) > 1 and numbers[-1] >= 60:
+        raise ValueError("Seconds must be between 00 and 59.")
+    if len(numbers) == 3 and numbers[1] >= 60:
+        raise ValueError("Minutes must be between 00 and 59.")
+    if len(numbers) == 1:
+        return numbers[0]
+    if len(numbers) == 2:
+        return 60 * numbers[0] + numbers[1]
+    return 3600 * numbers[0] + 60 * numbers[1] + numbers[2]
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -506,7 +516,10 @@ class PreprocessApp(ctk.CTk):
         self.meta_var = tk.StringVar(value="No video loaded.")
         self.status_var = tk.StringVar(value="Select a video file.")
         self.active_region_var = tk.StringVar(value="Full image")
-        self.frame_label_var = tk.StringVar(value="frame 0 / 0   00:00.000")
+        self.frame_label_var = tk.StringVar(value="frame 0 / 0")
+        self.time_label_var = tk.StringVar(value="00:00:00")
+        self.frame_seek_var = tk.StringVar()
+        self.time_seek_var = tk.StringVar()
         self.trim_label_var = tk.StringVar(value="in 0 / out 0 / length 0 frames")
         self.in_frame_var = tk.StringVar(value="0")
         self.out_frame_var = tk.StringVar(value="0")
@@ -529,6 +542,8 @@ class PreprocessApp(ctk.CTk):
         self.export_view_rotation_var = tk.BooleanVar(value=True)
         self.crop_square_var = tk.BooleanVar(value=False)
         self.progress_var = tk.DoubleVar(value=0.0)
+        self._export_progress_phase = 0.0
+        self._export_progress_after: str | None = None
 
         self.reader: VideoFrameReader | None = None
         self.frame_bgr_cache: np.ndarray | None = None
@@ -574,6 +589,7 @@ class PreprocessApp(ctk.CTk):
         self._syncing_adjustments = False
         self._syncing_crop_controls = False
         self._syncing_trim_inputs = False
+        self._active_seek_field: str | None = None
         self._last_progress_update = 0.0
         self.output_folder_var.trace_add("write", lambda *_: self._schedule_crop_trimming_config_save())
         self.template_var.trace_add("write", lambda *_: self._schedule_crop_trimming_config_save())
@@ -851,13 +867,70 @@ class PreprocessApp(ctk.CTk):
         self.cancel_button = ctk.CTkButton(action_row, text="Cancel", command=self.cancel_export, state="disabled")
         self.cancel_button.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
-        self.progress_bar = ctk.CTkProgressBar(export, mode="determinate", variable=self.progress_var)
-        self.progress_bar.set(0)
+        self.progress_bar = tk.Canvas(
+            export, height=28, bg="#2b2b2b", highlightthickness=0, borderwidth=0
+        )
         self.progress_bar.pack(fill="x", padx=8, pady=(0, 8))
+        self.progress_bar.bind("<Configure>", lambda _event: self._draw_export_progress(), add="+")
+        self._draw_export_progress()
 
         self.log_box = ctk.CTkTextbox(export, height=220, wrap="word")
         self.log_box.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.log_box.configure(state="disabled")
+
+    @staticmethod
+    def _mix_export_green(ratio: float) -> str:
+        base, bright = (31, 128, 64), (110, 224, 140)
+        amount = max(0.0, min(1.0, ratio))
+        channels = [int(a + (b - a) * amount) for a, b in zip(base, bright)]
+        return "#{:02x}{:02x}{:02x}".format(*channels)
+
+    def _draw_export_progress(self) -> None:
+        canvas = self.progress_bar
+        canvas.delete("all")
+        width, height = canvas.winfo_width(), canvas.winfo_height()
+        if width <= 1 or height <= 1:
+            return
+        canvas.create_rectangle(0, 0, width, height, fill="#2b2b2b", outline="")
+        value = max(0.0, min(1.0, float(self.progress_var.get())))
+        fill = int(width * value)
+        if fill:
+            if self.export_running:
+                for x in range(0, fill, 4):
+                    wave = (math.sin(((x / max(width, 1)) - self._export_progress_phase) * math.tau) + 1.0) / 2.0
+                    color = self._mix_export_green(0.18 + wave * 0.42)
+                    canvas.create_rectangle(x, 0, min(x + 4, fill), height, fill=color, outline="")
+            else:
+                canvas.create_rectangle(0, 0, fill, height, fill="#1f8040", outline="")
+        canvas.create_text(
+            width // 2, height // 2, text=f"{value:.0%}",
+            fill="white", font=("TkDefaultFont", 11, "bold"),
+        )
+
+    def _set_export_progress(self, value: float) -> None:
+        self.progress_var.set(max(0.0, min(1.0, float(value))))
+        self._draw_export_progress()
+
+    def _start_export_shimmer(self) -> None:
+        if self._export_progress_after is None:
+            self._animate_export_shimmer()
+
+    def _animate_export_shimmer(self) -> None:
+        self._export_progress_after = None
+        if not self.export_running:
+            return
+        self._export_progress_phase = (self._export_progress_phase + 0.045) % 1.0
+        self._draw_export_progress()
+        self._export_progress_after = self.after(60, self._animate_export_shimmer)
+
+    def _stop_export_shimmer(self) -> None:
+        if self._export_progress_after is not None:
+            try:
+                self.after_cancel(self._export_progress_after)
+            except tk.TclError:
+                pass
+            self._export_progress_after = None
+        self._draw_export_progress()
 
     def _build_timeline(self) -> None:
         self.first_button = ctk.CTkButton(self.timeline_pane, text="|<", width=42, command=lambda: self.set_frame(0))
@@ -918,8 +991,36 @@ class PreprocessApp(ctk.CTk):
                 )
         self.frame_slider = ctk.CTkSlider(self.timeline_pane, orientation="horizontal", command=self.on_frame_slider)
         self.frame_slider.grid(row=0, column=11, sticky="ew", padx=(0, 8), pady=(7, 3))
-        self.frame_label = ctk.CTkLabel(self.timeline_pane, textvariable=self.frame_label_var, width=180, anchor="e")
-        self.frame_label.grid(row=0, column=12, sticky="e", pady=(7, 3))
+        # Readouts act as inline editors for direct frame/time navigation.
+        seek_bar = ctk.CTkFrame(self.timeline_pane, fg_color="transparent", corner_radius=0)
+        seek_bar.grid(row=0, column=12, sticky="e", padx=(0, 8), pady=(7, 3))
+        self.frame_label = ctk.CTkLabel(
+            seek_bar, textvariable=self.frame_label_var, width=175, anchor="e",
+        )
+        self.frame_label.grid(row=0, column=0, sticky="e")
+        self.frame_seek_entry = ctk.CTkEntry(
+            seek_bar, textvariable=self.frame_seek_var, width=175,
+        )
+        self.frame_seek_entry.grid(row=0, column=0, sticky="ew")
+        self.frame_seek_entry.grid_remove()
+        self.time_label = ctk.CTkLabel(
+            seek_bar, textvariable=self.time_label_var, width=90, anchor="e",
+        )
+        self.time_label.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.time_seek_entry = ctk.CTkEntry(
+            seek_bar, textvariable=self.time_seek_var, width=90,
+        )
+        self.time_seek_entry.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self.time_seek_entry.grid_remove()
+        self.frame_label.bind("<Button-1>", lambda _e: self._begin_seek_edit("frame"))
+        self.time_label.bind("<Button-1>", lambda _e: self._begin_seek_edit("time"))
+        for entry, field in (
+            (self.frame_seek_entry, "frame"),
+            (self.time_seek_entry, "time"),
+        ):
+            entry.bind("<Return>", lambda _e, f=field: self._commit_seek_edit(f), add="+")
+            entry.bind("<KP_Enter>", lambda _e, f=field: self._commit_seek_edit(f), add="+")
+            entry.bind("<FocusOut>", lambda _e, f=field: self._commit_seek_edit(f), add="+")
         self.trim_canvas = tk.Canvas(self.timeline_pane, height=18, bg=TIMELINE_BG, highlightthickness=0)
         self.trim_canvas.grid(row=1, column=11, sticky="ew", padx=(0, 8), pady=(0, 7))
         self.trim_label = ctk.CTkLabel(self.timeline_pane, textvariable=self.trim_label_var, anchor="w", text_color=MUTED_TEXT)
@@ -1605,6 +1706,7 @@ class PreprocessApp(ctk.CTk):
             return
 
         self.stop_playback(update_button=False)
+        self._dismiss_seek_edit()
         if self.reader is not None:
             self.reader.close()
         self.view_initialized = False
@@ -1789,6 +1891,58 @@ class PreprocessApp(ctk.CTk):
         self._schedule_crop_trimming_config_save()
         self.set_status(f"Deleted {name}.")
 
+    def _begin_seek_edit(self, field: str) -> None:
+        if self.reader is None or self.export_running:
+            return
+        self.stop_playback()
+        if self._active_seek_field is not None:
+            self._commit_seek_edit(self._active_seek_field)
+        self._active_seek_field = field
+        if field == "frame":
+            label, entry = self.frame_label, self.frame_seek_entry
+            self.frame_seek_var.set(str(self.current_frame))
+        else:
+            label, entry = self.time_label, self.time_seek_entry
+            self.time_seek_var.set(_format_seconds(self.current_frame / max(1e-9, self.reader.fps)))
+        label.grid_remove()
+        entry.grid()
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+
+    def _dismiss_seek_edit(self) -> None:
+        field = self._active_seek_field
+        if field is None:
+            return
+        self._active_seek_field = None
+        if field == "frame":
+            self.frame_seek_entry.grid_remove()
+            self.frame_label.grid()
+        else:
+            self.time_seek_entry.grid_remove()
+            self.time_label.grid()
+
+    def _commit_seek_edit(self, field: str) -> str:
+        if self._active_seek_field != field:
+            return "break"
+        raw = (self.frame_seek_var if field == "frame" else self.time_seek_var).get().strip()
+        self._dismiss_seek_edit()
+        if self.reader is None or self.export_running:
+            return "break"
+        try:
+            if field == "frame":
+                if not re.fullmatch(r"\d[\d,]*", raw):
+                    raise ValueError("Frame must be a non-negative integer.")
+                frame = int(raw.replace(",", ""))
+            else:
+                seconds = _parse_seek_seconds(raw)
+                frame = math.ceil(seconds * max(1e-9, self.reader.fps) - 1e-9)
+            frame = max(0, min(self._last_frame_index(), frame))
+        except ValueError as exc:
+            self.set_status(str(exc), auto_clear=False)
+            return "break"
+        self.set_frame(frame)
+        return "break"
+
     def on_frame_slider(self, value) -> None:
         if self.reader is None:
             return
@@ -1922,15 +2076,15 @@ class PreprocessApp(ctk.CTk):
         self._sync_trim_frame_inputs()
         self._update_output_summary()
         if self.reader is None:
-            self.frame_label_var.set("frame 0 / 0   00:00.000")
+            self.frame_label_var.set("frame 0 / 0")
+            self.time_label_var.set("00:00:00")
             self.trim_label_var.set("in 0 / out 0 / length 0 frames")
             self._draw_trim_markers()
             return
         total = max(1, self.reader.frame_count)
         fps = max(1e-9, self.reader.fps)
-        self.frame_label_var.set(
-            f"frame {self.current_frame:,} / {total - 1:,}   {_format_seconds(self.current_frame / fps)}"
-        )
+        self.frame_label_var.set(f"frame {self.current_frame:,} / {total - 1:,}")
+        self.time_label_var.set(_format_seconds(self.current_frame / fps))
         length = max(0, self.out_frame - self.in_frame + 1)
         self.trim_label_var.set(
             f"in {self.in_frame:,}  out {self.out_frame:,}  length {length:,} frames / {_format_seconds(length / fps)}"
@@ -2403,6 +2557,8 @@ class PreprocessApp(ctk.CTk):
     def start_export(self) -> None:
         if self.export_running or not self.gpu_encoder_detection_complete:
             return
+        if self._active_seek_field is not None:
+            self._commit_seek_edit(self._active_seek_field)
         try:
             job = self._build_export_job()
         except Exception as exc:
@@ -2412,8 +2568,9 @@ class PreprocessApp(ctk.CTk):
         self.export_cancel.clear()
         self.export_running = True
         self._last_progress_update = 0.0
-        self.progress_var.set(0.0)
-        self.progress_bar.set(0.0)
+        self._set_export_progress(0.0)
+        self._export_progress_phase = 0.0
+        self._start_export_shimmer()
         self._clear_log()
         self._flush_crop_trimming_config_save(log_success=True)
         self._set_export_ui_running(True)
@@ -2855,8 +3012,7 @@ class PreprocessApp(ctk.CTk):
                     self._log(str(item[1]))
                 elif kind == "progress":
                     value = float(item[1])
-                    self.progress_var.set(value)
-                    self.progress_bar.set(value)
+                    self._set_export_progress(value)
                     self.set_status(str(item[2]), auto_clear=False)
                 elif kind == "done":
                     outputs = tuple(item[1])
@@ -2891,6 +3047,7 @@ class PreprocessApp(ctk.CTk):
 
     def _finish_export_ui(self) -> None:
         self.export_running = False
+        self._stop_export_shimmer()
         self.export_thread = None
         self.export_poll_job = None
         self._set_export_ui_running(False)
@@ -2898,6 +3055,7 @@ class PreprocessApp(ctk.CTk):
             self.export_proc = None
 
     def on_close(self) -> None:
+        self._stop_export_shimmer()
         if self.export_running:
             if not messagebox.askyesno("Export running", "Cancel export and close?"):
                 return
