@@ -1239,6 +1239,8 @@ class PreprocessApp(ctk.CTk):
         # CTk buttons/canvases often keep keyboard focus in an Entry when clicked.
         # Commit the timeline readout on any outside click, regardless of FocusOut.
         self.bind_all("<ButtonPress-1>", self._on_seek_click_away, add="+")
+        # Some widgets consume the press event; the release handles those too.
+        self.bind_all("<ButtonRelease-1>", self._on_seek_click_away, add="+")
         self.bind_all("<Left>", self._on_frame_navigation_key, add="+")
         self.bind_all("<Right>", self._on_frame_navigation_key, add="+")
 
