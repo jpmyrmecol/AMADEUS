@@ -46,7 +46,7 @@ from tracking_video_inputs import configured_tracking_video_files
 from video_frame_rows import CsvFrameRows, StreamingColorSlots, indexed_assign_types, peak_visible_obb_count
 from gui.color import make_id_palette, resolve_color_seed
 from main.video_compat import ffmpeg_executable
-from main.video_encoders import detect_gpu_video_encoder, gpu_encoder_args
+from main.video_encoders import GpuVideoEncodingError, detect_gpu_video_encoder, gpu_encoder_args
 
 
 DIRECTION_CLASS_NAMES = [
@@ -444,22 +444,34 @@ def make_video_from_image_sequence(
     ffmpeg = _ffmpeg_path()
     if not ffmpeg:
         raise RuntimeError("The pinned AMADEUS FFmpeg is unavailable.")
-    filters = ["pad=ceil(iw/2)*2:ceil(ih/2)*2"]
-    if encoder == "h264_vaapi":
-        filters.append("format=nv12,hwupload")
-    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
-    if device:
-        cmd.extend(["-vaapi_device", device])
-    cmd.extend([
-        "-start_number", str(int(first_frame)),
-        "-framerate", str(float(fps)),
-        "-i", os.path.join(image_dir, f"%06d.{ext}"),
-        "-vf", ",".join(filters),
-        *(_cpu_encoder_args(encoder) if encoder in {"libx264", "mpeg4"} else gpu_encoder_args(encoder, profile="create_video")),
-        out_path,
-    ])
-    print(f"[INFO] AMADEUS FFmpeg image-sequence encoder for {os.path.basename(out_path)}: {encoder}")
-    subprocess.run(cmd, check=True)
+    encoders = [(encoder, device)]
+    if encoder not in {"libx264", "mpeg4"}:
+        encoders.append(("libx264", None))
+    for encoder, device in encoders:
+        filters = ["pad=ceil(iw/2)*2:ceil(ih/2)*2"]
+        if encoder == "h264_vaapi":
+            filters.append("format=nv12,hwupload")
+        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
+        if device:
+            cmd.extend(["-vaapi_device", device])
+        cmd.extend([
+            "-start_number", str(int(first_frame)),
+            "-framerate", str(float(fps)),
+            "-i", os.path.join(image_dir, f"%06d.{ext}"),
+            "-vf", ",".join(filters),
+            *(_cpu_encoder_args(encoder) if encoder in {"libx264", "mpeg4"} else gpu_encoder_args(encoder, profile="create_video")),
+            out_path,
+        ])
+        print(f"[INFO] AMADEUS FFmpeg image-sequence encoder for {os.path.basename(out_path)}: {encoder}")
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+        if result.returncode == 0:
+            return
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        detail = result.stderr.strip() or f"FFmpeg exited with code {result.returncode}"
+        if encoder in {"libx264", "mpeg4"}:
+            raise RuntimeError(f"Image-sequence video encoding failed: {detail}")
+        print(f"[WARN] GPU video encoding failed: {detail}. Retrying with CPU libx264.")
 
 
 def _cpu_encoder_args(encoder: str) -> list[str]:
@@ -486,6 +498,8 @@ class FfmpegRawVideoWriter:
         if not ffmpeg:
             raise RuntimeError("The pinned AMADEUS FFmpeg is unavailable.")
         self.path = path
+        self.encoder = encoder
+        self._released = False
         self.width = int(w)
         self.height = int(h)
         filters = ["pad=ceil(iw/2)*2:ceil(ih/2)*2"]
@@ -522,25 +536,30 @@ class FfmpegRawVideoWriter:
         try:
             self.proc.stdin.write(arr.tobytes())
         except BrokenPipeError as exc:
-            err = b""
-            if self.proc.stderr is not None:
-                err = self.proc.stderr.read()
-            self.proc.wait()
-            msg = err.decode("utf-8", errors="replace").strip()
-            detail = f": {msg}" if msg else ""
-            raise RuntimeError(f"FFmpeg video writer stopped unexpectedly{detail}") from exc
+            self.release()
+            error_type = GpuVideoEncodingError if self.encoder not in {"libx264", "mpeg4"} else RuntimeError
+            raise error_type("FFmpeg video writer closed its input unexpectedly.") from exc
 
     def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
         if self.proc.stdin is not None and not self.proc.stdin.closed:
-            self.proc.stdin.close()
-        err = b""
-        if self.proc.stderr is not None:
-            err = self.proc.stderr.read()
+            try:
+                self.proc.stdin.close()
+            except BrokenPipeError:
+                pass
+        err = self.proc.stderr.read() if self.proc.stderr is not None else b""
         rc = self.proc.wait()
+        if self.proc.stderr is not None:
+            self.proc.stderr.close()
         if rc != 0:
+            if os.path.exists(self.path):
+                os.remove(self.path)
             msg = err.decode("utf-8", errors="replace").strip()
             detail = f": {msg}" if msg else ""
-            raise RuntimeError(f"FFmpeg video writer failed with exit code {rc}{detail}")
+            error_type = GpuVideoEncodingError if self.encoder not in {"libx264", "mpeg4"} else RuntimeError
+            raise error_type(f"FFmpeg video writer failed with exit code {rc}{detail}")
 
 
 @dataclass
@@ -624,6 +643,49 @@ def _render_video_frame(
 
 
 def render_video_for_weight(
+    src_video: str,
+    out_dir: str,
+    png_image_dir: str,
+    jpg_image_dir: str,
+    num_objects: int,
+    draw_obb_flag: bool,
+    draw_arrow: bool,
+    draw_labels: bool,
+    output_fps: float,
+    first_frame: int,
+    last_frame: int,
+    frame_step: int,
+    colors: list[tuple[int, int, int]],
+    obb_thickness: int,
+    triangle_outline_thickness: int,
+    label_font_scale: float,
+    label_thickness: int,
+    triangle_alpha: float,
+    triangle_scale: float,
+    export_raw_yolo_video: bool,
+    save_png_frames: bool,
+    save_jpg_frames: bool,
+    jpg_quality: int,
+    video_codec: str,
+    video_acceleration: str,
+    video_filename: str = "tracking.mp4",
+    num_io_workers: int = 4,
+    num_render_workers: int = 1,
+    variable_population: bool = False,
+    drawing_mode: str = "obb",
+    color_seed: int | None = None,
+    video_output_dir: str | None = None,
+) -> None:
+    render_args = locals().copy()
+    try:
+        _render_video_for_weight(**render_args)
+    except GpuVideoEncodingError as exc:
+        print(f"[WARN] GPU video encoding failed: {exc}. Re-rendering with CPU libx264.")
+        render_args["video_acceleration"] = "cpu"
+        _render_video_for_weight(**render_args)
+
+
+def _render_video_for_weight(
     src_video: str,
     out_dir: str,
     png_image_dir: str,

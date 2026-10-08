@@ -14,7 +14,7 @@ import threading
 import time
 import tkinter as tk
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -41,7 +41,8 @@ from main.video_compat import ffmpeg_executable
 from main.video_encoders import (
     GPU_ENCODER_LABELS,
     detect_gpu_video_encoder,
-    gpu_encoder_args,
+    bitrate_limited_encoder_args,
+    video_stream_bitrate,
 )
 from main.video_frame_count import detect_seekable_frame_count
 
@@ -151,10 +152,8 @@ def ffmpeg_exe() -> str:
     return ffmpeg_executable()
 
 
-def _video_encoder_args(encoder: str) -> list[str]:
-    if encoder == "libx264":
-        return ["-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p"]
-    return gpu_encoder_args(encoder)
+def _video_encoder_args(encoder: str, max_bitrate: int) -> list[str]:
+    return bitrate_limited_encoder_args(encoder, max_bitrate)
 
 
 def _rgb_hex(color: tuple[int, int, int]) -> str:
@@ -497,6 +496,7 @@ class ExportJob:
     out_frame: int
     regions: tuple[ExportRegion, ...]
     video_encoder_device: str | None = None
+    source_bitrate: int = 0
 
 
 class ExportCancelled(RuntimeError):
@@ -1236,11 +1236,11 @@ class PreprocessApp(ctk.CTk):
         self.canvas.bind("<Leave>", self._on_canvas_leave, add="+")
         self.frame_slider.bind("<Double-Button-1>", self._on_frame_slider_double_click, add="+")
         self.trim_canvas.bind("<Configure>", lambda _event: self._draw_trim_markers(), add="+")
-        # CTk buttons/canvases often keep keyboard focus in an Entry when clicked.
-        # Commit the timeline readout on any outside click, regardless of FocusOut.
-        self.bind_all("<ButtonPress-1>", self._on_seek_click_away, add="+")
-        # Some widgets consume the press event; the release handles those too.
-        self.bind_all("<ButtonRelease-1>", self._on_seek_click_away, add="+")
+        # Commit before the widget's own click callback, including CTk internals.
+        self._seek_click_bindtag = f"preprocess_seek_{id(self)}"
+        self.bind_class(self._seek_click_bindtag, "<ButtonPress-1>", self._on_seek_click_away)
+        self._install_seek_click_binding(self)
+        self.bind_all("<Map>", lambda event: self._install_seek_click_binding(event.widget), add="+")
         self.bind_all("<Left>", self._on_frame_navigation_key, add="+")
         self.bind_all("<Right>", self._on_frame_navigation_key, add="+")
 
@@ -1896,6 +1896,15 @@ class PreprocessApp(ctk.CTk):
         self._schedule_crop_trimming_config_save()
         self.set_status(f"Deleted {name}.")
 
+    def _install_seek_click_binding(self, widget) -> None:
+        if not isinstance(widget, tk.Misc) or widget.winfo_toplevel() != self:
+            return
+        tags = widget.bindtags()
+        if self._seek_click_bindtag not in tags:
+            widget.bindtags((self._seek_click_bindtag, *tags))
+        for child in widget.winfo_children():
+            self._install_seek_click_binding(child)
+
     def _on_seek_click_away(self, event) -> None:
         """Commit an inline frame/time edit when clicking elsewhere in the GUI."""
         field = self._active_seek_field
@@ -1904,8 +1913,8 @@ class PreprocessApp(ctk.CTk):
         clicked_path = str(event.widget)
         active_entry = self.frame_seek_entry if field == "frame" else self.time_seek_entry
         # Check child widgets too: CTkEntry and CTkLabel use internal Tk widgets.
-        # Exclude both readout labels because their own click bindings switch
-        # editors before this application-wide handler is invoked.
+        # Readout labels switch editors in their own click bindings, which
+        # commit the previous input before opening the new editor.
         for widget in (active_entry, self.frame_label, self.time_label):
             widget_path = str(widget)
             if clicked_path == widget_path or clicked_path.startswith(widget_path + "."):
@@ -1956,6 +1965,7 @@ class PreprocessApp(ctk.CTk):
                 frame = int(raw.replace(",", ""))
             else:
                 seconds = _parse_seek_seconds(raw)
+                # Always snap to the entered whole second, including unchanged text.
                 frame = math.ceil(seconds * max(1e-9, self.reader.fps) - 1e-9)
             frame = max(0, min(self._last_frame_index(), frame))
         except ValueError as exc:
@@ -2760,81 +2770,116 @@ class PreprocessApp(ctk.CTk):
         )
         return max(1, int(round(duration_s * max(1e-9, job.output_fps))))
 
+    def _encode_export_region(
+        self, job: ExportJob, region: ExportRegion, region_index: int, max_bitrate: int,
+    ) -> None:
+        cmd = self._build_ffmpeg_command(job, region, max_bitrate)
+        target_frames = self._expected_export_frame_count(job)
+        total_regions = max(1, len(job.regions))
+        proc = subprocess.Popen(
+            cmd, cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        with self.export_proc_lock:
+            self.export_proc = proc
+        last_frame = 0
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if self.export_cancel.is_set():
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                line = line.strip()
+                if line.startswith("frame="):
+                    try:
+                        last_frame = max(last_frame, int(line.split("=", 1)[1]))
+                    except ValueError:
+                        pass
+                elif line.startswith("out_time_ms=") or line.startswith("out_time_us="):
+                    try:
+                        micros = int(line.split("=", 1)[1])
+                        last_frame = max(last_frame, int(round((micros / 1_000_000.0) * job.output_fps)))
+                    except ValueError:
+                        pass
+                ratio = _clamp(last_frame / max(1, target_frames), 0.0, 1.0)
+                now = time.perf_counter()
+                if now - self._last_progress_update > 0.08 or ratio >= 1.0:
+                    self._last_progress_update = now
+                    self.export_queue.put((
+                        "progress", (region_index + ratio) / total_regions,
+                        f"{region.display_name}: {int(ratio * 100)}%",
+                    ))
+            stderr_text = proc.stderr.read() if proc.stderr is not None else ""
+            return_code = proc.wait()
+        finally:
+            with self.export_proc_lock:
+                self.export_proc = None
+        if self.export_cancel.is_set():
+            raise ExportCancelled()
+        if return_code != 0:
+            self._delete_partial(region.output_path)
+            detail = stderr_text.strip() or f"ffmpeg exited with code {return_code}"
+            raise RuntimeError(f"Export failed for {region.display_name}:\n{detail}")
+
+    def _export_region_below_source_bitrate(
+        self, job: ExportJob, region: ExportRegion, region_index: int,
+    ) -> None:
+        max_bitrate = max(1, int(job.source_bitrate * 0.95))
+        for attempt in range(3):
+            if self.export_cancel.is_set():
+                raise ExportCancelled()
+            self._encode_export_region(job, region, region_index, max_bitrate)
+            measured = video_stream_bitrate(job.ffmpeg, region.output_path, cancel_event=self.export_cancel)
+            if measured <= job.source_bitrate:
+                self.export_queue.put((
+                    "log", f"{region.display_name}: video bitrate {measured / 1000:.1f} kb/s "
+                    f"(source {job.source_bitrate / 1000:.1f} kb/s)",
+                ))
+                return
+            self._delete_partial(region.output_path)
+            max_bitrate = max(1, int(max_bitrate * job.source_bitrate / measured * 0.9))
+            if attempt < 2:
+                self.export_queue.put(("log", f"{region.display_name}: reducing bitrate and retrying."))
+        raise RuntimeError(f"Could not export {region.display_name} at or below the source video bitrate.")
+
     def _export_worker(self, job: ExportJob) -> None:
         outputs: list[str] = []
         warnings: list[str] = []
         current_output: str | None = None
         try:
             os.makedirs(job.output_folder, exist_ok=True)
+            self.export_queue.put(("log", "Measuring source video bitrate..."))
+            job = replace(job, source_bitrate=video_stream_bitrate(
+                job.ffmpeg, job.video_path, cancel_event=self.export_cancel,
+            ))
+            if self.export_cancel.is_set():
+                raise ExportCancelled()
             source_reader = VideoFrameReader(job.video_path)
             try:
                 encoder_label = GPU_ENCODER_LABELS.get(job.video_encoder, "CPU (libx264)")
                 self.export_queue.put(("log", f"Video encoder: {encoder_label}"))
-                total_regions = max(1, len(job.regions))
                 for region_index, region in enumerate(job.regions):
                     if self.export_cancel.is_set():
                         raise ExportCancelled()
                     current_output = region.output_path
                     self.export_queue.put(("log", f"Exporting {region.display_name}: {region.output_path}"))
-                    cmd = self._build_ffmpeg_command(job, region)
-                    target_frames = self._expected_export_frame_count(job)
                     start_time = time.perf_counter()
-                    proc = subprocess.Popen(
-                        cmd,
-                        cwd=str(PROJECT_ROOT),
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                    )
-                    with self.export_proc_lock:
-                        self.export_proc = proc
-                    last_frame = 0
                     try:
-                        assert proc.stdout is not None
-                        for line in proc.stdout:
-                            if self.export_cancel.is_set():
-                                try:
-                                    proc.terminate()
-                                except OSError:
-                                    pass
-                            line = line.strip()
-                            if line.startswith("frame="):
-                                try:
-                                    last_frame = max(last_frame, int(line.split("=", 1)[1]))
-                                except ValueError:
-                                    pass
-                            elif line.startswith("out_time_ms=") or line.startswith("out_time_us="):
-                                try:
-                                    micros = int(line.split("=", 1)[1])
-                                    last_frame = max(last_frame, int(round((micros / 1_000_000.0) * job.output_fps)))
-                                except ValueError:
-                                    pass
-                            ratio = _clamp(last_frame / max(1, target_frames), 0.0, 1.0)
-                            overall = (region_index + ratio) / total_regions
-                            now = time.perf_counter()
-                            if now - self._last_progress_update > 0.08 or ratio >= 1.0:
-                                self._last_progress_update = now
-                                self.export_queue.put(
-                                    (
-                                        "progress",
-                                        overall,
-                                        f"{region.display_name}: {int(ratio * 100)}%",
-                                    )
-                                )
-                        stderr_text = proc.stderr.read() if proc.stderr is not None else ""
-                        return_code = proc.wait()
-                    finally:
-                        with self.export_proc_lock:
-                            self.export_proc = None
-                    if self.export_cancel.is_set():
-                        raise ExportCancelled()
-                    if return_code != 0:
+                        self._export_region_below_source_bitrate(job, region, region_index)
+                    except ExportCancelled:
+                        raise
+                    except RuntimeError as exc:
+                        if self.export_cancel.is_set():
+                            raise ExportCancelled() from exc
+                        if job.video_encoder == "libx264":
+                            raise
                         self._delete_partial(current_output)
-                        detail = stderr_text.strip() or f"ffmpeg exited with code {return_code}"
-                        raise RuntimeError(f"Export failed for {region.display_name}:\n{detail}")
+                        self.export_queue.put(("log", f"GPU export failed: {exc}. Retrying with CPU (libx264)."))
+                        job = replace(job, video_encoder="libx264", video_encoder_device=None)
+                        self._export_region_below_source_bitrate(job, region, region_index)
                     outputs.append(region.output_path)
                     elapsed = time.perf_counter() - start_time
                     self.export_queue.put(("log", f"Completed {region.display_name} in {elapsed:.1f}s"))
@@ -2843,18 +2888,17 @@ class PreprocessApp(ctk.CTk):
                 source_reader.close()
             self.export_queue.put(("progress", 1.0, "Completed"))
             self.export_queue.put(("done", tuple(outputs), tuple(warnings)))
-        except ExportCancelled:
-            if current_output is not None:
-                self._delete_partial(current_output)
-            for path in outputs:
-                self._delete_partial(path)
-            self.export_queue.put(("cancelled",))
         except Exception as exc:
             if current_output is not None:
                 self._delete_partial(current_output)
-            self.export_queue.put(("error", str(exc)))
+            if isinstance(exc, ExportCancelled) or self.export_cancel.is_set():
+                for path in outputs:
+                    self._delete_partial(path)
+                self.export_queue.put(("cancelled",))
+            else:
+                self.export_queue.put(("error", str(exc)))
 
-    def _build_ffmpeg_command(self, job: ExportJob, region: ExportRegion) -> list[str]:
+    def _build_ffmpeg_command(self, job: ExportJob, region: ExportRegion, max_bitrate: int) -> list[str]:
         filters: list[str] = [
             f"trim=start_frame={job.in_frame}:end_frame={job.out_frame + 1}",
             (
@@ -2917,7 +2961,7 @@ class PreprocessApp(ctk.CTk):
             "0:v:0",
             "-an",
         ])
-        cmd.extend(["-vf", ",".join(filters), *_video_encoder_args(job.video_encoder)])
+        cmd.extend(["-vf", ",".join(filters), *_video_encoder_args(job.video_encoder, max_bitrate)])
         cmd.extend(["-progress", "pipe:1", region.output_path])
         return cmd
 

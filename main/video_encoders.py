@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
+from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
 
@@ -27,6 +29,81 @@ _WINDOWS_ENCODERS = {
     "1002": "h264_amf",
     "8086": "h264_qsv",
 }
+
+
+class GpuVideoEncodingError(RuntimeError):
+    """A selected GPU encoder failed during the actual video export."""
+
+
+def video_stream_bitrate(ffmpeg: str, path: str, *, cancel_event=None) -> int:
+    """Measure average encoded video bitrate without decoding or buffering the file."""
+    command = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-i", path, "-map", "0:v:0", "-c:v", "copy", "-f", "framecrc", "-",
+    ]
+    total_bytes = 0
+    first_pts = None
+    last_end = None
+    time_base = None
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=errors, text=True,
+            encoding="utf-8", errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("Video bitrate measurement canceled.")
+                if line.startswith("#tb 0:"):
+                    time_base = Fraction(line.split(":", 1)[1].strip())
+                elif line.strip() and not line.startswith("#"):
+                    values = line.split(",")
+                    pts, duration, size = (int(values[i]) for i in (2, 3, 4))
+                    total_bytes += size
+                    first_pts = pts if first_pts is None else min(first_pts, pts)
+                    end = pts + duration
+                    last_end = end if last_end is None else max(last_end, end)
+            return_code = process.wait()
+            if return_code != 0:
+                errors.seek(0)
+                detail = errors.read().decode("utf-8", errors="replace").strip()
+                raise RuntimeError(f"Could not measure video bitrate: {detail}")
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait()
+            if process.stdout is not None:
+                process.stdout.close()
+    if not time_base or first_pts is None or last_end is None or last_end <= first_pts or total_bytes <= 0:
+        raise RuntimeError(f"Could not determine encoded video bitrate: {path}")
+    return int(Fraction(total_bytes * 8, last_end - first_pts) / time_base)
+
+
+def bitrate_limited_encoder_args(encoder: str, max_bitrate: int) -> list[str]:
+    """Use variable bitrate with a ceiling for Cropping & Trimming."""
+    maximum = int(max_bitrate)
+    if maximum <= 0:
+        raise ValueError("Video bitrate limit must be positive.")
+    average = max(1, int(maximum * 0.9))
+    limits = ["-b:v", str(average), "-maxrate:v", str(maximum), "-bufsize:v", str(maximum)]
+    if encoder == "libx264":
+        # Optional SEI packets include x264's encoder identification. Their
+        # fixed overhead can exceed a low source bitrate for short trims.
+        return ["-c:v", encoder, "-preset", "medium", "-crf", "18", *limits,
+                "-pix_fmt", "yuv420p", "-bsf:v", "filter_units=remove_types=6"]
+    if encoder == "h264_nvenc":
+        return ["-c:v", encoder, "-preset", "p5", "-tune", "hq", "-rc:v", "vbr", "-cq:v", "18", *limits, "-pix_fmt", "yuv420p"]
+    if encoder == "h264_qsv":
+        return ["-c:v", encoder, "-preset", "medium", *limits, "-pix_fmt", "nv12"]
+    if encoder == "h264_amf":
+        return ["-c:v", encoder, "-quality", "quality", "-rc:v", "vbr_peak", *limits, "-pix_fmt", "yuv420p"]
+    if encoder == "h264_vaapi":
+        return ["-c:v", encoder, "-rc_mode", "VBR", *limits]
+    if encoder == "h264_videotoolbox":
+        return ["-c:v", encoder, *limits, "-allow_sw", "0", "-pix_fmt", "yuv420p"]
+    raise ValueError(f"Unsupported video encoder: {encoder}")
 
 
 def gpu_encoder_args(encoder: str, *, profile: str = "preprocess") -> list[str]:

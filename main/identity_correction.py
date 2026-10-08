@@ -16,6 +16,7 @@ import random
 import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import cv2
 import h5py
@@ -1098,6 +1099,20 @@ def write_crop_previews(
     return written
 
 
+@contextmanager
+def _open_crop_cache_for_write(h5_path: str):
+    partial_path = h5_path + '.partial'
+    if os.path.exists(partial_path):
+        os.remove(partial_path)
+    try:
+        with h5py.File(partial_path, 'w') as hf:
+            yield hf
+        os.replace(partial_path, h5_path)
+    finally:
+        if os.path.exists(partial_path):
+            os.remove(partial_path)
+
+
 def extract_and_cache_crops(
     corrected: dict,
     video_path: str,
@@ -1129,7 +1144,7 @@ def extract_and_cache_crops(
 
     # Build frame -> list[(frag, frame_idx)] for video scan.
     if not frame_to_crops:
-        with h5py.File(h5_path, 'w') as hf:
+        with _open_crop_cache_for_write(h5_path) as hf:
             hf.create_dataset('crops', shape=(0, img_size, img_size), dtype=np.uint8)
             _write_crop_cache_metadata(hf, fragments, background_path, _seg_config_signature(seg_config))
         return h5_path
@@ -1142,7 +1157,7 @@ def extract_and_cache_crops(
 
     # Preserve only bounded worker frames in memory. Keep the full crop
     # collection in HDF5, with each row written by the main thread.
-    with h5py.File(h5_path, 'w') as hf:
+    with _open_crop_cache_for_write(h5_path) as hf:
         crops_arr = hf.create_dataset('crops', shape=(total_images, img_size, img_size), dtype=np.uint8)
         num_w = _worker_count(num_workers, total_images)
         executor = ThreadPoolExecutor(max_workers=num_w) if num_w > 1 else None
@@ -2767,29 +2782,16 @@ def load_or_train_embedding(
         return None, {}, 0.0
     frame_to_crops: dict[int, list[tuple[Fragment, int]]] | None = None
 
-    def _h5_cache_valid(h5_path: str, expected_shape: tuple[int, int, int]) -> bool:
-        with h5py.File(h5_path, 'r') as hf:
-            if tuple(hf['crops'].shape) != expected_shape:
-                return False
-            cached_bg = str(hf.attrs.get('background_path', ''))
-            current_bg = _background_cache_key(background_path)
-            if cached_bg != current_bg:
-                return False
-            if str(hf.attrs.get('seg_config_signature', '')) != seg_signature:
-                return False
-            return int(hf.attrs.get('crop_metadata_version', 0)) == int(_CROP_METADATA_VERSION)
-
-    if cached_metadata is not None and int(cached_metadata[1]) == int(img_size):
+    crop_cache_valid = cached_metadata is not None and int(cached_metadata[1]) == int(img_size)
+    if crop_cache_valid:
         fragments = cached_metadata[0]
-        crop_cache_valid = True
-    else:
-        frame_to_crops = _prepare_frame_to_crops(fragments)
-        expected_crops = sum(len(v) for v in frame_to_crops.values())
-        expected_shape = (expected_crops, img_size, img_size)
-        crop_cache_valid = os.path.exists(h5_path) and _h5_cache_valid(h5_path, expected_shape)
 
     preview_paths: list[str] = []
     if not crop_cache_valid:
+        # Invalidate unreadable/incomplete caches and the model tied to them.
+        for cache_path in (h5_path, model_path):
+            if os.path.exists(cache_path):
+                os.remove(cache_path)
         if frame_to_crops is None:
             frame_to_crops = _prepare_frame_to_crops(fragments)
         preview_paths = write_initial_crop_previews(
@@ -2819,11 +2821,6 @@ def load_or_train_embedding(
             num_workers=num_workers,
             seg_config=seg_config,
         )
-        # The model is tied to the exact crop generation mode/background/size.
-        # If crops were regenerated, do not reuse a stale checkpoint.
-        if os.path.exists(model_path):
-            os.remove(model_path)
-
     if not preview_paths:
         preview_paths = write_crop_previews(
             h5_path,
