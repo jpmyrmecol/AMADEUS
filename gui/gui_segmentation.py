@@ -1029,9 +1029,10 @@ def _rasterize_overlap(contour: np.ndarray, poly: np.ndarray,
 def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchConfig") -> list[np.ndarray]:
     """Attach the imported OBBs of one frame to the blobs of that same frame.
 
-    Every OBB is owned by exactly one blob -- the blob containing its centre, or
-    else the blob it overlaps most -- so two animals sharing a blob give that
-    blob a count of 2.  The covered fraction, which separates one large animal
+    First resolve all centre hits; two centres in a merged blob still give
+    that blob a count of 2. Then match remaining OBBs to unclaimed blobs by
+    largest raster overlap, without borrowing a blob owned by another OBB.
+    The covered fraction, which separates one large animal
     (the OBB covers the blob) from a pair whose second individual the tracker
     missed (it does not), is measured only for the blobs that fraction can
     still rescue: single-OBB normal-segmentation area outliers that are not
@@ -1047,20 +1048,34 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
         return []
 
     boxes = [cv2.boundingRect(blob.contour) for blob in blobs]
-    owners: list[int] = []
-    for poly in obbs:
+    owners: list[int] = [-1] * len(obbs)
+    for ri, poly in enumerate(obbs):
         center = (float(poly[:, 0].mean()), float(poly[:, 1].mean()))
-        owner = -1
         for index, blob in enumerate(blobs):
             bx, by, bw, bh = boxes[index]
             if not (bx <= center[0] <= bx + bw and by <= center[1] <= by + bh):
                 continue
             if cv2.pointPolygonTest(blob.contour, center, False) >= 0:
-                owner = index
+                owners[ri] = index
                 break
-        if owner < 0:
-            owner = _owner_by_largest_overlap(blobs, boxes, poly)
-        owners.append(owner)
+
+    claimed = {owner for owner in owners if owner >= 0}
+    available = [index for index in range(len(blobs)) if index not in claimed]
+    candidates = []
+    for ri, poly in enumerate(obbs):
+        if owners[ri] >= 0:
+            continue
+        poly_key = tuple(sorted((float(x), float(y)) for x, y in poly))
+        poly_area = float(cv2.contourArea(poly))
+        for index, overlap in _result_obb_overlap_candidates(blobs, boxes, poly, available):
+            candidates.append((-overlap, poly_area, poly_key, boxes[index], ri, index))
+    # Strongest overlap wins globally. Equal overlap prefers the tighter OBB;
+    # geometry breaks ties so CSV ID/column order does not choose the owner.
+    for _, _, _, _, ri, index in sorted(candidates):
+        if owners[ri] < 0 and index not in claimed:
+            owners[ri] = index
+            claimed.add(index)
+    for owner in owners:
         if owner >= 0:
             blobs[owner].result_obb_count += 1
 
@@ -1100,20 +1115,23 @@ def _missing_result_obb_blob(
     )
 
 
-def _owner_by_largest_overlap(blobs: list, boxes: list, poly: np.ndarray) -> int:
-    """Blob index sharing the most area with an OBB whose centre hit background."""
+def _result_obb_overlap_candidates(
+    blobs: list, boxes: list, poly: np.ndarray, available: list[int],
+) -> list[tuple[int, int]]:
+    """Positive raster overlaps with blobs not yet owned by a centre match."""
     ox0, oy0, ox1, oy1 = _polygon_bounds(poly)
-    best_index, best_overlap = -1, 0
-    for index, blob in enumerate(blobs):
+    candidates = []
+    for index in available:
+        blob = blobs[index]
         bx, by, bw, bh = boxes[index]
         x0, y0 = max(ox0, bx), max(oy0, by)
         x1, y1 = min(ox1, bx + bw), min(oy1, by + bh)
         if x1 <= x0 or y1 <= y0:
             continue
         _blob_pixels, overlap = _rasterize_overlap(blob.contour, poly, x0, y0, x1, y1)
-        if overlap > best_overlap:
-            best_index, best_overlap = index, overlap
-    return best_index
+        if overlap > 0:
+            candidates.append((index, overlap))
+    return candidates
 
 
 def _draw_result_obbs(image_bgr: np.ndarray, obbs: "Optional[np.ndarray]") -> None:
