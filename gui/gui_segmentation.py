@@ -366,6 +366,7 @@ class BlobMetrics:
     result_obb_count: int = 0        # imported OBBs owned by this blob
     result_obb_coverage: float = 0.0  # blob fraction covered by that single OBB
     result_single: bool = False       # area outlier rescued as one large animal
+    result_missing: bool = False      # full imported OBB with no segmentation owner
 
 
 @dataclass
@@ -553,6 +554,9 @@ def _smooth_classified_blobs(
         return smoothed
     output = []
     for blob in smoothed:
+        if blob.result_missing:
+            output.append(blob)
+            continue
         if not (blob.is_crossing or blob.manual_outlier):
             output.append(blob)
             continue
@@ -1022,7 +1026,7 @@ def _rasterize_overlap(contour: np.ndarray, poly: np.ndarray,
     return int(np.count_nonzero(blob_mask)), int(np.count_nonzero(blob_mask & obb_mask))
 
 
-def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchConfig") -> None:
+def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchConfig") -> list[np.ndarray]:
     """Attach the imported OBBs of one frame to the blobs of that same frame.
 
     Every OBB is owned by exactly one blob -- the blob containing its centre, or
@@ -1031,15 +1035,16 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
     (the OBB covers the blob) from a pair whose second individual the tracker
     missed (it does not), is measured only for the blobs that fraction can
     still rescue: single-OBB normal-segmentation area outliers that are not
-    Additional Outlier regions.
+    Additional Outlier regions. Return OBBs with no owner for removal of
+    animals that the current segmentation threshold missed entirely.
     """
     for blob in blobs:
         blob.result_obb_count = 0
         blob.result_obb_coverage = 0.0
         blob.result_single = False
     obbs = cfg.obbs_by_frame.get(int(frame_idx))
-    if obbs is None or not blobs:
-        return
+    if obbs is None:
+        return []
 
     boxes = [cv2.boundingRect(blob.contour) for blob in blobs]
     owners: list[int] = []
@@ -1068,6 +1073,31 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
         )
         if blob_pixels > 0:
             blob.result_obb_coverage = covered_pixels / blob_pixels
+    return [poly for poly, owner in zip(obbs, owners) if owner < 0]
+
+
+def _missing_result_obb_blob(
+    poly: np.ndarray, frame_idx: int, blob_index: int, image_shape: tuple,
+) -> Optional[BlobMetrics]:
+    """Keep the complete OBB contour; raster masks clip it to the video frame."""
+    contour = np.round(poly).astype(np.int32).reshape(-1, 1, 2)
+    x, y, w, h = cv2.boundingRect(contour)
+    H, W = image_shape[:2]
+    x0, y0, x1, y1 = max(0, x), max(0, y), min(W, x + w), min(H, y + h)
+    if x0 >= x1 or y0 >= y1:
+        return None
+    visible = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    cv2.fillConvexPoly(visible, contour.reshape(-1, 2) - np.array((x0, y0), dtype=np.int32), 1)
+    if not cv2.countNonZero(visible):
+        return None
+    cx, cy = contour_center(contour)
+    return BlobMetrics(
+        frame=int(frame_idx), blob_index=blob_index, contour=contour,
+        center_x=cx, center_y=cy, area=contour_area(contour),
+        bbox_area=float(w * h), w=float(w), h=float(h),
+        manual_outlier=True, is_crossing=True, result_obb_count=1,
+        result_missing=True,
+    )
 
 
 def _owner_by_largest_overlap(blobs: list, boxes: list, poly: np.ndarray) -> int:
@@ -4852,6 +4882,7 @@ class CrossingReviewApp(ctk.CTk):
             result_obb_count=blob.result_obb_count,
             result_obb_coverage=blob.result_obb_coverage,
             result_single=blob.result_single,
+            result_missing=blob.result_missing,
         )
 
     def _compute_iqr_stats(self, all_blobs: list[BlobMetrics]) -> dict[str, tuple[float, float, float, float]]:
@@ -4914,7 +4945,7 @@ class CrossingReviewApp(ctk.CTk):
                 return
             if self.analysis_blobs_by_frame:
                 self.analysis_blobs_by_frame = {
-                    int(fid): self._classify_blobs(blobs, self.analysis_bounds)
+                    int(fid): self._classify_blobs(blobs, self.analysis_bounds, frame_idx=int(fid))
                     for fid, blobs in self.analysis_blobs_by_frame.items()
                 }
             if self.analysis_signature is not None and not self.analysis_is_stale:
@@ -4930,12 +4961,17 @@ class CrossingReviewApp(ctk.CTk):
         *,
         clone: bool = True,
         result_match: Optional["_ResultMatchConfig"] = None,
+        frame_idx: Optional[int] = None,
     ) -> list[BlobMetrics]:
         if bounds is None:
             bounds = self.analysis_bounds
         if result_match is None:
             result_match = self._result_match
         out = [self._clone_blob(b) for b in blobs] if clone else blobs
+        # Rebuild imported rectangles against real segmentation, never against
+        # rectangles left by a prior classification or a now-disabled import.
+        had_missing = any(b.result_missing for b in out)
+        out[:] = [b for b in out if not b.result_missing]
         area_bounds = bounds.get("area", (-float("inf"), float("inf"))) if bounds else (-float("inf"), float("inf"))
 
         for b in out:
@@ -4947,12 +4983,21 @@ class CrossingReviewApp(ctk.CTk):
             b.result_obb_coverage = 0.0
             b.result_single = False
             b.is_crossing = bool(b.manual_outlier or b.area_outlier)
-        if result_match is not None and out:
-            self._rescue_single_animal_outliers(out, result_match)
+        if result_match is not None:
+            image_shape = (self.reader.height, self.reader.width) if self.reader is not None else None
+            self._rescue_single_animal_outliers(
+                out, result_match, frame_idx=frame_idx, image_shape=image_shape,
+            )
+        if had_missing or any(b.result_missing for b in out):
+            for index, b in enumerate(out):
+                b.blob_index = index
         return out
 
     @staticmethod
-    def _rescue_single_animal_outliers(blobs: list[BlobMetrics], result_match: "_ResultMatchConfig") -> None:
+    def _rescue_single_animal_outliers(
+        blobs: list[BlobMetrics], result_match: "_ResultMatchConfig", *,
+        frame_idx: Optional[int] = None, image_shape: Optional[tuple] = None,
+    ) -> None:
         """Clear the area-outlier flag of blobs the imported result explains as one animal.
 
         Area alone cannot tell a genuinely large individual from two individuals
@@ -4960,19 +5005,27 @@ class CrossingReviewApp(ctk.CTk):
         that OBB covers, holds one animal however large it is.  Everything else
         -- blobs inside the area bounds, Additional Outlier regions, blobs with two or
         more OBBs, and blobs the result does not explain -- keeps the
-        classification the area rule already gave it.
+        classification the area rule already gave it. Unowned OBBs become
+        explicit outlier rectangles after matching all original segments.
         """
         by_frame: dict[int, list[BlobMetrics]] = {}
         for b in blobs:
             by_frame.setdefault(int(b.frame), []).append(b)
+        if frame_idx is not None:
+            by_frame.setdefault(int(frame_idx), [])
         for frame_idx, frame_blobs in by_frame.items():
-            _match_result_obbs_to_blobs(frame_blobs, frame_idx, result_match)
+            unmatched = _match_result_obbs_to_blobs(frame_blobs, frame_idx, result_match)
             for b in frame_blobs:
                 if b.manual_outlier or not b.area_outlier:
                     continue
                 if b.result_obb_count == 1 and b.result_obb_coverage >= result_match.min_coverage:
                     b.result_single = True
                     b.is_crossing = False
+            if image_shape is not None:
+                for poly in unmatched:
+                    missing = _missing_result_obb_blob(poly, frame_idx, len(blobs), image_shape)
+                    if missing is not None:
+                        blobs.append(missing)
 
     def _analysis_frame_indices(self) -> list[int]:
         if self.reader is None:
@@ -5081,7 +5134,7 @@ class CrossingReviewApp(ctk.CTk):
                 if self._progress_cancel:
                     return False
                 classified = self._classify_blobs(
-                    blobs, bounds, clone=False, result_match=result_match)
+                    blobs, bounds, clone=False, result_match=result_match, frame_idx=fid)
                 classified_by_frame[fid] = classified
                 total += len(classified)
                 outliers += sum(1 for b in classified if b.is_crossing)
@@ -5141,16 +5194,21 @@ class CrossingReviewApp(ctk.CTk):
             except ValueError as exc:
                 self.set_status(str(exc))
                 return mask, [self._clone_blob(b) for b in blobs]
-            classified = self._classify_blobs(blobs, self.analysis_bounds)
+            classified = self._classify_blobs(blobs, self.analysis_bounds, frame_idx=self.current_frame)
             if self.single_blob_smoothing_enabled_var.get():
                 cfg = self._capture_seg_config()
                 classified = _smooth_classified_blobs(classified, mask.shape, cfg)
                 classified = self._classify_blobs(
-                    classified, self.analysis_bounds, clone=False)
+                    classified, self.analysis_bounds, clone=False, frame_idx=self.current_frame)
+                mask = _draw_blob_union_mask(mask.shape, classified)
+            elif any(b.result_missing for b in classified):
                 mask = _draw_blob_union_mask(mask.shape, classified)
             return mask, classified
-        # Before Analyze sampled frames, no fixed sampled-frame result exists.
-        # Show only segmentation results without crossing classification.
+        # Before analysis there are no fixed area bounds. Imported OBBs can
+        # still identify entirely missed regions that must be removed.
+        if self._result_match is not None:
+            classified = self._classify_blobs(blobs, {}, frame_idx=self.current_frame)
+            return _draw_blob_union_mask(mask.shape, classified), classified
         return mask, [self._clone_blob(b) for b in blobs]
 
     @staticmethod
@@ -5211,9 +5269,10 @@ class CrossingReviewApp(ctk.CTk):
         kept = sum(1 for b in blobs if not b.is_crossing)
         outliers = sum(1 for b in blobs if b.is_crossing)
         rescued = sum(1 for b in blobs if b.result_single)
+        missing = sum(1 for b in blobs if b.result_missing)
 
         stale_text = " / stale" if self.analysis_is_stale and self.analysis_bounds else ""
-        result_text = f" / result-single {rescued}" if self._result_match is not None else ""
+        result_text = f" / result-single {rescued} / unmatched OBBs {missing}" if self._result_match is not None else ""
         self.preview_title_var.set(
             f"frame {self.current_frame} / blobs {len(blobs)} / kept {kept} / "
             f"outliers {outliers}{result_text}{stale_text}"
@@ -6025,12 +6084,12 @@ class CrossingReviewApp(ctk.CTk):
                         fid = futures[future]
                         blobs = future.result()
                         source[fid] = self._classify_blobs(
-                            blobs, bounds, clone=False, result_match=result_match)
+                            blobs, bounds, clone=False, result_match=result_match, frame_idx=fid)
                         if cfg.single_blob_smoothing_enabled:
                             source[fid] = _smooth_classified_blobs(
                                 source[fid], (self.reader.height, self.reader.width), cfg)
                             source[fid] = self._classify_blobs(
-                                source[fid], bounds, clone=False, result_match=result_match)
+                                source[fid], bounds, clone=False, result_match=result_match, frame_idx=fid)
 
                     n = batch_fids[-1] + 1 - start_frame
                     elapsed = max(1e-9, time.perf_counter() - start_time)
