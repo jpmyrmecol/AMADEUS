@@ -367,6 +367,7 @@ class BlobMetrics:
     result_obb_coverage: float = 0.0  # blob fraction covered by that single OBB
     result_single: bool = False       # area outlier rescued as one large animal
     result_missing: bool = False      # full imported OBB with no segmentation owner
+    result_area_outlier: bool = False # rejected by the independent Result area bounds
 
 
 @dataclass
@@ -932,6 +933,7 @@ class _ResultMatchConfig:
     """Snapshot of the imported-result settings for thread-safe classification."""
     min_coverage: float
     obbs_by_frame: dict          # shared read-only reference
+    area_bounds: tuple[float, float] = (0.0, float("inf"))
 
 
 def _obb_corners_from_rect(cx: float, cy: float, w: float, h: float, heading_deg: float) -> np.ndarray:
@@ -1032,11 +1034,10 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
     First resolve all centre hits; two centres in a merged blob still give
     that blob a count of 2. Then match remaining OBBs to unclaimed blobs by
     largest raster overlap, without borrowing a blob owned by another OBB.
-    The covered fraction, which separates one large animal
-    (the OBB covers the blob) from a pair whose second individual the tracker
-    missed (it does not), is measured only for the blobs that fraction can
-    still rescue: single-OBB normal-segmentation area outliers that are not
-    Additional Outlier regions. Return OBBs with no owner for removal of
+    The covered fraction distinguishes one animal from a merged blob whose
+    second individual the tracker missed. Measure it for every real single-
+    owned blob so Result area bounds can reject an otherwise ordinary inlier.
+    Return OBBs with no owner for removal of
     animals that the current segmentation threshold missed entirely.
     """
     for blob in blobs:
@@ -1080,7 +1081,7 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
             blobs[owner].result_obb_count += 1
 
     for index, blob in enumerate(blobs):
-        if blob.result_obb_count != 1 or blob.manual_outlier or not blob.area_outlier:
+        if blob.result_obb_count != 1 or blob.manual_outlier:
             continue
         bx, by, bw, bh = boxes[index]
         blob_pixels, covered_pixels = _rasterize_overlap(
@@ -1269,6 +1270,9 @@ class CrossingReviewApp(ctk.CTk):
         self.result_import_enabled_var = tk.BooleanVar(value=False)
         self.result_import_path_var = tk.StringVar(value="")
         self.result_import_min_coverage_var = tk.DoubleVar(value=DEFAULT_RESULT_OBB_COVERAGE)
+        self.result_import_area_min_var = tk.IntVar(value=0)
+        self.result_import_area_max_var = tk.IntVar(value=100000)
+        self._result_area_updating = False
         self.result_import_show_obb_var = tk.BooleanVar(value=True)
         self.result_import_status_var = tk.StringVar(value="result OBB: not loaded")
 
@@ -1631,14 +1635,6 @@ class CrossingReviewApp(ctk.CTk):
         self._toggle_area_outlier_method_controls()
 
         result = self.result_section
-        ctk.CTkLabel(
-            result,
-            text=("Reads a finished tracking result CSV and keeps an area\n"
-                  "outlier that holds exactly one OBB covering the blob.\n"
-                  "Blobs that are not area outliers are never changed."),
-            anchor="w",
-            justify="left",
-        ).pack(fill="x", padx=6, pady=(4, 2))
         ctk.CTkCheckBox(
             result,
             text="Use imported result OBB",
@@ -1660,6 +1656,18 @@ class CrossingReviewApp(ctk.CTk):
             self.result_import_params_frame, "Min OBB coverage",
             self.result_import_min_coverage_var, 0.0, 1.0, 0.1, is_float=True,
         )
+        self.result_import_area_min_scale = self._pack_scale_entry(
+            self.result_import_params_frame, "Minimum blob area",
+            self.result_import_area_min_var, 0, 100000, 1,
+            value_bounds=lambda: (0, int(self.result_import_area_max_var.get())),
+        )
+        self.result_import_area_max_scale = self._pack_scale_entry(
+            self.result_import_params_frame, "Maximum blob area",
+            self.result_import_area_max_var, 0, 100000, 1,
+            value_bounds=lambda: (int(self.result_import_area_min_var.get()), sys.maxsize),
+        )
+        for index, scale in enumerate((self.result_import_area_min_scale, self.result_import_area_max_scale)):
+            scale.bind("<Double-Button-1>", lambda _e, i=index: self._reset_result_area_bound(i))
         ctk.CTkCheckBox(
             self.result_import_params_frame, text="Show imported OBB",
             variable=self.result_import_show_obb_var,
@@ -1850,6 +1858,8 @@ class CrossingReviewApp(ctk.CTk):
             "result_import_enabled": self.result_import_enabled_var,
             "result_import_path": self.result_import_path_var,
             "result_import_min_coverage": self.result_import_min_coverage_var,
+            "result_import_area_min": self.result_import_area_min_var,
+            "result_import_area_max": self.result_import_area_max_var,
             "result_import_show_obb": self.result_import_show_obb_var,
             "show_overlay": self.show_overlay_var,
             "show_centers": self.show_centers_var,
@@ -2061,6 +2071,11 @@ class CrossingReviewApp(ctk.CTk):
         # Loading an older session must not inherit smoothing from the last one.
         self.single_blob_smoothing_enabled_var.set(bool(settings.get("single_blob_smoothing_enabled", False)))
         self.single_blob_smoothing_level_var.set(max(1, min(20, int(settings.get("single_blob_smoothing_level", 3)))))
+        # An old config uses the full video area, not another session's limits.
+        self.result_import_area_min_var.set(int(settings.get("result_import_area_min", 0)))
+        self.result_import_area_max_var.set(int(settings.get("result_import_area_max", self._result_area_default_max())))
+        self._current_result_area_bounds()
+        self._update_result_area_control_ranges()
 
         self._apply_frame_ranges_from_settings(settings)
         self._toggle_area_outlier_method_controls()
@@ -2680,7 +2695,7 @@ class CrossingReviewApp(ctk.CTk):
         var.trace_add("write", lambda *_: combo.set(var.get()))
         combo.pack(side="left", fill="x", expand=True)
 
-    def _pack_scale_entry(self, parent, label, var, lo, hi, resolution, is_float: bool = False, enable_var: Optional[tk.BooleanVar] = None, entry_prefix: str = "", slider_lo=None, slider_hi=None, end_sentinel: Optional[int] = None):
+    def _pack_scale_entry(self, parent, label, var, lo, hi, resolution, is_float: bool = False, enable_var: Optional[tk.BooleanVar] = None, entry_prefix: str = "", slider_lo=None, slider_hi=None, end_sentinel: Optional[int] = None, value_bounds=None):
         outer = ctk.CTkFrame(parent, corner_radius=0)
         outer.pack(fill="x", padx=6, pady=3)
 
@@ -2698,6 +2713,9 @@ class CrossingReviewApp(ctk.CTk):
 
         def clamp_value(v):
             lo, hi = float(spinbox.cget("from")), float(spinbox.cget("to"))
+            if value_bounds is not None:
+                bound_lo, bound_hi = value_bounds()
+                lo, hi = max(lo, bound_lo), min(hi, bound_hi)
             if is_float:
                 v = float(v)
                 v = max(float(lo), min(float(hi), v))
@@ -3341,6 +3359,8 @@ class CrossingReviewApp(ctk.CTk):
             self.result_import_min_coverage_var,
         ]:
             var.trace_add("write", lambda *_: self._on_result_import_changed())
+        for index, var in enumerate((self.result_import_area_min_var, self.result_import_area_max_var)):
+            var.trace_add("write", lambda *_, i=index: self._on_result_area_changed(i))
         self.result_import_show_obb_var.trace_add("write", lambda *_: self.redraw_current_frame())
         self.area_outlier_method_var.trace_add("write", lambda *_: self._on_area_outlier_method_changed())
         for var in [self.area_iqr_min_var, self.area_iqr_max_var, self.area_absolute_min_var, self.area_absolute_max_var]:
@@ -3452,6 +3472,13 @@ class CrossingReviewApp(ctk.CTk):
         self.result_obb_import = None
         self.result_import_path_var.set("")
         self.result_import_status_var.set(self._result_import_status_text())
+        self._result_area_updating = True
+        try:
+            self.result_import_area_min_var.set(0)
+            self.result_import_area_max_var.set(self._result_area_default_max())
+        finally:
+            self._result_area_updating = False
+        self._update_result_area_control_ranges()
         self._refresh_result_match()
 
         self._reset_view_state()
@@ -3763,6 +3790,8 @@ class CrossingReviewApp(ctk.CTk):
             int(bool(self.result_import_enabled_var.get() and self.result_obb_import is not None)),
             str(self.result_import_path_var.get()),
             float(self.result_import_min_coverage_var.get()),
+            int(self.result_import_area_min_var.get()),
+            int(self.result_import_area_max_var.get()),
         )
 
     def _protected_area_bounds(self) -> Optional[tuple[float, float]]:
@@ -4167,7 +4196,43 @@ class CrossingReviewApp(ctk.CTk):
         self._result_match = _ResultMatchConfig(
             min_coverage=float(self.result_import_min_coverage_var.get()),
             obbs_by_frame=self.result_obb_import.obbs_by_frame,
+            area_bounds=self._current_result_area_bounds(),
         )
+
+    def _result_area_default_max(self) -> int:
+        return max(1, int(self.reader.width) * int(self.reader.height)) if self.reader is not None else 100000
+
+    def _current_result_area_bounds(self) -> tuple[float, float]:
+        lo, hi = int(self.result_import_area_min_var.get()), int(self.result_import_area_max_var.get())
+        if not 0 <= lo <= hi:
+            raise ValueError("Result OBB area bounds require 0 <= minimum <= maximum.")
+        return float(lo), float(hi)
+
+    def _update_result_area_control_ranges(self):
+        limit = max(self._result_area_default_max(), int(self.result_import_area_min_var.get()),
+                    int(self.result_import_area_max_var.get()))
+        for scale in (self.result_import_area_min_scale, self.result_import_area_max_scale):
+            scale.set_value_range(0, limit, clamp_current=False)
+
+    def _on_result_area_changed(self, index: int):
+        if self._applying_config or self._result_area_updating:
+            return
+        variables = (self.result_import_area_min_var, self.result_import_area_max_var)
+        value, other = max(0, int(variables[index].get())), max(0, int(variables[1 - index].get()))
+        bounded = min(value, other) if index == 0 else max(value, other)
+        self._result_area_updating = True
+        try:
+            if bounded != int(variables[index].get()):
+                variables[index].set(bounded)
+            self._update_result_area_control_ranges()
+        finally:
+            self._result_area_updating = False
+        self._on_result_import_changed()
+
+    def _reset_result_area_bound(self, index: int):
+        variables = (self.result_import_area_min_var, self.result_import_area_max_var)
+        variables[index].set(0 if index == 0 else max(self._result_area_default_max(), int(variables[0].get())))
+        return "break"
 
     def _active_pre_result_path(self) -> str:
         """Return the loaded CSV used by the enabled Result OBB Import."""
@@ -4901,6 +4966,7 @@ class CrossingReviewApp(ctk.CTk):
             result_obb_coverage=blob.result_obb_coverage,
             result_single=blob.result_single,
             result_missing=blob.result_missing,
+            result_area_outlier=blob.result_area_outlier,
         )
 
     def _compute_iqr_stats(self, all_blobs: list[BlobMetrics]) -> dict[str, tuple[float, float, float, float]]:
@@ -5000,6 +5066,7 @@ class CrossingReviewApp(ctk.CTk):
             b.result_obb_count = 0
             b.result_obb_coverage = 0.0
             b.result_single = False
+            b.result_area_outlier = False
             b.is_crossing = bool(b.manual_outlier or b.area_outlier)
         if result_match is not None:
             image_shape = (self.reader.height, self.reader.width) if self.reader is not None else None
@@ -5016,15 +5083,13 @@ class CrossingReviewApp(ctk.CTk):
         blobs: list[BlobMetrics], result_match: "_ResultMatchConfig", *,
         frame_idx: Optional[int] = None, image_shape: Optional[tuple] = None,
     ) -> None:
-        """Clear the area-outlier flag of blobs the imported result explains as one animal.
+        """Judge confirmed Result single blobs with their own area range.
 
-        Area alone cannot tell a genuinely large individual from two individuals
-        in contact.  A blob that owns exactly one imported OBB, and whose area
-        that OBB covers, holds one animal however large it is.  Everything else
-        -- blobs inside the area bounds, Additional Outlier regions, blobs with two or
-        more OBBs, and blobs the result does not explain -- keeps the
-        classification the area rule already gave it. Unowned OBBs become
-        explicit outlier rectangles after matching all original segments.
+        Ordinary area flags remain available as Outlier Extraction diagnostics.
+        A real blob with one OBB and sufficient coverage uses the Result bounds
+        for its final crossing status. Manual regions, multiple-OBB blobs and
+        insufficient matches retain ordinary classification. Unowned OBBs
+        become explicit outlier rectangles after matching original segments.
         """
         by_frame: dict[int, list[BlobMetrics]] = {}
         for b in blobs:
@@ -5034,11 +5099,12 @@ class CrossingReviewApp(ctk.CTk):
         for frame_idx, frame_blobs in by_frame.items():
             unmatched = _match_result_obbs_to_blobs(frame_blobs, frame_idx, result_match)
             for b in frame_blobs:
-                if b.manual_outlier or not b.area_outlier:
+                if b.manual_outlier:
                     continue
                 if b.result_obb_count == 1 and b.result_obb_coverage >= result_match.min_coverage:
-                    b.result_single = True
-                    b.is_crossing = False
+                    b.result_area_outlier = not inside_bounds(b.area, result_match.area_bounds)
+                    b.result_single = b.area_outlier and not b.result_area_outlier
+                    b.is_crossing = b.result_area_outlier
             if image_shape is not None:
                 for poly in unmatched:
                     missing = _missing_result_obb_blob(poly, frame_idx, len(blobs), image_shape)
@@ -5421,8 +5487,10 @@ class CrossingReviewApp(ctk.CTk):
                 lines.append("IQR: 0")
         if self._result_match is not None:
             lines.append(f"Result OBBs: {blob.result_obb_count}")
-            if blob.result_obb_count == 1 and blob.area_outlier and not blob.manual_outlier:
+            if blob.result_obb_count == 1 and not blob.manual_outlier:
                 lines.append(f"OBB coverage: {blob.result_obb_coverage * 100:.0f}%")
+            if blob.result_area_outlier:
+                lines.append("Outside Result area bounds")
         lines.append("outlier" if blob.is_crossing else "non-outlier")
         if blob.result_single:
             lines.append("kept as one animal (imported OBB)")
