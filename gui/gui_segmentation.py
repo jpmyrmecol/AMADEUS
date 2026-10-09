@@ -3739,8 +3739,11 @@ class CrossingReviewApp(ctk.CTk):
             self.analysis_ready_var.set("analysis: not computed")
         else:
             self.analysis_ready_var.set("analysis: stale (segmentation changed; re-run Analyze)")
-        self.outlier_section_revealed = False
-        self._set_workflow_stage("analysis")
+        if self.outlier_section_revealed:
+            self.outlier_section_revealed = False
+            self._set_workflow_stage("analysis")
+        else:
+            self._update_analysis_dependent_buttons()
         if redraw:
             self.redraw_current_frame()
 
@@ -5668,8 +5671,8 @@ class CrossingReviewApp(ctk.CTk):
     def _default_output_dir(self) -> str:
         # Always <project_dir>/segmentation, where project_dir is the same
         # SESSION_PATH the downstream tracking config uses (see _project_dir):
-        # the video's own directory only when no config has been loaded/saved
-        # yet. This keeps every file this class reads or writes (config.json,
+        # the video's own directory only when neither a saved config nor an
+        # explicit session was provided. This keeps every file this class reads or writes (config.json,
         # background.png, the pickle) in one single, self-consistent location.
         project_dir = self._project_dir()
         if not project_dir:
@@ -5824,8 +5827,7 @@ class CrossingReviewApp(ctk.CTk):
         # (config.json lives in .../amadeus_<stem>/segmentation/, so one level
         # up is the project dir) over one derived from the video path. The
         # video is often not stored under the project's own directory tree,
-        # so anchoring on the video path would scatter session output away
-        # from where the config (and prior segmentation output) actually is.
+        # so prefer the config location or explicitly selected session.
         if self.config_path:
             config_dir = os.path.dirname(os.path.abspath(self.config_path))
             project_dir = os.path.dirname(config_dir)
