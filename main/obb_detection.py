@@ -397,7 +397,14 @@ def _draw_blob_preview_image(img: np.ndarray, records: list[dict], out_path: str
         if np.isfinite(direction):
             draw_direction_triangle_for_obb(img, pts, direction, OBB_COLOR, alpha=0.6, outline_thickness=1, scale=1.2)
     jpeg_params = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
-    return 1 if cv2.imwrite(out_path, img, jpeg_params) else 0
+    success, encoded = cv2.imencode('.jpg', img, jpeg_params)
+    if not success:
+        return 0
+    temp_path = f'{out_path}.tmp'
+    with open(temp_path, 'wb') as file:
+        file.write(encoded.tobytes())
+    os.replace(temp_path, out_path)
+    return 1
 
 
 def _render_blob_preview_batch(
@@ -588,6 +595,8 @@ def collect_candidate_df(
     batch_size: int = 16,
     nms_iou: float = 1.0,
     max_det: int = 300,
+    preview_dir: str | None = None,
+    preview_count: int = 0,
 ) -> pd.DataFrame:
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, first_frame)
@@ -598,6 +607,11 @@ def collect_candidate_df(
     batch_fids: list[int] = []
     batch_idx = 0
     temp_dir = tempfile.mkdtemp(prefix='od_batches_')
+    preview_frames = set(_preview_frame_ids(first_frame, last_frame, preview_count)) if preview_dir is not None else set()
+    if preview_dir is not None:
+        if os.path.isdir(preview_dir):
+            shutil.rmtree(preview_dir)
+        os.makedirs(preview_dir, exist_ok=True)
 
     def flush_batch():
         nonlocal batch_idx
@@ -624,6 +638,23 @@ def collect_candidate_df(
         if batch_rows:
             pd.DataFrame(batch_rows).to_pickle(os.path.join(temp_dir, f'{batch_idx:07d}.pkl'))
             batch_idx += 1
+        if preview_frames and any(fid in preview_frames for fid in batch_fids):
+            selected_rows = [row for row in batch_rows if row['frame'] in preview_frames]
+            selected_df = (
+                normalize_candidate_df_direction(pd.DataFrame(selected_rows), reference_is_yolo_class=True)
+                if selected_rows else make_empty_candidate_df()
+            )
+            selected_df = candidate_df_to_blob_df(filter_candidate_df_for_tracking(selected_df, min_conf))
+            selected_by_frame = (
+                {int(fid): _rows_to_preview_records(group) for fid, group in selected_df.groupby('frame')}
+                if not selected_df.empty else {}
+            )
+            for fid, img in zip(batch_fids, batch_imgs):
+                if fid not in preview_frames:
+                    continue
+                preview_path = os.path.join(preview_dir, f'{fid:06d}.jpg')
+                if not _draw_blob_preview_image(img.copy(), selected_by_frame.get(fid, []), preview_path):
+                    raise RuntimeError(f'Failed to write detection preview: {preview_path}')
         batch_imgs.clear()
         batch_fids.clear()
 
@@ -637,7 +668,6 @@ def collect_candidate_df(
             if len(batch_imgs) >= batch_size:
                 flush_batch()
         flush_batch()
-        cap.release()
 
         if batch_idx == 0:
             return make_empty_candidate_df()
@@ -649,6 +679,7 @@ def collect_candidate_df(
             df = normalize_candidate_df_direction(df, reference_is_yolo_class=True)
         return df
     finally:
+        cap.release()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 def main() -> None:
@@ -739,7 +770,8 @@ def main() -> None:
             blobs_direction_pickle = tracking_artifact_path(out_dir, 'all_blobs.pkl')
             preview_direction_dir = os.path.join(out_dir, 'preview')
 
-            if pickle_has_data(blobs_direction_pickle):
+            cached_detection = pickle_has_data(blobs_direction_pickle)
+            if cached_detection:
                 print(f'[SKIP] Import existing direction pickle without re-filtering: {blobs_direction_pickle}')
                 direction_rows_df = load_blob_pickle(blobs_direction_pickle)
             else:
@@ -751,6 +783,8 @@ def main() -> None:
                         _m, info['path'], info['first_frame'], info['last_frame'],
                         device, conf_th, _w, image_size=info['image_size'], batch_size=bs,
                         nms_iou=nms_iou, max_det=max_det,
+                        preview_dir=None if skip_pose_preview_frames else preview_direction_dir,
+                        preview_count=preview_count,
                     ),
                     info['batch_size'],
                 )
@@ -758,7 +792,7 @@ def main() -> None:
                 direction_rows_df = candidate_df_to_blob_df(filtered_direction_df, 'direction')
                 save_blob_pickle(blobs_direction_pickle, direction_rows_df)
 
-            if not skip_pose_preview_frames:
+            if not skip_pose_preview_frames and cached_detection:
                 render_blob_preview(info['path'], direction_rows_df, preview_direction_dir, info['first_frame'], info['last_frame'], preview_count, 'all_blobs')
 
 
