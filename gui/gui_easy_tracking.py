@@ -930,6 +930,7 @@ class EasyTrackingGUI(ctk.CTk):
             ("Very heavy", "super_heavy", first_choice_width, radio_gap),
             ("Heavy", "heavy", 66, 14),
             ("Light", "light", 66, radio_gap),
+            ("None", "none", 66, radio_gap),
         ]:
             command = self._show_super_heavy_overlap_warning if val == "super_heavy" else None
             self._overlap_radios.append(
@@ -2701,6 +2702,7 @@ class EasyTrackingGUI(ctk.CTk):
             "super_heavy": (0.01, 0.5),
             "heavy": (0.01, 0.5),
             "light": (0.01, 0.2),
+            "none": (0.0, 0.0),
         }.get(
             self._overlap.get(), (0.01, 0.5)
         )
@@ -3081,6 +3083,8 @@ class EasyTrackingGUI(ctk.CTk):
             cfg["MIN_OVERLAP"] = min_overlap
             cfg["MAX_OVERLAP"] = max_overlap
             self._ensure_config_section(cfg, "EMBEDDING")["ENABLE"] = embedding_enabled
+        if self._overlap.get() == "none":
+            self._ensure_config_section(cfg, "EMBEDDING")["ENABLE"] = False
         if answer_changed("single_animal_paste"):
             cfg["SINGLE_PASTE"] = single_animal_paste
         if answer_changed("delete_tmp_files"):
@@ -3636,7 +3640,11 @@ class EasyTrackingGUI(ctk.CTk):
         self._num_objects_sb.configure(state="disabled" if self._variable_count.get() else "normal")
         self._num_enter_button.configure(state="disabled" if self._variable_count.get() else "normal")
 
-        # Very heavy is heavy overlap plus embedding-based ID validation.
+        # Zero overlap is None; Very heavy is heavy plus embedding-based ID validation.
+        try:
+            min_overlap = float(cfg.get("MIN_OVERLAP", 0.01))
+        except (TypeError, ValueError):
+            min_overlap = 0.01
         try:
             max_overlap = float(cfg.get("MAX_OVERLAP", 0.5))
         except (TypeError, ValueError):
@@ -3651,7 +3659,9 @@ class EasyTrackingGUI(ctk.CTk):
             embedding_enabled = raw_embedding_enabled.strip().lower() in {"1", "true", "yes", "y", "on"}
         else:
             embedding_enabled = bool(raw_embedding_enabled)
-        if embedding_enabled:
+        if min_overlap == 0.0 and max_overlap == 0.0:
+            self._overlap.set("none")
+        elif embedding_enabled:
             self._overlap.set("super_heavy")
         elif max_overlap <= 0.2:
             self._overlap.set("light")

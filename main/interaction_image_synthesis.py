@@ -14,6 +14,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import cv2
 import numpy as np
 import yaml
+from adjacent_blob_placement import try_place_adjacent
 from animal_noise import apply_animal_noise, load_noise_background
 from batch_utils import auto_num_workers as _auto_num_workers, evenly_sample_sequence, tqdm
 import shutil
@@ -843,6 +844,14 @@ def try_place_donor(*, rng: random.Random, W: int, H: int, ref_rect: Tuple[int, 
                     min_cover: float, max_cover: float, max_tries: int, fallback_to_ref: bool = True, free_anywhere: bool = False,
                     allowed_overlap_full_u8: Optional[np.ndarray] = None,
                     external_object_masks: Optional[List[Tuple[int, int, np.ndarray]]] = None) -> Optional[Tuple[int, int]]:
+    if min_cover == 0.0 and max_cover == 0.0:
+        return try_place_adjacent(
+            rng=rng,
+            donor_mask=donor_mask_crop_u8,
+            occupied=placed_mask_full_u8,
+            contact_mask=placed_mask_full_u8 if allowed_overlap_full_u8 is None else allowed_overlap_full_u8,
+            max_tries=max_tries,
+        )
     xr, yr, wr, hr = ref_rect
     dh, dw = donor_mask_crop_u8.shape[:2]
     if free_anywhere:
@@ -976,7 +985,8 @@ def paste_one_donor(*, rng: random.Random, out_img_bgr: np.ndarray, placed_mask_
     xo, yo = placed_xy
 
     dh, dw = donor_mask_crop_u8.shape[:2]
-    under = choose_under(rng, paste_layer_mode, under_paste_prob)
+    none_overlap = min_cover == 0.0 and max_cover == 0.0
+    under = False if none_overlap else choose_under(rng, paste_layer_mode, under_paste_prob)
     roi = out_img_bgr[yo:yo + dh, xo:xo + dw]
     cover_pixels = count_overlap_rect_mask(
         xo, yo, donor_mask_crop_u8,
@@ -999,7 +1009,7 @@ def paste_one_donor(*, rng: random.Random, out_img_bgr: np.ndarray, placed_mask_
         mode_str = "under"
     else:
         visible_mask = donor_mask_crop_u8
-        mode_str = "over"
+        mode_str = "none" if none_overlap else "over"
 
     if cv2.countNonZero(visible_mask) == 0:
         return None
@@ -1362,8 +1372,10 @@ def build_free_group_patch(
     paste_min_obb_aspect_ratio: float = 1.1,
     mask_expansion_ratio: float = 1.0,
     obb_fit_mode: str = "min_area",
+    paste_scale_min: float = 1.0,
+    paste_scale_max: float = 1.0,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, List[dict]]]:
-    """Build a canvas patch with blobs arranged in contact as a chain.
+    """Build a group patch, attaching each None donor to the existing group.
 
     Returns (patch_bgr, union_mask_u8, local_objects) cropped to the bounding box,
     where each local_object has: mask, x, y, direction_vec, center_x, center_y, axis_length in patch coords.
@@ -1372,6 +1384,7 @@ def build_free_group_patch(
     if not donors:
         return None
 
+    none_overlap = min_cover == 0.0 and max_cover == 0.0
     loaded: List[Tuple[np.ndarray, np.ndarray, dict]] = []
     for d in donors:
         img, mask = donor_image_and_mask(
@@ -1389,8 +1402,11 @@ def build_free_group_patch(
         transformed = rotate_crop_with_mask_and_obb_scaling(
             img.copy(),
             mask.copy(),
-            0.0,
-            1.0,
+            rng.uniform(0.0, 360.0) if none_overlap else 0.0,
+            rng.uniform(
+                max(1e-6, min(paste_scale_min, paste_scale_max)),
+                max(1e-6, max(paste_scale_min, paste_scale_max)),
+            ) if none_overlap else 1.0,
             width_scale,
             height_scale,
             paste_min_obb_aspect_ratio,
@@ -1521,8 +1537,9 @@ def paste_free_group_into_frame(
     edge_feather_min_px: Optional[int] = None, edge_feather_max_px: Optional[int] = None,
     placement_region: Optional[Tuple[int, int, int, int]] = None,
     obb_fit_mode: str = "min_area",
+    preserve_contacts: bool = False,
 ) -> List[Tuple[int, int, np.ndarray]]:
-    """Rotate a free group patch and paste it into a free area of the frame.
+    """Paste a free group, preserving assembled None contacts without resampling.
 
     Returns per-donor (global_x, global_y, mask_crop) for each successfully annotated
     donor so the caller can extend the external-object list for subsequent placements.
@@ -1536,9 +1553,13 @@ def paste_free_group_into_frame(
     lo = max(1e-6, min(float(paste_scale_min), float(paste_scale_max)))
     hi = max(1e-6, max(float(paste_scale_min), float(paste_scale_max)))
 
-    angle = rng.uniform(0.0, 360.0)
-    scale = rng.uniform(lo, hi)
-    rot_patch, rot_union, M = rotate_crop_with_mask(patch, union_mask, angle, scale)
+    if preserve_contacts:
+        rot_patch, rot_union = patch, union_mask
+        M = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    else:
+        angle = rng.uniform(0.0, 360.0)
+        scale = rng.uniform(lo, hi)
+        rot_patch, rot_union, M = rotate_crop_with_mask(patch, union_mask, angle, scale)
     dh, dw = rot_union.shape[:2]
     if dw > W or dh > H:
         return []
@@ -1882,6 +1903,7 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
     mask_expansion_ratio = get_mask_expansion_ratio(cfg)
     min_cover = float(cfg.get("MIN_OVERLAP", 0.01))
     max_cover = float(cfg.get("MAX_OVERLAP", 0.5))
+    none_overlap = min_cover == 0.0 and max_cover == 0.0
     max_tries = int(cfg.get("MAX_TRIES", 100))
     paste_layer_mode = str(cfg.get("PASTE_LAYER_MODE", "mixed"))
     under_paste_prob = float(cfg.get("UNDER_PASTE_PROB", 0.5))
@@ -1910,7 +1932,14 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
     occupied = np.zeros((H, W), np.uint8)
     for item in ref_items:
         x, y, _, _ = item["rect"]
+        if none_overlap:
+            h, w = item["mask"].shape[:2]
+            if cv2.countNonZero(cv2.bitwise_and(occupied[int(y):int(y) + h, int(x):int(x) + w], item["mask"])):
+                return 0, 0, False
+            item.update(occlusion_state=0, overlap_pixels=0, overlap_ratio=0.0)
         paste_mask_into_full(occupied, item["mask"], int(x), int(y))
+    if none_overlap:
+        base_mask_lines = build_base_mask_lines(ref_items)
 
     label_lines = list(base_label_lines)
     mask_lines = list(base_mask_lines)
@@ -2008,6 +2037,8 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
                 raise ValueError("Pasted contact blob has no direction class. OBB label cannot be generated.")
             obj = donor_result_to_group_obj(res)
             group_objs.append(obj)
+            if none_overlap:
+                paste_mask_into_full(target_mask_full, obj["mask"], obj["x"], obj["y"])
             paste_mask_into_full(occupied, obj["mask"], obj["x"], obj["y"])
             pasted_donor_masks.append((int(obj["x"]), int(obj["y"]), obj["mask"]))
             # Update ext_objs so subsequent donors in this group see the newly placed one.
@@ -2066,9 +2097,10 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
             edge_feather_max_px=edge_feather_max_px,
             placement_region=localized_crop_region,
             obb_fit_mode=obb_fit_mode,
+            preserve_contacts=none_overlap,
         )
         for _ in range(n_free_single):
-            _result = build_free_group_patch(rng, [rng.choice(frame_donor_candidates)], cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode)
+            _result = build_free_group_patch(rng, [rng.choice(frame_donor_candidates)], cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode, paste_scale_min, paste_scale_max)
             if _result is not None:
                 _placed = paste_free_group_into_frame(**_free_kwargs, patch=_result[0], union_mask=_result[1], local_objects=_result[2])
                 if _placed:
@@ -2080,7 +2112,7 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
                 _cnt_free_failed += 1
         for _ in range(n_free_p2):
             _d2 = sample_donors_from_candidates(rng, frame_donor_candidates, 2)
-            _result = build_free_group_patch(rng, _d2, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode)
+            _result = build_free_group_patch(rng, _d2, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode, paste_scale_min, paste_scale_max)
             if _result is not None:
                 _placed = paste_free_group_into_frame(**_free_kwargs, patch=_result[0], union_mask=_result[1], local_objects=_result[2])
                 if _placed:
@@ -2092,7 +2124,7 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
                 _cnt_free_failed += 1
         for _ in range(n_free_p3):
             _d3 = sample_donors_from_candidates(rng, frame_donor_candidates, 3)
-            _result = build_free_group_patch(rng, _d3, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode)
+            _result = build_free_group_patch(rng, _d3, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode, paste_scale_min, paste_scale_max)
             if _result is not None:
                 _placed = paste_free_group_into_frame(**_free_kwargs, patch=_result[0], union_mask=_result[1], local_objects=_result[2])
                 if _placed:

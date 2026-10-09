@@ -3923,7 +3923,10 @@ def main() -> None:
     print(f'correction: workers={num_workers} ({worker_mode})')
     print('correction: RAM worker caps are adjusted per correction data.')
     embedding_cfg  = dict(cfg.get('EMBEDDING', {}) or {})
-    embedding_enabled = _cfg_bool(embedding_cfg.get('ENABLE', False))
+    embedding_enabled = _cfg_bool(embedding_cfg.get('ENABLE', False)) and not (
+        float(cfg.get('MIN_OVERLAP', 0.01)) == 0.0
+        and float(cfg.get('MAX_OVERLAP', 0.5)) == 0.0
+    )
 
     session_path  = str(cfg['SESSION_PATH'])
     num_objects   = int(cfg['NUM_OBJECTS'])

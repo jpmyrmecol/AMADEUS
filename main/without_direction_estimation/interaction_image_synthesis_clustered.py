@@ -34,6 +34,7 @@ from without_direction_estimation.interaction_image_synthesis import (
     preview_additional_frame_jobs,
     preview_frame_set_ids_evenly,
     build_frame_items,
+    build_base_mask_lines,
     choose_under,
     donor_image_and_mask,
     donor_result_to_group_obj,
@@ -193,6 +194,22 @@ def scale_obb_points_about_center(obb_pts: np.ndarray, scale: float) -> np.ndarr
     return (c.reshape(1, 2) + (pts - c.reshape(1, 2)) * s).astype(np.float32)
 
 
+def raster_safe_cluster_obb(obb_pts: np.ndarray) -> np.ndarray:
+    """Use full instance bounds with clearance for integer placement rounding.
+
+    Shrinking OBBs is useful for overlapping modes, but would force true mask
+    intersections in None.  Expanding each full OBB edge by 0.75 pixels also
+    keeps shared rasterized edges disjoint after rounding a rotated placement.
+    """
+    pts = ensure_clockwise(np.asarray(obb_pts, dtype=np.float32).reshape(4, 2))
+    center = obb_center(pts)
+    axes = [normalize_vec2(tuple(pts[1] - pts[0])), normalize_vec2(tuple(pts[3] - pts[0]))]
+    rel = pts - center
+    for axis in axes:
+        pts += np.sign(rel @ axis).reshape(-1, 1) * axis.reshape(1, 2) * 0.75
+    return pts.astype(np.float32)
+
+
 
 
 def scale_obb_points_long_short(obb_pts: np.ndarray, long_scale: float, short_scale: float) -> np.ndarray:
@@ -320,6 +337,7 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
     # Cluster-specific parameters are intentionally separated from normal interaction_image_synthesis.py.
     min_cover = float(cfg.get("MIN_OVERLAP", 0.01))
     max_cover = float(cfg.get("MAX_OVERLAP", 0.5))
+    no_overlap = min_cover == 0.0 and max_cover == 0.0
     max_tries = int(cfg.get("MAX_TRIES", 100))
     paste_layer_mode = str(cfg.get("PASTE_LAYER_MODE", "mixed"))
     under_paste_prob = float(cfg.get("UNDER_PASTE_PROB", 0.5))
@@ -345,6 +363,16 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
     cluster_obb_fit_scale_short = float(cfg.get("CLUSTER_FIT_SHORT", 0.8))
     parallel_break_prob = float(cfg.get("CLUSTER_BREAK_PROB", 0.20))
     cluster_donor_scope = "same_frame"
+
+    if no_overlap:
+        base_occupied = np.zeros((H, W), np.uint8)
+        for item in ref_items:
+            x, y, _, _ = item["rect"]
+            if full_mask_overlap(base_occupied, item["mask"], int(x), int(y)) > 0:
+                return 0, 0, 0
+            item.update(occlusion_state=0, overlap_pixels=0, overlap_ratio=0.0)
+            paste_mask_into_full(base_occupied, item["mask"], int(x), int(y))
+        base_mask_lines = build_base_mask_lines(ref_items)
 
 
     def _generate_one_set(repeat_index: int) -> Tuple[int, int, int]:
@@ -400,10 +428,13 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
 
             center_mask_full = full_mask_from_local(target["mask"], int(cx), int(cy), H, W)
             group_mask_full = np.zeros((H, W), np.uint8)
-            target_fit_obb_pts = scale_obb_points_long_short(
-                target["obb_pts"],
-                float(cluster_obb_fit_scale_long),
-                float(cluster_obb_fit_scale_short),
+            target_fit_obb_pts = (
+                raster_safe_cluster_obb(target["obb_pts"]) if no_overlap else
+                scale_obb_points_long_short(
+                    target["obb_pts"],
+                    float(cluster_obb_fit_scale_long),
+                    float(cluster_obb_fit_scale_short),
+                )
             )
             group_obb_mask_full = polygon_mask_from_points(target_fit_obb_pts, H, W)
             target_center = obb_center(target_fit_obb_pts).astype(np.float32)
@@ -511,10 +542,13 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
                 if donor_obb_local is None:
                     return None
                 donor_obb_local = ensure_clockwise(donor_obb_local)
-                donor_fit_obb_local = scale_obb_points_long_short(
-                    donor_obb_local,
-                    float(cluster_obb_fit_scale_long),
-                    float(cluster_obb_fit_scale_short),
+                donor_fit_obb_local = (
+                    raster_safe_cluster_obb(donor_obb_local) if no_overlap else
+                    scale_obb_points_long_short(
+                        donor_obb_local,
+                        float(cluster_obb_fit_scale_long),
+                        float(cluster_obb_fit_scale_short),
+                    )
                 )
                 donor_fit_center_local = obb_center(donor_fit_obb_local).astype(np.float32)
                 rel = donor_fit_obb_local - donor_fit_center_local.reshape(1, 2)
@@ -740,6 +774,10 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
                                 allowed_contact_overlap_pixels=0,
                             )
                             if reject:
+                                continue
+                            # None retains OBB candidate geometry, but the actual instance
+                            # masks must also be disjoint from every accepted animal.
+                            if no_overlap and full_mask_overlap(occupied, prep["rot_mask"], xo, yo) > 0:
                                 continue
                             # Inline external pairwise check for diagonal gap candidate.
                             _rot_m_d = prep["rot_mask"]
@@ -1029,6 +1067,8 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
                     )
                     if reject:
                         return
+                    if no_overlap and full_mask_overlap(occupied, prep["rot_mask"], xo, yo) > 0:
+                        return
                     # Inline external pairwise check: union precheck then per-object.
                     _rot_m = prep["rot_mask"]
                     _d_area_m = max(1, cv2.countNonZero(_rot_m))
@@ -1117,6 +1157,8 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
                 rot_img = prep["rot_img"]
                 rot_mask = prep["rot_mask"]
                 M = prep["M"]
+                if no_overlap and full_mask_overlap(occupied, rot_mask, xo, yo) > 0:
+                    return None
                 roi = out_img[yo:yo + dh, xo:xo + dw]
                 image_backup = roi.copy()
                 occupied_backup = occupied[yo:yo + dh, xo:xo + dw].copy()
@@ -1124,7 +1166,10 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
                 group_obb_backup = group_obb_mask_full[yo:yo + dh, xo:xo + dw].copy()
 
                 under = choose_under(rng, paste_layer_mode, under_paste_prob)
-                if under:
+                if no_overlap:
+                    visible_mask = rot_mask
+                    mode_str = "none"
+                elif under:
                     occluder_roi = cv2.bitwise_or(center_mask_full[yo:yo + dh, xo:xo + dw], group_mask_full[yo:yo + dh, xo:xo + dw])
                     if occluder_margin_px != 0:
                         k = 2 * abs(int(occluder_margin_px)) + 1

@@ -2010,7 +2010,7 @@ class ConfigGUI(ctk.CTk):
 
         for section_name in ("Create single animal images", "Create with crossing"):
             cfg.update({k: self._cast(k, w.get()) for k, w in self.sections[section_name]["widgets"].items()})
-        cfg["MIN_OVERLAP"] = 0.01
+        cfg["MIN_OVERLAP"] = 0.0 if float(cfg.get("MAX_OVERLAP", 0.5)) == 0.0 else 0.01
 
         if bool(cfg.get("NOISE_ENABLE", False)):
             noise_size_percent = cfg.get("NOISE_SIZE_PERCENT")
@@ -2233,6 +2233,8 @@ class ConfigGUI(ctk.CTk):
 
         cfg["VARIABLE_NUM_OBJECTS"] = self.variable_count.get()
         cfg["WITHOUT_DIRECTION_ESTIMATION"] = self.without_direction.get()
+        if cfg["MIN_OVERLAP"] == 0.0 and float(cfg.get("MAX_OVERLAP", 0.5)) == 0.0:
+            cfg["EMBEDDING"]["ENABLE"] = False
         if not cfg["VARIABLE_NUM_OBJECTS"] and int(cfg.get("NUM_OBJECTS", 1)) == 1 and not bool(cfg["SINGLE_PASTE"]):
             cfg["skip_paste_blobs_with_crossing"] = True
             cfg["skip_paste_blobs_clustered"] = True
