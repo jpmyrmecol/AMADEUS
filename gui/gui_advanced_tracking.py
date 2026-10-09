@@ -59,7 +59,7 @@ from experiment_utils import (
     parse_lr0_values,
     parse_lrf_values,
 )
-from path_utils import relativize_config_paths, resolve_config_paths
+from path_utils import relativize_config_paths, resolve_config_paths, resolve_path
 from segmentation_metadata import (
     read_segmentation_metadata,
     segmentation_paths_for_session,
@@ -358,6 +358,14 @@ class ConfigGUI(ctk.CTk):
         self.basic_entries["TRACKING_VIDEO_PATH"] = ent
         ctk.CTkButton(row, text="Reference", width=90, command=lambda: self.browse_path("TRACKING_VIDEO_PATH")).pack(side="left", padx=4)
         ctk.CTkCheckBox(row, text="Select Directory", variable=self.path_mode["TRACKING_VIDEO_PATH_IS_DIR"]).pack(side="left", padx=6)
+
+        row = _layout_frame(basic)
+        row.pack(fill="x", pady=4)
+        ctk.CTkLabel(row, text="Prior Result CSV (Optional)", width=170, anchor="w").pack(side="left", padx=(6, 0))
+        ent = ctk.CTkEntry(row, width=300)
+        ent.pack(side="left", expand=True, fill="x", padx=5)
+        self.basic_entries["PRE_RESULT_PATH"] = ent
+        ctk.CTkButton(row, text="Reference", width=90, command=lambda: self.browse_path("PRE_RESULT_PATH")).pack(side="left", padx=4)
 
         # Number of Objects / Training Image Size
         row = _layout_frame(basic)
@@ -1034,7 +1042,12 @@ class ConfigGUI(ctk.CTk):
         video_path = self.basic_entries["TRAINING_VIDEO_PATH"].get().strip()
         if not video_path:
             return
-        meta = read_segmentation_metadata(segmentation_pickle_path_for_video(video_path))
+        session_path = self.basic_entries["SESSION_PATH"].get().strip()
+        pickle_path = (
+            segmentation_paths_for_session(session_path, video_path)[0]
+            if session_path else segmentation_pickle_path_for_video(video_path)
+        )
+        meta = read_segmentation_metadata(pickle_path)
         if not meta:
             return
 
@@ -1045,6 +1058,8 @@ class ConfigGUI(ctk.CTk):
         _set_widget_value(self.training_range["start"], meta["training_frame_start"])
         _set_widget_value(self.training_range["end"], meta["training_frame_end"])
         _set_widget_value(self.basic_entries["FRAME_INTERVAL"], meta["training_frame_interval"])
+        if not self._loaded_config_path and not self.basic_entries["PRE_RESULT_PATH"].get().strip():
+            self.basic_entries["PRE_RESULT_PATH"].insert(0, meta.get("pre_result_path", ""))
         self._loaded_training_video_path = video_path
         self._refresh_default_markers()
 
@@ -1740,6 +1755,12 @@ class ConfigGUI(ctk.CTk):
             else:
                 start_dir = os.path.dirname(initial) if os.path.exists(initial) else initial
                 path = self._browse_analysis_video(start_dir, "Select tracking video")
+        elif key == "PRE_RESULT_PATH":
+            start_dir = os.path.dirname(initial) if os.path.isfile(initial) else initial
+            path = filedialog.askopenfilename(
+                title="Select prior result CSV", filetypes=[("Result CSV files", "*.csv"), ("All files", "*.*")],
+                initialdir=start_dir if os.path.isdir(start_dir) else None,
+            )
         else:
             path = None
 
@@ -1846,6 +1867,7 @@ class ConfigGUI(ctk.CTk):
             val = cfg.get(key)
             if val is not None and key in self.basic_entries:
                 _set_widget_value(self.basic_entries[key], val)
+        _set_widget_value(self.basic_entries["PRE_RESULT_PATH"], cfg.get("PRE_RESULT_PATH", ""))
 
         self.variable_count.set(bool(cfg.get("VARIABLE_NUM_OBJECTS", False)))
         self.without_direction.set(bool(cfg.get("WITHOUT_DIRECTION_ESTIMATION", False)))
@@ -1977,6 +1999,8 @@ class ConfigGUI(ctk.CTk):
                     cfg[k] = int(val_str) if val_str else defaults[k]
                 except ValueError:
                     cfg[k] = defaults[k]
+            elif k == "PRE_RESULT_PATH":
+                cfg[k] = resolve_path(val_str, cfg.get("SESSION_PATH", ""))
             else:
                 cfg[k] = val_str
 

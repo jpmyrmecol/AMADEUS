@@ -2893,6 +2893,7 @@ class EasyTrackingGUI(ctk.CTk):
             "SESSION_PATH":               session,
             "TRAINING_VIDEO_PATH":        video,
             "TRACKING_VIDEO_PATH":        tracking_video,
+            "PRE_RESULT_PATH":            seg_meta.get("pre_result_path", "") if not has_loaded_config else "",
             "TRACKING_VIDEO_FILES":       tracking_video_files,
             "NUM_OBJECTS":                num_objects,
             "TRAIN_IMG_SIZE":             geometry_img_size,

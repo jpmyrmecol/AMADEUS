@@ -5,6 +5,11 @@ import os
 import pickle
 from typing import Any
 
+try:
+    from .path_utils import resolve_path
+except ImportError:  # Direct execution of main scripts.
+    from path_utils import resolve_path
+
 
 def load_pickle(path: str) -> Any:
     with open(path, "rb") as f:
@@ -49,7 +54,9 @@ def read_segmentation_metadata(pickle_path: str) -> dict:
     if not pickle_path or not os.path.exists(pickle_path):
         return {}
     obj = load_pickle(pickle_path)
-    return segmentation_metadata_from_object(obj)
+    metadata = segmentation_metadata_from_object(obj)
+    metadata["pre_result_path"] = resolve_path(metadata["pre_result_path"], os.path.dirname(os.path.abspath(pickle_path)))
+    return metadata
 
 
 def segmentation_metadata_from_object(obj: Any) -> dict:
@@ -90,5 +97,6 @@ def segmentation_metadata_from_object(obj: Any) -> dict:
         # Explicit earlier end frames remain unchanged.
         "training_frame_end": -1 if tr_end == last else tr_end,
         "training_frame_interval": interval,
+        "pre_result_path": str(getattr(obj, "pre_result_path", "") or "").strip(),
         "has_frame_range_metadata": True,
     }

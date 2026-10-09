@@ -8,6 +8,7 @@ import itertools
 import math
 import os
 import pickle
+import re
 import sys
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -138,6 +139,81 @@ class BlobRecord:
     erase_reasons_pre_direction: List[str] = field(default_factory=list)
     erase_reasons_final: List[str] = field(default_factory=list)
     direction_failure_reasons: List[str] = field(default_factory=list)
+    direction_source: str = ""
+    result_rescue_reason: str = ""
+    result_track_id: Optional[int] = None
+    result_blob_coverage: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class ResultObb:
+    track_id: int
+    cx: float
+    cy: float
+    w: float
+    h: float
+    heading: float
+
+
+def load_pre_result_csv(
+    path: str, frame_ids: Optional[Iterable[int]] = None,
+) -> Dict[int, List[ResultObb]]:
+    """Read headed AMADEUS results, retaining only requested absolute frames.
+
+    Missing detections/headings are normal Result cells. Malformed schemas,
+    numbers and duplicate/fractional frame indices are errors, not opt-outs.
+    """
+    selected = None if frame_ids is None else set(frame_ids)
+    result: Dict[int, List[ResultObb]] = {}
+    seen_frames = set()
+    usable_count = 0
+    try:
+        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            names = [str(name).strip() for name in (reader.fieldnames or [])]
+            if len(names) != len(set(names)) or "frame" not in names:
+                raise ValueError("expected unique columns including 'frame'")
+            reader.fieldnames = names
+            track_ids = sorted(int(m.group(1)) for name in names if (m := re.fullmatch(r"cx(\d+)", name)))
+            if not track_ids:
+                raise ValueError("missing cx<ID>, cy<ID>, w<ID>, h<ID>, heading<ID> columns")
+            for tid in track_ids:
+                missing = [f"{key}{tid}" for key in ("cx", "cy", "w", "h", "heading") if f"{key}{tid}" not in names]
+                if missing:
+                    raise ValueError(f"missing columns: {', '.join(missing)}")
+            for row in reader:
+                if None in row or any(value is None for value in row.values()):
+                    raise ValueError(f"row {reader.line_num}: column count does not match the header")
+                frame_value = float(row["frame"])
+                if not math.isfinite(frame_value) or frame_value < 0 or not frame_value.is_integer():
+                    raise ValueError(f"row {reader.line_num}: frame must be a nonnegative integer")
+                fid = int(frame_value)
+                if fid in seen_frames:
+                    raise ValueError(f"row {reader.line_num}: duplicate frame {fid}")
+                seen_frames.add(fid)
+                boxes = []
+                for tid in track_ids:
+                    try:
+                        values = [float(row[f"{key}{tid}"]) if row[f"{key}{tid}"].strip() else float("nan")
+                                  for key in ("cx", "cy", "w", "h", "heading")]
+                    except ValueError as exc:
+                        raise ValueError(f"row {reader.line_num}, ID {tid}: invalid OBB number") from exc
+                    cx, cy, w, h, heading = values
+                    if any(math.isfinite(v) and abs(v) > np.iinfo(np.int32).max / 4 for v in values[:4]):
+                        raise ValueError(f"row {reader.line_num}, ID {tid}: OBB exceeds raster coordinate limits")
+                    if all(math.isfinite(v) for v in values) and w >= h > 0 and 0.0 <= heading <= 360.0:
+                        usable_count += 1
+                    # An unheaded/invalid box with a known centre can still
+                    # establish that two detections share a segmentation blob.
+                    if math.isfinite(cx) and math.isfinite(cy):
+                        boxes.append(ResultObb(tid, *values))
+                if boxes and (selected is None or fid in selected):
+                    result[fid] = boxes
+    except (OSError, ValueError, UnicodeError, csv.Error) as exc:
+        raise ValueError(f"PRE_RESULT_PATH '{path}' could not be read as an AMADEUS Result CSV: {exc}") from exc
+    if not usable_count:
+        raise ValueError(f"PRE_RESULT_PATH '{path}' contains no usable headed OBBs")
+    return result
 
 
 
@@ -930,7 +1006,193 @@ def estimate_directions(blob_records: Dict[int, List[BlobRecord]], cfg: dict, in
     return stats
 
 
-def save_blob_classification_csv(blob_records: Dict[int, List[BlobRecord]], bounds: Dict[str, Tuple[float, float]], out_dir: str) -> str:
+def _result_obb_points(box: ResultObb) -> Optional[np.ndarray]:
+    if not all(math.isfinite(v) for v in (box.cx, box.cy, box.w, box.h, box.heading)):
+        return None
+    if not (box.w >= box.h > 0 and 0.0 <= box.heading <= 360.0):
+        return None
+    # Match OpenCV's contour-fit rectangle representation, including exact
+    # cardinal rotations; hand-built sin/cos corners can perturb shared edges.
+    return cv2.boxPoints(((box.cx, box.cy), (box.w, box.h), (box.heading - 90.0) % 180.0))
+
+
+def _result_obb_iou(blob_obb: np.ndarray, box: ResultObb) -> float:
+    """Intersect canonical long/short rectangles, including coincident edges."""
+    center, (w, h), angle = cv2.minAreaRect(blob_obb)
+    if h > w:
+        w, h, angle = h, w, angle + 90.0
+    blob_rect = (center, (w, h), angle % 180.0)
+    result_rect = ((box.cx, box.cy), (box.w, box.h), (box.heading - 90.0) % 180.0)
+    status, points = cv2.rotatedRectangleIntersection(blob_rect, result_rect)
+    if status == cv2.INTERSECT_NONE:
+        return 0.0
+    blob_area, result_area = float(w * h), float(box.w * box.h)
+    intersection = (
+        min(blob_area, result_area) if status == cv2.INTERSECT_FULL
+        else float(cv2.contourArea(cv2.convexHull(points)))
+    )
+    union = blob_area + result_area - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def rescue_directions_from_result(
+    blob_records: Dict[int, List[BlobRecord]],
+    cfg: dict,
+    result_by_frame: Dict[int, List[ResultObb]],
+    refine_deleted_keys: Iterable[Tuple[int, int]] = (),
+) -> Dict[str, int]:
+    """Rescue only direction failures using conservative frame-local matches.
+
+    Imported IDs are audit information only. Trajectories, source contours,
+    hard segmentation exclusions and explicit refinement deletions are kept.
+    """
+    direction_reasons = {
+        "disp_too_small", "motion_ambiguous", "short_run", "traj_unmatched",
+        "insufficient_valid_frames", "direction_unassigned",
+    }
+    deleted = set(refine_deleted_keys)
+    stats = Counter(trajectory_accepted_blobs=0, result_rescue_candidates=0,
+                    result_rescued_blobs=0, result_rescue_failed_blobs=0,
+                    result_rescue_ineligible_blobs=0)
+    fit_mode = cfg.get("OBB_FIT_MODE", "min_area")
+    for fid, blobs in blob_records.items():
+        if all(not blob.erase_final and blob.class_id is not None for blob in blobs):
+            for blob in blobs:
+                blob.direction_source = "trajectory"
+            stats["trajectory_accepted_blobs"] += len(blobs)
+            continue
+        boxes = result_by_frame.get(fid, [])
+        polygons = [_result_obb_points(box) for box in boxes]
+        masks = []
+        areas = []
+        overlaps = np.zeros((len(blobs), len(boxes)), dtype=np.int64)
+        for bi, blob in enumerate(blobs):
+            x, y, w, h = blob.rect
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.drawContours(mask, [blob.contour], -1, 1, cv2.FILLED, offset=(-x, -y))
+            masks.append(mask)
+            areas.append(cv2.countNonZero(mask))
+            for ri, poly in enumerate(polygons):
+                if poly is None or poly[:, 0].max() < x or poly[:, 0].min() >= x + w or poly[:, 1].max() < y or poly[:, 1].min() >= y + h:
+                    continue
+                obb_mask = np.zeros_like(mask)
+                cv2.fillConvexPoly(obb_mask, np.round(poly - (x, y)).astype(np.int32), 1)
+                overlaps[bi, ri] = cv2.countNonZero(mask & obb_mask)
+        owners = []
+        for ri, box in enumerate(boxes):
+            inside = [bi for bi, blob in enumerate(blobs)
+                      if cv2.pointPolygonTest(blob.contour, (box.cx, box.cy), False) >= 0]
+            if inside:
+                owners.append(inside[0] if len(inside) == 1 else -1)
+            elif blobs and overlaps[:, ri].max() > 0:
+                best = np.flatnonzero(overlaps[:, ri] == overlaps[:, ri].max())
+                owners.append(int(best[0]) if len(best) == 1 else -1)
+            else:
+                owners.append(-1)
+
+        for bi, blob in enumerate(blobs):
+            if blob.class_id is not None:
+                blob.direction_source = "trajectory"
+            if not blob.erase_final and blob.class_id is not None:
+                stats["trajectory_accepted_blobs"] += 1
+                continue
+
+            def reject(reason: str) -> None:
+                blob.result_rescue_reason = reason
+                stats[f"result_rescue_rejected:{reason}"] += 1
+
+            if (fid, blob.blob_index) in deleted:
+                stats["result_rescue_ineligible_blobs"] += 1
+                reject("refine_deleted")
+                continue
+            if blob.erase_stage1 or blob.pickle_outlier:
+                stats["result_rescue_ineligible_blobs"] += 1
+                reject("stage1_excluded")
+                continue
+            if blob.class_id is not None or not blob.erase_reasons_final or not set(blob.erase_reasons_final) <= direction_reasons:
+                stats["result_rescue_ineligible_blobs"] += 1
+                reject("not_direction_failure")
+                continue
+            stats["result_rescue_candidates"] += 1
+            if not boxes:
+                reject("no_result_frame")
+                continue
+            owned = [ri for ri, owner in enumerate(owners) if owner == bi]
+            if not owned:
+                reject("no_matching_obb")
+                continue
+            if len(owned) != 1:
+                reject("multiple_result_obbs")
+                continue
+            ri = owned[0]
+            box, poly = boxes[ri], polygons[ri]
+            blob.result_track_id = box.track_id
+            if not math.isfinite(box.heading) or not 0.0 <= box.heading <= 360.0:
+                reject("heading_invalid")
+                continue
+            if poly is None:
+                reject("invalid_obb")
+                continue
+            if cv2.pointPolygonTest(blob.contour, (box.cx, box.cy), False) < 0:
+                reject("center_outside_blob")
+                continue
+            coverage = float(overlaps[bi, ri]) / max(1, areas[bi])
+            blob.result_blob_coverage = coverage
+            if coverage < 0.9:
+                reject("insufficient_blob_coverage")
+                continue
+            if sum(overlaps[bi, rj] / max(1, areas[bi]) > 0.1 for rj in range(len(boxes))) > 1:
+                reject("competing_result_obb")
+                continue
+            if any(overlaps[bj, ri] / max(1, areas[bj]) > 0.1 for bj in range(len(blobs)) if bj != bi):
+                reject("obb_spans_multiple_blobs")
+                continue
+            x, y, w, h = blob.rect
+            overlapping_blob = False
+            for bj, other in enumerate(blobs):
+                if bj == bi:
+                    continue
+                ox, oy, ow, oh = other.rect
+                x0, y0, x1, y1 = max(x, ox), max(y, oy), min(x + w, ox + ow), min(y + h, oy + oh)
+                if x0 < x1 and y0 < y1 and np.any(masks[bi][y0-y:y1-y, x0-x:x1-x] & masks[bj][y0-oy:y1-oy, x0-ox:x1-ox]):
+                    overlapping_blob = True
+                    break
+            if overlapping_blob:
+                reject("overlapping_segmentation")
+                continue
+            axis, long_side, aspect, blob_obb = _obb_geometry_from_contour(blob.contour, fit_mode)
+            if axis is None or aspect is None or aspect < max(1.25, get_min_obb_aspect_ratio(cfg)):
+                reject("axis_ambiguous")
+                continue
+            short_side = long_side / aspect
+            if not (0.75 <= box.w / long_side <= 1.25 and short_side > 0 and 0.75 <= box.h / short_side <= 1.25):
+                reject("obb_size_mismatch")
+                continue
+            theta = math.radians(box.heading % 360.0)
+            direction = (math.sin(theta), -math.cos(theta))
+            if abs(float(np.dot(axis, direction))) < math.cos(math.radians(20.0)):
+                reject("heading_axis_mismatch")
+                continue
+            if _result_obb_iou(blob_obb, box) < 0.7:
+                reject("obb_shape_mismatch")
+                continue
+            length = contour_axis_length(blob.center, direction, blob.contour)
+            if length is None:
+                reject("axis_length_invalid")
+                continue
+            blob.class_id = angle_to_class(*direction)
+            blob.direction_vec = direction
+            blob.axis_length = length
+            blob.direction_source = "result"
+            blob.result_rescue_reason = "rescued"
+            blob.erase_final = False
+            blob.erase_reasons_final = []
+            stats["result_rescued_blobs"] += 1
+    stats["result_rescue_failed_blobs"] = stats["result_rescue_candidates"] - stats["result_rescued_blobs"]
+    return dict(stats)
+
+
+def save_blob_classification_csv(blob_records: Dict[int, List[BlobRecord]], bounds: Dict[str, Tuple[float, float]], out_dir: str, include_result_info: bool = False) -> str:
     path = os.path.join(out_dir, "blob_classification.csv")
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -988,7 +1250,8 @@ def save_blob_classification_csv(blob_records: Dict[int, List[BlobRecord]], boun
             "obb_major_axis_hi",
             "jump_lo",
             "jump_hi",
-        ])
+        ] + (["direction_source", "result_rescue_reason", "result_track_id", "result_blob_coverage"]
+             if include_result_info else []))
         for fid in sorted(blob_records.keys()):
             for b in blob_records[fid]:
                 dx = "" if b.direction_vec is None else f"{b.direction_vec[0]:.6f}"
@@ -1049,7 +1312,10 @@ def save_blob_classification_csv(blob_records: Dict[int, List[BlobRecord]], boun
                     f"{bounds['obb_major_axis_bounds'][1]:.3f}",
                     f"{bounds['jump_bounds'][0]:.3f}" if np.isfinite(bounds['jump_bounds'][0]) else str(bounds['jump_bounds'][0]),
                     f"{bounds['jump_bounds'][1]:.3f}" if np.isfinite(bounds['jump_bounds'][1]) else str(bounds['jump_bounds'][1]),
-                ])
+                ] + ([b.direction_source, b.result_rescue_reason,
+                      "" if b.result_track_id is None else b.result_track_id,
+                      "" if b.result_blob_coverage is None else f"{b.result_blob_coverage:.6f}"]
+                     if include_result_info else []))
     return path
 
 
@@ -1879,6 +2145,9 @@ def save_stats(blob_records: Dict[int, List[BlobRecord]], pre_direction_stats: D
     ]
     for metric, kind, value in meta_items:
         add_metric(metric, kind, value)
+    for metric, value in direction_stats.items():
+        if metric.startswith("result_rescue") or metric in {"trajectory_accepted_blobs", "result_rescued_blobs"}:
+            add_metric(metric, "meta", value)
 
     for reason, count in sorted((save_stats_dict.get("empty_frame_reason_counts") or {}).items()):
         add_metric(f"empty_frame_reason:{reason}", "removed_blob_count", int(count))
@@ -1985,6 +2254,8 @@ def main() -> None:
 
     direction_frame_indices = list(range(first_frame, last_frame + 1, direction_frame_interval))
     output_frame_indices = list(range(first_frame, last_frame + 1, output_frame_interval))
+    pre_result_path = str(cfg.get("PRE_RESULT_PATH", "") or "").strip()
+    pre_result_by_frame = load_pre_result_csv(pre_result_path, direction_frame_indices) if pre_result_path else None
 
     out_dir = os.path.join(session_path, SINGLE_ANIMAL_IMAGES_DIR_NAME)
     reset_without_crossing_output_dir(out_dir)
@@ -2023,7 +2294,15 @@ def main() -> None:
     pre_direction_stats = classify_blobs_pre_direction(blob_records, cfg)
     pre_direction_run_csv_path = save_pre_direction_run_csv(blob_records, out_dir)
     direction_stats = estimate_directions(blob_records, cfg, float(bounds.get("individual_distance_px", 0.0)))
-    refine_delete_stats = apply_refine_deletions(blob_records, load_refine_delete_map(session_path))
+    refine_delete_map = load_refine_delete_map(session_path)
+    refine_delete_stats = apply_refine_deletions(blob_records, refine_delete_map)
+    if pre_result_by_frame is not None:
+        direction_stats.update(rescue_directions_from_result(blob_records, cfg, pre_result_by_frame, refine_delete_map))
+        print(
+            "[PRE_RESULT_PATH] trajectory accepted="
+            f"{direction_stats['trajectory_accepted_blobs']}, result rescued={direction_stats['result_rescued_blobs']}, "
+            f"result rescue failed={direction_stats['result_rescue_failed_blobs']}"
+        )
 
     cfg["_derived_jump_threshold_px"] = float(bounds.get("jump_threshold_px", 0.0))
     cfg["_derived_init_max_dist_px"] = float(bounds.get("init_max_dist_px", 0.0))
@@ -2032,7 +2311,7 @@ def main() -> None:
     cfg["INIT_MAX_DIST_PX"] = float(bounds.get("init_max_dist_px", 0.0))
     cfg["TRAJ_MAX_DIST_PX"] = float(bounds.get("traj_max_dist_px", 0.0))
 
-    classification_csv_path = save_blob_classification_csv(blob_records, bounds, out_dir)
+    classification_csv_path = save_blob_classification_csv(blob_records, bounds, out_dir, include_result_info=bool(pre_result_path))
     individual_distance_csv_path = save_individual_distance_csv(out_dir, bounds, cfg)
     save_stats_dict = save_without_crossing_dataset(blob_records, cfg, output_frame_indices=output_frame_indices, bounds=bounds)
     save_stats_dict.update(refine_delete_stats)

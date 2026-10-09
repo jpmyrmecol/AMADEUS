@@ -20,6 +20,7 @@ except ImportError:  # Preserve direct execution of the GUIs that import this.
 _CONFIG_PATH_KEYS = (
     "TRAINING_VIDEO_PATH",
     "TRACKING_VIDEO_PATH",
+    "PRE_RESULT_PATH",
     "PICKLE_PATH",
     "BACKGROUND_PATH",
     "YOLO_DATASET_DIR",

@@ -54,7 +54,7 @@ from gui.video_input import (
     prepare_analysis_video,
     video_conversion_record,
 )
-from main.path_utils import resolve_config_paths
+from main.path_utils import resolve_config_paths, resolve_path, to_relative_path
 from main.roi import (
     default_roi_set, initial_roi_points,
     normalize_roi_set, load_roi_settings, roi_is_active, roi_signature,
@@ -1808,7 +1808,7 @@ class CrossingReviewApp(ctk.CTk):
             "show_contours": self.show_contours_var,
         }
 
-    def _collect_config(self) -> dict:
+    def _collect_config(self, path: Optional[str] = None) -> dict:
         self._sync_roi_vars_to_set(self.roi_active_set_idx)
         self._sync_additional_outlier_vars_to_set()
         settings = {}
@@ -1819,6 +1819,8 @@ class CrossingReviewApp(ctk.CTk):
                 pass
         settings["roi_sets"] = [normalize_roi_set(r) for r in self.roi_sets]
         settings["additional_outlier_sets"] = [dict(r) for r in self.additional_outlier_sets]
+        config_dir = os.path.dirname(os.path.abspath(path or self.config_path or self._default_config_path()))
+        settings["result_import_path"] = to_relative_path(settings.get("result_import_path", ""), config_dir)
 
         analysis_iqr_stats = {
             k: [float(x) for x in v]
@@ -2067,7 +2069,9 @@ class CrossingReviewApp(ctk.CTk):
         self._toggle_additional_outlier_params()
         self.additional_outlier_revision += 1
 
-        result_import_path = str(settings.get("result_import_path", "") or "")
+        config_dir = os.path.dirname(os.path.abspath(self.config_path)) if self.config_path else ""
+        result_import_path = resolve_path(settings.get("result_import_path", ""), config_dir)
+        self.result_import_path_var.set(result_import_path)
         self.result_obb_import = None
         if result_import_path:
             try:
@@ -2252,7 +2256,7 @@ class CrossingReviewApp(ctk.CTk):
             os.makedirs(dirname, exist_ok=True)
         temp_path = path + ".tmp"
         with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(self._collect_config(), f, ensure_ascii=False, indent=2)
+            json.dump(self._collect_config(path), f, ensure_ascii=False, indent=2)
         os.replace(temp_path, path)
         self.config_path = path
 
@@ -4116,6 +4120,12 @@ class CrossingReviewApp(ctk.CTk):
             min_coverage=float(self.result_import_min_coverage_var.get()),
             obbs_by_frame=self.result_obb_import.obbs_by_frame,
         )
+
+    def _active_pre_result_path(self) -> str:
+        """Return the loaded CSV used by the enabled Result OBB Import."""
+        if not self.result_import_enabled_var.get() or self.result_obb_import is None:
+            return ""
+        return self.result_obb_import.path
 
     def _on_result_import_changed(self):
         if self._applying_config:
@@ -6049,7 +6059,7 @@ class CrossingReviewApp(ctk.CTk):
         self,
         path: str,
         source: Optional[dict[int, list[BlobMetrics]]] = None,
-        metadata: Optional[dict[str, int]] = None,
+        metadata: Optional[dict[str, object]] = None,
     ):
         if self.reader is None:
             raise RuntimeError("No video has been loaded.")
@@ -6071,6 +6081,7 @@ class CrossingReviewApp(ctk.CTk):
                 "training_frame_start": int(self.training_frame_start_var.get()),
                 "training_frame_end": int(self.training_frame_end_var.get()),
                 "training_frame_interval": max(1, int(self.training_frame_interval_var.get())),
+                "pre_result_path": self._active_pre_result_path(),
             }
         with open(path, "wb") as f:
             pickle.dump(SimpleNamespace(
@@ -6081,6 +6092,9 @@ class CrossingReviewApp(ctk.CTk):
                 training_frame_start=int(metadata["training_frame_start"]),
                 training_frame_end=int(metadata["training_frame_end"]),
                 training_frame_interval=max(1, int(metadata["training_frame_interval"])),
+                pre_result_path=to_relative_path(
+                    metadata.get("pre_result_path", ""), os.path.dirname(os.path.abspath(path)),
+                ),
             ), f)
 
     def _launch_easy_tracking(self, session_path: str, video_path: str):
@@ -6174,8 +6188,8 @@ class CrossingReviewApp(ctk.CTk):
                 raise RuntimeError("Invalid processing frame range.")
             total_frames = frame_end - frame_start + 1
             frames_complete = f"Frames processed: {total_frames}/{total_frames} (100%)"
-            config_data = self._collect_config()
             config_path = self.config_path or self._default_config_path()
+            config_data = self._collect_config(config_path)
             background_path = self._default_background_path()
             pickle_path = self._default_pickle_path()
             project_dir = self._project_dir()
@@ -6190,6 +6204,7 @@ class CrossingReviewApp(ctk.CTk):
                 "training_frame_start": int(self.training_frame_start_var.get()),
                 "training_frame_end": int(self.training_frame_end_var.get()),
                 "training_frame_interval": max(1, int(self.training_frame_interval_var.get())),
+                "pre_result_path": self._active_pre_result_path(),
             }
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
