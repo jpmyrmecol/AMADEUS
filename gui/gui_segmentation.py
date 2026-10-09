@@ -1294,6 +1294,7 @@ class CrossingReviewApp(ctk.CTk):
         self.playback_job: Optional[str] = None
         self.playback_active = False
         self.config_path: Optional[str] = None
+        self.session_path: str = ""
         self.background_rebuild_job: Optional[str] = None
         self._applying_config = False
         self._loading_video = False
@@ -1753,7 +1754,7 @@ class CrossingReviewApp(ctk.CTk):
     def _update_analysis_dependent_buttons(self):
         # Processing stays clickable in every state so that pressing it explains
         # the missing step instead of silently doing nothing.
-        ready = self.outlier_section_revealed and (
+        ready = self.outlier_section_revealed and not self.analysis_is_stale and (
             bool(self.analysis_iqr_stats) or not self._needs_area_analysis()
         )
         state = "normal" if ready else "disabled"
@@ -2096,9 +2097,12 @@ class CrossingReviewApp(ctk.CTk):
                 self.analysis_bounds = self._bounds_from_fixed_stats(self.analysis_iqr_stats)
                 self.analysis_signature = ("loaded_config", len(self.analysis_frames), self._classifier_signature())
                 self.analysis_is_stale = bool(hidden_state.get("analysis_is_stale", False))
-                self.analysis_ready_var.set(
-                    f"analysis: loaded config (sampled frames={len(self.analysis_frames)})"
-                )
+                if self.analysis_is_stale:
+                    self.analysis_ready_var.set("analysis: stale (re-run Analyze)")
+                else:
+                    self.analysis_ready_var.set(
+                        f"analysis: loaded config (sampled frames={len(self.analysis_frames)})"
+                    )
                 self._schedule_area_iqr_boxplot_redraw()
             except ValueError as exc:
                 self.analysis_bounds = {}
@@ -2121,7 +2125,7 @@ class CrossingReviewApp(ctk.CTk):
             self.analysis_is_stale = True
             self.analysis_ready_var.set("analysis: not computed")
 
-        self.outlier_section_revealed = bool(self.analysis_iqr_stats)
+        self.outlier_section_revealed = bool(self.analysis_iqr_stats) and not self.analysis_is_stale
 
         # background.png always lives next to this JSON config itself (see
         # _default_background_path()), so no separate stored path is needed.
@@ -2142,7 +2146,6 @@ class CrossingReviewApp(ctk.CTk):
             self.reader is not None
             and self._segmentation_needs_background()
             and self.background_bgr is None
-            and not hidden_state.get("analysis_iqr_stats")
         ):
             try:
                 self.compute_background()
@@ -2376,7 +2379,12 @@ class CrossingReviewApp(ctk.CTk):
             self._apply_config(config)
         finally:
             self._applying_config = False
-        if self._additional_outlier_needs_background():
+        if (
+            self._additional_outlier_needs_background()
+            and not self._additional_outlier_background_methods().issubset(
+                self._background_cache_current_methods()
+            )
+        ):
             self._schedule_background_rebuild(delay_ms=50)
         self._area_reference_key = None
         self._min_area_slider_cap = None
@@ -2401,6 +2409,8 @@ class CrossingReviewApp(ctk.CTk):
 
         session_path = str(session_path or "").strip()
         if session_path:
+            # The GUI can finish Analyze before Easy Tracking creates config.yaml.
+            candidates.append(os.path.join(session_path, "segmentation", "segmentation_gui_config.json"))
             session_cfg_path = os.path.join(session_path, "config.yaml")
             if os.path.isfile(session_cfg_path):
                 try:
@@ -2453,6 +2463,8 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_iqr_stats = {}
         self.analysis_is_stale = True
         self.analysis_ready_var.set(message)
+        self.outlier_section_revealed = False
+        self._set_workflow_stage("analysis")
         self._redraw_area_iqr_boxplot()
         self._update_analysis_dependent_buttons()
 
@@ -3727,6 +3739,8 @@ class CrossingReviewApp(ctk.CTk):
             self.analysis_ready_var.set("analysis: not computed")
         else:
             self.analysis_ready_var.set("analysis: stale (segmentation changed; re-run Analyze)")
+        self.outlier_section_revealed = False
+        self._set_workflow_stage("analysis")
         if redraw:
             self.redraw_current_frame()
 
@@ -3823,6 +3837,7 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_iqr_stats = {}
         self.analysis_is_stale = True
         self.analysis_ready_var.set("analysis: not computed")
+        self.outlier_section_revealed = False
         self._update_analysis_dependent_buttons()
         self._refresh_segmentation_controls()
         if not self._segmentation_needs_background():
@@ -4900,8 +4915,7 @@ class CrossingReviewApp(ctk.CTk):
                     int(fid): self._classify_blobs(blobs, self.analysis_bounds)
                     for fid, blobs in self.analysis_blobs_by_frame.items()
                 }
-            self.analysis_is_stale = False
-            if self.analysis_signature is not None:
+            if self.analysis_signature is not None and not self.analysis_is_stale:
                 label = "Absolute area bounds" if self.area_outlier_method_var.get() == "absolute" else "Area IQR stats; live IQR multipliers"
                 self.analysis_ready_var.set(f"analysis: ready ({label})")
         self._redraw_area_iqr_boxplot()
@@ -5102,7 +5116,15 @@ class CrossingReviewApp(ctk.CTk):
         self._set_workflow_stage("processing")
         self._redraw_area_iqr_boxplot()
         self.redraw_current_frame()
-        self.set_status(f"Analysis complete: blobs={total}, outliers={outliers}")
+        try:
+            config_path = self._save_config_to_default_path()
+        except OSError as exc:
+            self.set_status("Analysis completed, but config could not be saved.", auto_clear=False)
+            messagebox.showwarning("Save config", f"Analysis completed, but config could not be saved:\n{exc}")
+        else:
+            self.set_status(
+                f"Analysis complete: blobs={total}, outliers={outliers} / config saved: {config_path}"
+            )
 
     def analyze_sample_frames(self):
         self._run_analysis()
@@ -5763,6 +5785,8 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_iqr_stats = {}
         self.analysis_is_stale = True
         self.analysis_ready_var.set("analysis: not computed")
+        self.outlier_section_revealed = False
+        self._set_workflow_stage("analysis")
 
     def _activate_cached_background(self, method: str, redraw: bool = True) -> bool:
         if not self._background_cache_is_current(method):
@@ -5808,6 +5832,11 @@ class CrossingReviewApp(ctk.CTk):
             if project_dir:
                 os.makedirs(project_dir, exist_ok=True)
                 return project_dir
+
+        if self.session_path:
+            project_dir = os.path.abspath(os.path.expanduser(self.session_path))
+            os.makedirs(project_dir, exist_ok=True)
+            return project_dir
 
         video_path = self.video_path_var.get().strip()
         if not video_path:
@@ -6132,10 +6161,10 @@ class CrossingReviewApp(ctk.CTk):
                 "Run Analyze before Processing.",
             )
             return
-        if self._needs_area_analysis() and not self.analysis_iqr_stats:
+        if self.analysis_is_stale or (self._needs_area_analysis() and not self.analysis_iqr_stats):
             messagebox.showwarning(
                 "Outlier Extraction",
-                "Processing needs the outlier bounds from a completed analysis.\n\n"
+                "Processing needs a completed, current analysis.\n\n"
                 "Run Analyze in the Outlier Extraction section first.",
             )
             return
@@ -6565,6 +6594,7 @@ def main():
 
     configure_taskbar_identity()
     app = CrossingReviewApp(no_launch_tracking=args.no_launch_tracking or args.return_to_easy)
+    app.session_path = str(args.session or "").strip()
     if args.video and os.path.isfile(args.video):
         def _load_video_or_existing_config():
             found = app._find_existing_config_for_video(args.video, args.session)
