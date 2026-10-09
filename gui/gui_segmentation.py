@@ -926,7 +926,6 @@ class _ResultObbImport:
 @dataclass
 class _ResultMatchConfig:
     """Snapshot of the imported-result settings for thread-safe classification."""
-    frame_offset: int
     min_coverage: float
     obbs_by_frame: dict          # shared read-only reference
 
@@ -1038,7 +1037,7 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
         blob.result_obb_count = 0
         blob.result_obb_coverage = 0.0
         blob.result_single = False
-    obbs = cfg.obbs_by_frame.get(int(frame_idx) + int(cfg.frame_offset))
+    obbs = cfg.obbs_by_frame.get(int(frame_idx))
     if obbs is None or not blobs:
         return
 
@@ -1221,7 +1220,6 @@ class CrossingReviewApp(ctk.CTk):
 
         self.result_import_enabled_var = tk.BooleanVar(value=False)
         self.result_import_path_var = tk.StringVar(value="")
-        self.result_import_frame_offset_var = tk.IntVar(value=0)
         self.result_import_min_coverage_var = tk.DoubleVar(value=DEFAULT_RESULT_OBB_COVERAGE)
         self.result_import_show_obb_var = tk.BooleanVar(value=True)
         self.result_import_status_var = tk.StringVar(value="result OBB: not loaded")
@@ -1611,10 +1609,6 @@ class CrossingReviewApp(ctk.CTk):
             self.result_import_params_frame, textvariable=self.result_import_status_var, anchor="w",
         ).pack(fill="x", padx=6, pady=(2, 2))
         self._pack_scale_entry(
-            self.result_import_params_frame, "Frame offset",
-            self.result_import_frame_offset_var, -100000, 100000, 1,
-        )
-        self._pack_scale_entry(
             self.result_import_params_frame, "Min OBB coverage",
             self.result_import_min_coverage_var, 0.0, 1.0, 0.1, is_float=True,
         )
@@ -1807,7 +1801,6 @@ class CrossingReviewApp(ctk.CTk):
             "area_absolute_max": self.area_absolute_max_var,
             "result_import_enabled": self.result_import_enabled_var,
             "result_import_path": self.result_import_path_var,
-            "result_import_frame_offset": self.result_import_frame_offset_var,
             "result_import_min_coverage": self.result_import_min_coverage_var,
             "result_import_show_obb": self.result_import_show_obb_var,
             "show_overlay": self.show_overlay_var,
@@ -3293,7 +3286,6 @@ class CrossingReviewApp(ctk.CTk):
         self.result_import_enabled_var.trace_add("write", lambda *_: self._toggle_result_import_params())
         for var in [
             self.result_import_enabled_var,
-            self.result_import_frame_offset_var,
             self.result_import_min_coverage_var,
         ]:
             var.trace_add("write", lambda *_: self._on_result_import_changed())
@@ -3718,7 +3710,6 @@ class CrossingReviewApp(ctk.CTk):
             float(self.area_absolute_max_var.get()),
             int(bool(self.result_import_enabled_var.get() and self.result_obb_import is not None)),
             str(self.result_import_path_var.get()),
-            int(self.result_import_frame_offset_var.get()),
             float(self.result_import_min_coverage_var.get()),
         )
 
@@ -4122,7 +4113,6 @@ class CrossingReviewApp(ctk.CTk):
             self._result_match = None
             return
         self._result_match = _ResultMatchConfig(
-            frame_offset=int(self.result_import_frame_offset_var.get()),
             min_coverage=float(self.result_import_min_coverage_var.get()),
             obbs_by_frame=self.result_obb_import.obbs_by_frame,
         )
@@ -4136,8 +4126,7 @@ class CrossingReviewApp(ctk.CTk):
     def _current_result_obbs(self) -> "Optional[np.ndarray]":
         if not self.result_import_show_obb_var.get() or self._result_match is None:
             return None
-        return self._result_match.obbs_by_frame.get(
-            int(self.current_frame) + int(self._result_match.frame_offset))
+        return self._result_match.obbs_by_frame.get(int(self.current_frame))
 
     def _toggle_single_blob_smoothing_params(self):
         if self.single_blob_smoothing_enabled_var.get():
@@ -6540,7 +6529,7 @@ class CrossingReviewApp(ctk.CTk):
                         frame_bgr = self.reader.read_bgr(fid)
                         blobs = source.get(fid, [])
                         result_obbs = (
-                            result_match.obbs_by_frame.get(fid + result_match.frame_offset)
+                            result_match.obbs_by_frame.get(fid)
                             if result_match is not None and show_result_obb
                             else None
                         )
