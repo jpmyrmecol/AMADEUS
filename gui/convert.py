@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -689,7 +690,7 @@ def infer_object_ids(columns: list[str]) -> list[int]:
 
 def angle_deg_to_unit_vec_array(angle_deg: np.ndarray) -> np.ndarray:
     theta = np.deg2rad(np.mod(angle_deg.astype(np.float64), 360.0))
-    return np.stack([np.sin(theta), -np.cos(theta)], axis=1).astype(np.float32)
+    return np.stack([np.sin(theta), -np.cos(theta)], axis=1)
 
 
 def convert_obb_direction_to_rear_front(
@@ -711,7 +712,7 @@ def convert_obb_direction_to_rear_front(
     object_ids = infer_object_ids(list(merged.columns))
     if not object_ids:
         raise ValueError("No object IDs were found in the OBB/direction CSVs.")
-    data = np.full((len(merged), len(object_ids) * 4), np.nan, dtype=np.float32)
+    data = np.full((len(merged), len(object_ids) * 4), np.nan, dtype=np.float64)
     for slot, track_id in enumerate(object_ids):
         _convert_obb_id(merged, track_id, data, slot, round_digits)
         if progress_cb is not None:
@@ -736,8 +737,8 @@ def _convert_obb_id(
     direction_col = f"c{track_id}"
     if not all(c in merged.columns for c in columns) or direction_col not in merged.columns:
         return
-    values = merged[columns].to_numpy(dtype=np.float32, copy=False)
-    directions = pd.to_numeric(merged[direction_col], errors="coerce").to_numpy(np.float32)
+    values = merged[columns].to_numpy(dtype=np.float64, copy=False)
+    directions = pd.to_numeric(merged[direction_col], errors="coerce").to_numpy(np.float64)
     valid = np.isfinite(values).all(axis=1) & np.isfinite(directions)
     if not np.any(valid):
         return
@@ -787,7 +788,7 @@ def amadeus_result_to_rear_front(
     if object_ids != list(range(len(object_ids))):
         raise ValueError(f"AMADEUS result IDs must be consecutive from 0; found {object_ids}.")
 
-    data = np.full((len(normalized), len(object_ids) * 4), np.nan, dtype=np.float32)
+    data = np.full((len(normalized), len(object_ids) * 4), np.nan, dtype=np.float64)
     for slot, track_id in enumerate(object_ids):
         columns = {
             name: pd.to_numeric(normalized[f"{name}{track_id}"], errors="coerce").to_numpy(
@@ -825,6 +826,238 @@ def amadeus_result_to_rear_front(
     return _build_rear_front_output(data)
 
 
+def amadeus_result_from_obb_direction(
+    obb_df: pd.DataFrame,
+    direction_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build a standard AMADEUS result table from Dataset-mode source files."""
+    obb = _with_frame_column(obb_df, "OBB")
+    direction = _with_frame_column(direction_df, "Direction")
+    merged = pd.merge(obb, direction, on="frame", how="outer", sort=True, suffixes=("", "_dir"))
+    merged["frame"] = pd.to_numeric(merged["frame"], errors="raise").astype(int)
+    if (merged["frame"] < 0).any():
+        raise ValueError("Frame numbers must be non-negative.")
+    merged = merged.sort_values("frame", kind="stable").drop_duplicates("frame", keep="last")
+    merged = _normalize_frame_column(merged)
+
+    object_ids = infer_object_ids(list(merged.columns))
+    if not object_ids:
+        raise ValueError("No object IDs were found in the OBB/direction CSVs.")
+    if object_ids != list(range(len(object_ids))):
+        raise ValueError(f"AMADEUS result IDs must be consecutive from 0; found {object_ids}.")
+
+    try:
+        import cv2
+    except ImportError as exc:
+        raise ImportError("OpenCV is required to read AMADEUS OBB geometry.") from exc
+
+    frames = merged["frame"].to_numpy(dtype=int, copy=False)
+    columns: dict[str, np.ndarray] = {"frame": frames.copy()}
+    for track_id in object_ids:
+        x_cols = [f"x{corner}{track_id}" for corner in range(4)]
+        y_cols = [f"y{corner}{track_id}" for corner in range(4)]
+        direction_col = f"c{track_id}"
+        if not all(col in merged.columns for col in (*x_cols, *y_cols, direction_col)):
+            raise ValueError(f"OBB/direction data is incomplete for ID {track_id}.")
+        x = merged[x_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+        y = merged[y_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+        points = np.stack((x, y), axis=2)
+        finite = np.isfinite(points).all(axis=(1, 2))
+        signed_area = np.sum(
+            points[:, :, 0] * np.roll(points[:, :, 1], -1, axis=1)
+            - np.roll(points[:, :, 0], -1, axis=1) * points[:, :, 1],
+            axis=1,
+        )
+        valid = finite & (np.abs(signed_area) > 0.0)
+
+        centers = np.full((len(merged), 2), np.nan, dtype=float)
+        widths = np.full(len(merged), np.nan, dtype=float)
+        heights = np.full(len(merged), np.nan, dtype=float)
+        for row_idx in np.flatnonzero(valid):
+            (cx, cy), (width, height), _ = cv2.minAreaRect(
+                points[row_idx].astype(np.float32, copy=False)
+            )
+            centers[row_idx] = (cx, cy)
+            widths[row_idx] = max(float(width), float(height), 0.001)
+            heights[row_idx] = max(min(float(width), float(height)), 0.001)
+
+        directions = pd.to_numeric(merged[direction_col], errors="coerce").to_numpy(dtype=float)
+        headings = np.full(len(merged), np.nan, dtype=float)
+        finite_directions = np.isfinite(directions)
+        headings[finite_directions] = np.mod(directions[finite_directions], 360.0)
+        columns[f"cx{track_id}"] = centers[:, 0]
+        columns[f"cy{track_id}"] = centers[:, 1]
+        columns[f"w{track_id}"] = widths
+        columns[f"h{track_id}"] = heights
+        columns[f"heading{track_id}"] = headings
+    return _normalize_amadeus_result(pd.DataFrame(columns))
+
+
+def swap_amadeus_result_ids(
+    result_df: pd.DataFrame,
+    id_a: int,
+    id_b: int,
+    start_frame: int,
+    end_frame: int | None = None,
+) -> pd.DataFrame:
+    """Swap complete OBB records for two IDs over a half-open frame range."""
+    result = _normalize_amadeus_result(result_df)
+    ids = _result_obb_ids(list(result.columns))
+    if id_a not in ids or id_b not in ids:
+        raise ValueError(f"Cannot swap missing AMADEUS result IDs {id_a} and {id_b}.")
+    if id_a == id_b:
+        return result
+    stop = len(result) if end_frame is None else int(end_frame)
+    start = max(0, int(start_frame))
+    frames = result["frame"].to_numpy(dtype=int, copy=False)
+    mask = (frames >= start) & (frames < stop)
+    for name in ("cx", "cy", "w", "h", "heading"):
+        col_a, col_b = f"{name}{id_a}", f"{name}{id_b}"
+        values_a = result.loc[mask, col_a].to_numpy(copy=True)
+        result.loc[mask, col_a] = result.loc[mask, col_b].to_numpy(copy=True)
+        result.loc[mask, col_b] = values_a
+    return result
+
+
+def refine_amadeus_result_from_rear_front(
+    result_df: pd.DataFrame,
+    rear_front_df: pd.DataFrame,
+    position_edited_keys: set[tuple[int, int]],
+    direction_reversed_keys: set[tuple[int, int]] | None = None,
+) -> pd.DataFrame:
+    """Update edited OBB rows while preserving all untouched source geometry."""
+    base = _normalize_amadeus_result(result_df)
+    pose = normalize_rear_front(rear_front_df)
+    ids = _result_obb_ids(list(base.columns))
+    if _rear_front_ids(list(pose.columns)) != ids:
+        raise ValueError("Rear/front IDs do not match the AMADEUS result IDs.")
+    if len(pose) != len(base):
+        raise ValueError("Rear/front data and AMADEUS result frames do not match.")
+
+    result = base.copy(deep=True)
+    row_by_frame = {int(frame): idx for idx, frame in enumerate(result["frame"].tolist())}
+    edits_by_id: dict[int, set[int]] = {track_id: set() for track_id in ids}
+    for raw_frame, raw_id in position_edited_keys:
+        frame, track_id = int(raw_frame), int(raw_id)
+        if track_id not in edits_by_id:
+            raise ValueError(f"Position edit references missing AMADEUS result ID {track_id}.")
+        if frame in row_by_frame:
+            edits_by_id[track_id].add(frame)
+
+    reversed_keys = direction_reversed_keys or set()
+    for raw_frame, raw_id in reversed_keys:
+        frame, track_id = int(raw_frame), int(raw_id)
+        if track_id not in ids:
+            raise ValueError(f"Direction edit references missing AMADEUS result ID {track_id}.")
+        row_idx = row_by_frame.get(frame)
+        if row_idx is None:
+            continue
+        heading_col = f"heading{track_id}"
+        heading = pd.to_numeric(result.at[row_idx, heading_col], errors="coerce")
+        if np.isfinite(heading):
+            result.at[row_idx, heading_col] = (float(heading) + 180.0) % 360.0
+
+    for track_id, edited_frames in edits_by_id.items():
+        if not edited_frames:
+            continue
+        h_col = f"h{track_id}"
+        anchor_rows = result[
+            np.isfinite(pd.to_numeric(result[f"cx{track_id}"], errors="coerce"))
+            & np.isfinite(pd.to_numeric(result[f"cy{track_id}"], errors="coerce"))
+            & np.isfinite(pd.to_numeric(result[f"w{track_id}"], errors="coerce"))
+            & np.isfinite(pd.to_numeric(result[h_col], errors="coerce"))
+            & np.isfinite(pd.to_numeric(result[f"heading{track_id}"], errors="coerce"))
+            & (pd.to_numeric(result[f"w{track_id}"], errors="coerce") > 0)
+            & (pd.to_numeric(result[h_col], errors="coerce") > 0)
+        ]
+        anchor_frames = [
+            int(frame) for frame in anchor_rows["frame"].tolist()
+            if int(frame) not in edited_frames
+        ]
+        runs: list[tuple[int, int]] = []
+        sorted_edits = sorted(edited_frames)
+        run_start = run_end = sorted_edits[0]
+        for frame in sorted_edits[1:]:
+            if frame == run_end + 1:
+                run_end = frame
+            else:
+                runs.append((run_start, run_end))
+                run_start = run_end = frame
+        runs.append((run_start, run_end))
+
+        interpolated_h: dict[int, float] = {}
+        for run_start, run_end in runs:
+            before = [frame for frame in anchor_frames if frame < run_start]
+            after = [frame for frame in anchor_frames if frame > run_end]
+            if not before or not after:
+                continue
+            left_frame, right_frame = before[-1], after[0]
+            left_h = float(result.at[row_by_frame[left_frame], h_col])
+            right_h = float(result.at[row_by_frame[right_frame], h_col])
+            span = right_frame - left_frame
+            for frame in range(run_start, run_end + 1):
+                ratio = (frame - left_frame) / span
+                interpolated_h[frame] = left_h + (right_h - left_h) * ratio
+
+        for frame in edited_frames:
+            row_idx = row_by_frame.get(frame)
+            if row_idx is None:
+                continue
+            pose_row = pose.iloc[row_idx]
+            front = np.array(
+                [pose_row[f"front_X{track_id}"], pose_row[f"front_Y{track_id}"]],
+                dtype=float,
+            )
+            rear = np.array(
+                [pose_row[f"rear_X{track_id}"], pose_row[f"rear_Y{track_id}"]],
+                dtype=float,
+            )
+            if np.isfinite(front).all() and np.isfinite(rear).all():
+                dx, dy = float(front[0] - rear[0]), float(front[1] - rear[1])
+                width = float(np.hypot(dx, dy))
+                result.at[row_idx, f"cx{track_id}"] = float((front[0] + rear[0]) * 0.5)
+                result.at[row_idx, f"cy{track_id}"] = float((front[1] + rear[1]) * 0.5)
+                result.at[row_idx, f"w{track_id}"] = width
+                result.at[row_idx, f"heading{track_id}"] = (
+                    float(np.degrees(np.arctan2(dx, -dy)) % 360.0) if width > 0 else np.nan
+                )
+            else:
+                for name in ("cx", "cy", "w", "heading"):
+                    result.at[row_idx, f"{name}{track_id}"] = np.nan
+            result.at[row_idx, h_col] = interpolated_h.get(frame, np.nan)
+
+    return _normalize_amadeus_result(result)
+
+
+def save_amadeus_result_csv(result_df: pd.DataFrame, path: str | Path) -> Path:
+    """Save a standard AMADEUS final-result CSV without a DataFrame index."""
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    result = _normalize_amadeus_result(result_df)
+    tmp_path = output.with_name(output.name + ".tmp")
+    result.to_csv(tmp_path, index=False, float_format="%.6f")
+    os.replace(tmp_path, output)
+    return output
+
+
+def _normalize_amadeus_result(result_df: pd.DataFrame) -> pd.DataFrame:
+    normalized = _normalize_frame_column(result_df)
+    ids = _result_obb_ids(list(normalized.columns))
+    if not ids:
+        raise ValueError("AMADEUS result CSV must contain cxN, cyN, wN, hN, and headingN columns.")
+    if ids != list(range(len(ids))):
+        raise ValueError(f"AMADEUS result IDs must be consecutive from 0; found {ids}.")
+    columns = ["frame"] + [
+        f"{name}{track_id}"
+        for track_id in ids
+        for name in ("cx", "cy", "w", "h", "heading")
+    ]
+    normalized = normalized[columns].copy()
+    for col in columns[1:]:
+        normalized[col] = pd.to_numeric(normalized[col], errors="coerce").astype(float)
+    return normalized
+
+
 def _inspect_amadeus_result(path: Path, requested_n: int | None) -> TrackingFormatInfo:
     header = pd.read_csv(path, nrows=0)
     object_ids = _result_obb_ids(list(header.columns))
@@ -856,7 +1089,7 @@ def _convert_amadeus_result(
     center_path = center_csv_path(path)
     if options.reuse_existing and rear_front_path.is_file() and center_path.is_file():
         return ConversionOutputs(path, center=center_path, rear_front=rear_front_path)
-    pose = amadeus_result_to_rear_front(pd.read_csv(path))
+    pose = amadeus_result_to_rear_front(pd.read_csv(path), round_digits=None)
     if not (options.reuse_existing and rear_front_path.is_file()):
         save_rear_front_csv(pose, rear_front_path)
     if not (options.reuse_existing and center_path.is_file()):

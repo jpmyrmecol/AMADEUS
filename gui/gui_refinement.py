@@ -530,6 +530,15 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.frame_cache_rgb: Optional[np.ndarray] = None
         self.tk_image = None
         self.edited_keys: set[tuple[int, int]] = set()
+        self.position_edited_keys: set[tuple[int, int]] = set()
+        self.direction_reversed_keys: set[tuple[int, int]] = set()
+        self.refinement_obb_df: pd.DataFrame | None = None
+        self.refinement_pose_np: np.ndarray | None = None
+        self.refinement_source_path: str | None = None
+        self.refinement_source_paths: set[str] = set()
+        self.refinement_output_kind = "rear_front"
+        self.loaded_csv_path: str | None = None
+        self._pending_refinement_source: dict | None = None
         self.last_save_path: Optional[str] = None
         self.prefetch_after_id: Optional[str] = None
         self._decode_gen: int = 0
@@ -873,6 +882,15 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.last_save_path = None
         self.save_count = 0
         self.edited_keys.clear()
+        self.position_edited_keys.clear()
+        self.direction_reversed_keys.clear()
+        self.refinement_obb_df = None
+        self.refinement_pose_np = None
+        self.refinement_source_path = None
+        self.refinement_source_paths.clear()
+        self.refinement_output_kind = "rear_front"
+        self.loaded_csv_path = None
+        self._pending_refinement_source = None
         self.selected_tids.clear()
         self.id_palette = []
         self.drag_mode = None
@@ -1261,9 +1279,23 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.video_path_var.set(dataset["video_path"])
         try:
             csv_path = self.ensure_converted_dataset_csv(dataset)
+            result_df = _convert.amadeus_result_from_obb_direction(
+                pd.read_csv(dataset["obb_path"]),
+                pd.read_csv(dataset["direction_path"]),
+            )
         except Exception as e:
             messagebox.showerror("Error", str(e))
             return
+        self._pending_refinement_source = {
+            "output_kind": "amadeus_result",
+            "result_df": result_df,
+            "source_path": str(dataset["obb_path"]),
+            "source_paths": [
+                str(dataset["obb_path"]),
+                str(dataset["direction_path"]),
+                csv_path,
+            ],
+        }
         self.csv_path_var.set(csv_path)
         dataset["csv_path"] = csv_path
         self.load_files(preserve_view=preserve_view)
@@ -1329,11 +1361,11 @@ class UmaDirectionRefinementApp(ctk.CTk):
                     obb_df=obb_df,
                     direction_df=direction_df,
                     progress_cb=set_progress,
-                    round_digits=3,
+                    round_digits=None,
                 )
                 Path(converted_path).parent.mkdir(parents=True, exist_ok=True)
                 popup.after(0, lambda: (status_var.set("Saving CSV..."), progress.set(1.0), percent_var.set("100.0%")))
-                _convert.save_rear_front_csv(out_df, converted_path, float_format="%.3f")
+                _convert.save_rear_front_csv(out_df, converted_path)
                 _convert.save_center_csv(
                     _convert.rear_front_to_center(out_df),
                     _convert.center_csv_path(converted_path),
@@ -1821,11 +1853,26 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.csv_path_var.set(path)
         try:
             info = _convert.inspect_tracking_file(path)
+            is_amadeus_result = info.format_id == "amadeus_result_csv"
+            result_df = pd.read_csv(path) if is_amadeus_result else None
         except Exception as e:
+            self._pending_refinement_source = None
             messagebox.showerror("Conversion error", str(e))
             return
+        self._pending_refinement_source = {
+            "output_kind": "amadeus_result" if is_amadeus_result else "rear_front",
+            "result_df": result_df,
+            "source_path": path,
+            "source_paths": [path],
+        }
         if info.requires_keypoint_selection:
             def on_converted(csv_path: str) -> None:
+                self._pending_refinement_source = {
+                    "output_kind": "rear_front",
+                    "result_df": None,
+                    "source_path": path,
+                    "source_paths": [path, csv_path],
+                }
                 self.csv_path_var.set(csv_path)
                 self.try_load_files()
             PoseConvertDialog(self, initial_path=path, on_converted=on_converted)
@@ -1837,10 +1884,30 @@ class UmaDirectionRefinementApp(ctk.CTk):
                     "This file contains center coordinates only; "
                     "direction refinement requires front/rear points."
                 )
+            self._pending_refinement_source["source_paths"].append(str(outputs.rear_front))
             self.csv_path_var.set(str(outputs.rear_front))
             self.try_load_files()
         except Exception as e:
+            self._pending_refinement_source = None
             messagebox.showerror("Conversion error", str(e))
+
+    @staticmethod
+    def _normalized_path(path: str | Path) -> str:
+        return os.path.normcase(str(Path(path).expanduser().resolve()))
+
+    def _activate_refinement_source(self, source: dict, loaded_csv_path: str) -> None:
+        self.refinement_output_kind = str(source.get("output_kind", "rear_front"))
+        result_df = source.get("result_df")
+        self.refinement_obb_df = result_df.copy(deep=True) if result_df is not None else None
+        self.refinement_source_path = str(source.get("source_path") or loaded_csv_path)
+        source_paths = source.get("source_paths") or [self.refinement_source_path]
+        self.refinement_source_paths = {
+            self._normalized_path(path) for path in source_paths if str(path).strip()
+        }
+        self.loaded_csv_path = self._normalized_path(loaded_csv_path)
+        self._pending_refinement_source = None
+        self.position_edited_keys.clear()
+        self.direction_reversed_keys.clear()
 
     def try_load_files(self):
         video_path = self.video_path_var.get().strip()
@@ -1895,6 +1962,22 @@ class UmaDirectionRefinementApp(ctk.CTk):
         except Exception:
             pass
         self.df = df.copy()
+        pending_source = self._pending_refinement_source
+        if pending_source is None and self.loaded_csv_path == self._normalized_path(csv_path):
+            pending_source = {
+                "output_kind": self.refinement_output_kind,
+                "result_df": self.refinement_obb_df,
+                "source_path": self.refinement_source_path,
+                "source_paths": list(self.refinement_source_paths),
+            }
+        if pending_source is None:
+            pending_source = {
+                "output_kind": "rear_front",
+                "result_df": None,
+                "source_path": csv_path,
+                "source_paths": [csv_path],
+            }
+        self._activate_refinement_source(pending_source, csv_path)
         self.frame_count = len(self.df)
         self.num_ids = (len(self.df.columns) - 1) // 4
         _tids = np.arange(self.num_ids)
@@ -1903,6 +1986,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._rear_x_idx  = (3 + 4 * _tids).astype(np.intp)
         self._rear_y_idx  = (4 + 4 * _tids).astype(np.intp)
         self.df_np = self.df.to_numpy(dtype=np.float64)
+        self.refinement_pose_np = self.df_np.copy()
         self.id_palette = make_id_palette(self.num_ids, color_space="rgb")
         self.current_frame = 0
         self.requested_frame = 0
@@ -2562,6 +2646,19 @@ class UmaDirectionRefinementApp(ctk.CTk):
         fi = int(frame_idx)
         fx_v, fy_v = float(front_to_store[0]), float(front_to_store[1])
         rx_v, ry_v = float(rear_to_store[0]),  float(rear_to_store[1])
+        reference = self.refinement_pose_np if self.refinement_pose_np is not None else self.df_np
+        old_values = np.array([
+            reference[fi, self._front_x_idx[tid]],
+            reference[fi, self._front_y_idx[tid]],
+            reference[fi, self._rear_x_idx[tid]],
+            reference[fi, self._rear_y_idx[tid]],
+        ], dtype=float)
+        new_values = np.array([fx_v, fy_v, rx_v, ry_v], dtype=float)
+        same_values = (old_values == new_values) | (np.isnan(old_values) & np.isnan(new_values))
+        if np.all(same_values):
+            self.position_edited_keys.discard((fi, int(tid)))
+        else:
+            self.position_edited_keys.add((fi, int(tid)))
         self.df.at[fi, fx] = fx_v
         self.df.at[fi, fy] = fy_v
         self.df.at[fi, rx] = rx_v
@@ -2597,6 +2694,29 @@ class UmaDirectionRefinementApp(ctk.CTk):
             tmp = self.df_np[s:e, ci_a].copy()
             self.df_np[s:e, ci_a] = self.df_np[s:e, ci_b]
             self.df_np[s:e, ci_b] = tmp
+            if self.refinement_pose_np is not None:
+                tmp = self.refinement_pose_np[s:e, ci_a].copy()
+                self.refinement_pose_np[s:e, ci_a] = self.refinement_pose_np[s:e, ci_b]
+                self.refinement_pose_np[s:e, ci_b] = tmp
+        if self.refinement_obb_df is not None:
+            self.refinement_obb_df = _convert.swap_amadeus_result_ids(
+                self.refinement_obb_df,
+                int(tid_a),
+                int(tid_b),
+                start_frame,
+                end_frame,
+            )
+        for edit_keys in (self.position_edited_keys, self.direction_reversed_keys):
+            moving = {
+                (frame, tid)
+                for frame, tid in edit_keys
+                if frame >= start_frame and tid in (int(tid_a), int(tid_b))
+            }
+            edit_keys.difference_update(moving)
+            edit_keys.update(
+                (frame, int(tid_b) if tid == int(tid_a) else int(tid_a))
+                for frame, tid in moving
+            )
         self.current_id = int(tid_b)
         self.id_var.set(int(tid_b))
         for f in range(start_frame, end_frame):
@@ -2625,6 +2745,17 @@ class UmaDirectionRefinementApp(ctk.CTk):
             tmp = self.df_np[s:e, ci_f].copy()
             self.df_np[s:e, ci_f] = self.df_np[s:e, ci_r]
             self.df_np[s:e, ci_r] = tmp
+            if self.refinement_pose_np is not None:
+                tmp = self.refinement_pose_np[s:e, ci_f].copy()
+                self.refinement_pose_np[s:e, ci_f] = self.refinement_pose_np[s:e, ci_r]
+                self.refinement_pose_np[s:e, ci_r] = tmp
+        if self.refinement_obb_df is not None:
+            for frame in range(start_frame, end_frame):
+                key = (int(frame), int(tid))
+                if key in self.direction_reversed_keys:
+                    self.direction_reversed_keys.remove(key)
+                else:
+                    self.direction_reversed_keys.add(key)
         self.current_id = int(tid)
         self.id_var.set(int(tid))
         for f in range(start_frame, end_frame):
@@ -2890,11 +3021,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if self.df is None:
             return
         if self.last_save_path:
-            standard = _convert.legacy_wide_to_rear_front(self.df, "front_rear")
-            _convert.save_rear_front_csv(standard, self.last_save_path)
-            self.edited_keys.clear()
-            self.save_count += 1
-            self.set_status(f"Saved ({self.save_count}): {self.last_save_path}")
+            self._save_refinement_csv(self.last_save_path)
             return
         self.save_csv_as()
 
@@ -2902,21 +3029,52 @@ class UmaDirectionRefinementApp(ctk.CTk):
         """Save As button: always prompt for file path."""
         if self.df is None:
             return
+        source_path = Path(self.refinement_source_path or self.csv_path_var.get())
         default_name = self._default_output_path(self.csv_path_var.get())
         path = filedialog.asksaveasfilename(
             title="Save refined CSV",
             defaultextension=".csv",
+            initialdir=str(source_path.parent),
             initialfile=default_name,
             filetypes=CSV_EXTS,
         )
         if not path:
             return
-        standard = _convert.legacy_wide_to_rear_front(self.df, "front_rear")
-        _convert.save_rear_front_csv(standard, path)
+        if self._save_refinement_csv(path, save_as=True):
+            self.last_save_path = path
+
+    def _save_refinement_csv(self, path: str, *, save_as: bool = False) -> bool:
+        output_path = self._normalized_path(path)
+        if save_as and output_path in self.refinement_source_paths:
+            messagebox.showwarning(
+                "Choose another file",
+                "The original input CSV cannot be overwritten. Choose a different output path.",
+            )
+            return False
+
+        if self.refinement_obb_df is not None:
+            if self.refinement_output_kind != "amadeus_result":
+                raise ValueError("OBB source data is present for a non-AMADEUS refinement input.")
+            rear_front = _convert.legacy_wide_to_rear_front(self.df, "front_rear")
+            result = _convert.refine_amadeus_result_from_rear_front(
+                self.refinement_obb_df,
+                rear_front,
+                self.position_edited_keys,
+                self.direction_reversed_keys,
+            )
+            _convert.save_amadeus_result_csv(result, path)
+            self.refinement_obb_df = result.copy(deep=True)
+            self.refinement_output_kind = "amadeus_result"
+            self.position_edited_keys.clear()
+            self.direction_reversed_keys.clear()
+        else:
+            standard = _convert.legacy_wide_to_rear_front(self.df, "front_rear")
+            _convert.save_rear_front_csv(standard, path)
         self.edited_keys.clear()
-        self.last_save_path = path
+        self.refinement_pose_np = self.df_np.copy()
         self.save_count += 1
         self.set_status(f"Saved ({self.save_count}): {path}")
+        return True
 
     def open_export_video_dialog(self):
         if self.reader is None or self.df is None:
@@ -2960,10 +3118,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _default_output_path(self, csv_path: str) -> str:
-        stem = Path(csv_path).stem
+        stem = Path(self.refinement_source_path or csv_path).stem
         if stem.endswith("_rear_front"):
             stem = stem[:-len("_rear_front")]
-        return f"{stem}_direction_refined_rear_front.csv"
+        return f"{stem}_refined.csv"
 
     def img_to_canvas(self, pt: np.ndarray) -> np.ndarray:
         return np.array([pt[0] * self.scale + self.offset_x, pt[1] * self.scale + self.offset_y], dtype=float)
