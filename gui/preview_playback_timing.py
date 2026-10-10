@@ -34,7 +34,10 @@ class AdaptivePreviewPacer:
         duration = float(elapsed_seconds)
         if not math.isfinite(duration) or duration <= 0:
             return
-        duration = min(duration, 2.0)
+        # Bound perceived latency on restart even after an isolated long
+        # decode/GUI stall. A playback preview should refresh at least
+        # approximately five times per second whenever frames are available.
+        duration = min(duration, 0.20)
         old = self.estimated_seconds
         if old is None:
             self.estimated_seconds = duration
@@ -50,6 +53,6 @@ class AdaptivePreviewPacer:
         if self.last_request_time is None:
             return 0
         desired = 1.0 / max(1e-9, float(frame_rate))
-        learned = (self.estimated_seconds or 0.0) * 1.15
+        learned = min(0.20, (self.estimated_seconds or 0.0) * 1.15)
         interval = max(desired, learned)
         return max(0, math.ceil((self.last_request_time + interval - now) * 1000.0))
