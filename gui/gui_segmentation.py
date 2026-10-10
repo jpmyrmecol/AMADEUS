@@ -285,7 +285,7 @@ class VideoFrameReader:
         self, cap: cv2.VideoCapture, frame_idx: int, current_pos: int
     ) -> "tuple[np.ndarray, int, int]":
         gap = frame_idx - current_pos
-        if 0 < gap <= 12:
+        if current_pos >= 0 and 0 < gap <= 12:
             for _ in range(gap):
                 if not cap.grab():
                     cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
