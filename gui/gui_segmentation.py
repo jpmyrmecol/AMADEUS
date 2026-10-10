@@ -176,6 +176,7 @@ ctk.set_default_color_theme(CTK_THEME)
 
 _SPIN_CFG = dict(
     bg="#343638", fg="#dce4ee",
+    disabledbackground="#343638", disabledforeground="#929292",
     insertbackground="#dce4ee",
     buttonbackground="#565b5e",
     relief="flat",

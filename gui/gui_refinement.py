@@ -653,6 +653,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         # Shared dark config for tk.Spinbox
         self._spin_cfg = dict(
             bg="#343638", fg="#dce4ee",
+            disabledbackground="#343638", disabledforeground="#929292",
             insertbackground="#dce4ee",
             buttonbackground="#565b5e",
             relief="flat",
@@ -3793,6 +3794,7 @@ class ExportVideoDialog(ctk.CTkToplevel):
 
         self._spin_cfg = dict(
             bg="#343638", fg="#dce4ee", insertbackground="#dce4ee",
+            disabledbackground="#343638", disabledforeground="#929292",
             buttonbackground="#565b5e", relief="flat", highlightthickness=2,
             highlightbackground="#565b5e", highlightcolor="#1f8040",
             selectbackground="#1f6aa5", selectforeground="white",
@@ -3989,6 +3991,7 @@ class PoseConvertDialog(ctk.CTkToplevel):
         ctk.CTkLabel(root, text="Number of individuals:").grid(row=4, column=0, sticky="w", **pad)
         tk.Spinbox(root, from_=1, to=999, width=8, textvariable=self.n_ind_var,
                    bg="#343638", fg="#dce4ee", insertbackground="#dce4ee",
+                   disabledbackground="#343638", disabledforeground="#929292",
                    buttonbackground="#565b5e", relief="flat",
                    highlightthickness=2, highlightbackground="#565b5e", highlightcolor="#1f8040",
                    selectbackground="#1f6aa5", selectforeground="white",
@@ -4018,7 +4021,18 @@ class PoseConvertDialog(ctk.CTkToplevel):
         self.convert_btn.grid(row=9, column=0, columnspan=4, pady=(4, 0))
 
         # Log
-        self.log = tk.Text(root, height=8, wrap="none", state="disabled")
+        self.log = tk.Text(
+            root,
+            height=8,
+            wrap="none",
+            state="disabled",
+            bg="#343638",
+            fg="#929292",
+            insertbackground="#dce4ee",
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground="#565b5e",
+        )
         self.log.grid(row=10, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
         sb = ttk.Scrollbar(root, orient="vertical", command=self.log.yview)
         sb.grid(row=10, column=4, sticky="ns")
