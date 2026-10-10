@@ -352,11 +352,15 @@ class VideoFrameReader:
         if self._closed.is_set():
             raise RuntimeError("Video reader is closed.")
         gap = frame_idx - current_pos
-        if current_pos == -1 and frame_idx == 0:
-            # A fresh VideoCapture is already positioned at frame zero.
-            # Seeking to zero can force FFmpeg to scan a very long video's
-            # index before the first frame is decoded.
-            pass
+        if current_pos == -1 and 0 <= frame_idx <= 12:
+            # A newly opened VideoCapture is positioned at frame zero.
+            # Read the nearby initial frames sequentially: random seeking
+            # even to frame 1 can make long FFmpeg videos very slow to start.
+            for _ in range(frame_idx):
+                if not cap.grab():
+                    raise RuntimeError(
+                        f"Failed to skip to frame {frame_idx} in {self.video_path}"
+                    )
         elif current_pos >= 0 and 0 < gap <= 12:
             # Skipped frames only need a grab, not conversion and GUI rendering.
             # For nearby frames this also avoids repeated random seeks in compressed video.
@@ -2096,9 +2100,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._set_frame(target_frame, reset_view=not preserve_view)
         self._set_id(0)
         self.update_info_panel()
-        # Re-issue the current-frame request after Tk has applied the new data
-        # arrays. This fixes stale overlays after CSV replacement at the same frame.
-        self.after_idle(lambda f=target_frame, rv=not preserve_view: self.request_frame(f, reset_view=rv, immediate=True))
+        # The initial frame request already uses the updated CSV arrays.
+        # Refresh existing pixels after Tk finishes layout instead of issuing
+        # a duplicate decode (which could invalidate the first Play request).
+        self.after_idle(self.redraw_current_frame)
         detail = f"IDs={self.num_ids}" if self.df is not None else "video only"
         self.set_status(f"Loaded: {os.path.basename(video_path)} / {detail} / frames={self.frame_count} / fps={reader.fps:g}")
         _start_maximized(self)
