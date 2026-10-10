@@ -60,6 +60,9 @@ from main.roi import (
     normalize_roi_set, load_roi_settings, roi_is_active, roi_signature,
     build_single_roi_mask as _build_single_roi_mask,
     build_roi_mask_for_frame as _build_roi_mask_for_frame,
+    contour_mask_region as _blob_mask_region,
+    convex_polygon_mask_region as _result_obb_mask,
+    mask_region_overlap as _mask_region_overlap,
 )
 from main.video_frame_count import detect_seekable_frame_count
 
@@ -369,7 +372,7 @@ class BlobMetrics:
     result_missing: bool = False      # full imported OBB with no segmentation owner
     result_area_outlier: bool = False # rejected by the independent Result area bounds
     result_obb_indices: tuple[int, ...] = ()
-    result_blob_area: Optional[int] = None  # union foreground pixels inside the corresponding OBB
+    result_blob_area: Optional[int] = None  # original segment union inside OBB (Result threshold)
     result_generated: bool = False
     result_protected: bool = False
     result_source_frame: Optional[tuple] = field(default=None, repr=False, compare=False)
@@ -1014,27 +1017,7 @@ def _load_result_obb_csv(path: str) -> "_ResultObbImport":
     )
 
 
-def _polygon_bounds(poly: np.ndarray) -> tuple[int, int, int, int]:
-    """Integer half-open [x0, x1) x [y0, y1) bounding box of a polygon."""
-    return (
-        int(math.floor(float(poly[:, 0].min()))),
-        int(math.floor(float(poly[:, 1].min()))),
-        int(math.ceil(float(poly[:, 0].max()))) + 1,
-        int(math.ceil(float(poly[:, 1].max()))) + 1,
-    )
-
-
-def _rasterize_overlap(contour: np.ndarray, poly: np.ndarray,
-                       x0: int, y0: int, x1: int, y1: int) -> tuple[int, int]:
-    """Pixels of the blob, and of the blob covered by the OBB, inside a window."""
-    blob_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-    cv2.drawContours(blob_mask, [contour], -1, 1, cv2.FILLED, offset=(-x0, -y0))
-    obb_mask = np.zeros_like(blob_mask)
-    cv2.fillConvexPoly(obb_mask, np.round(poly - (x0, y0)).astype(np.int32), 1)
-    return int(np.count_nonzero(blob_mask)), int(np.count_nonzero(blob_mask & obb_mask))
-
-
-def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchConfig") -> list[np.ndarray]:
+def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchConfig", image_shape: tuple) -> list:
     """Attach the imported OBBs of one frame to the blobs of that same frame.
 
     First resolve all centre hits; two centres in a merged blob still give
@@ -1043,8 +1026,8 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
     The covered fraction distinguishes one animal from a merged blob whose
     second individual the tracker missed. Measure it for every real single-
     owned blob so Result area bounds can reject an otherwise ordinary inlier.
-    Return OBBs with no owner for removal of
-    animals that the current segmentation threshold missed entirely.
+    Return the frame's canonical OBB mask regions for the subsequent area and
+    outlier-expansion decisions.
     """
     for blob in blobs:
         blob.result_obb_count = 0
@@ -1055,6 +1038,8 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
     if obbs is None:
         return []
 
+    regions = [_result_obb_mask(poly, image_shape) for poly in obbs]
+    blob_regions = [_blob_mask_region(blob.contour, image_shape) for blob in blobs]
     boxes = [cv2.boundingRect(blob.contour) for blob in blobs]
     owners: list[int] = [-1] * len(obbs)
     center_candidates = sorted(range(len(blobs)), key=lambda i: blobs[i].manual_outlier)
@@ -1077,7 +1062,7 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
             continue
         poly_key = tuple(sorted((float(x), float(y)) for x, y in poly))
         poly_area = float(cv2.contourArea(poly))
-        for index, overlap in _result_obb_overlap_candidates(blobs, boxes, poly, available):
+        for index, overlap in _result_obb_overlap_candidates(blob_regions, regions[ri], available):
             candidates.append((-overlap, poly_area, poly_key, boxes[index], ri, index))
     # Strongest overlap wins globally. Equal overlap prefers the tighter OBB;
     # geometry breaks ties so CSV ID/column order does not choose the owner.
@@ -1093,13 +1078,12 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
     for index, blob in enumerate(blobs):
         if blob.result_obb_count != 1 or blob.manual_outlier:
             continue
-        bx, by, bw, bh = boxes[index]
-        blob_pixels, covered_pixels = _rasterize_overlap(
-            blob.contour, obbs[owners.index(index)], bx, by, bx + bw, by + bh
-        )
+        mask = blob_regions[index][2]
+        blob_pixels = cv2.countNonZero(mask) if mask.size else 0
+        covered_pixels = _mask_region_overlap(blob_regions[index], regions[owners.index(index)])
         if blob_pixels > 0:
             blob.result_obb_coverage = covered_pixels / blob_pixels
-    return [poly for poly, owner in zip(obbs, owners) if owner < 0]
+    return regions
 
 
 def _restore_result_inputs(blobs: list[BlobMetrics]) -> list[BlobMetrics]:
@@ -1114,17 +1098,6 @@ def _restore_result_inputs(blobs: list[BlobMetrics]) -> list[BlobMetrics]:
                 for sources in frames.values() for b in sources]
     restored.extend(b for b in blobs if b.frame not in frames)
     return restored
-
-
-def _result_obb_mask(poly: np.ndarray, image_shape: tuple) -> tuple[int, int, np.ndarray]:
-    H, W = image_shape[:2]
-    x0, y0, x1, y1 = _polygon_bounds(poly)
-    x0, y0, x1, y1 = max(0, x0), max(0, y0), min(W, x1), min(H, y1)
-    if x0 >= x1 or y0 >= y1:
-        return 0, 0, np.zeros((0, 0), dtype=np.uint8)
-    mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-    cv2.fillConvexPoly(mask, np.round(poly - (x0, y0)).astype(np.int32), 255)
-    return x0, y0, mask
 
 
 def _result_region_covered_at_most_half(region, foreground: np.ndarray) -> bool:
@@ -1146,14 +1119,8 @@ def _result_blob_pixel_areas(blobs: list[BlobMetrics], obbs, image_shape: tuple)
         for b in blobs:
             if b.manual_outlier:
                 continue
-            x, y, w, h = cv2.boundingRect(b.contour)
-            x0, y0, x1, y1 = max(0, x), max(0, y), min(image_shape[1], x+w), min(image_shape[0], y+h)
-            if x0 >= x1 or y0 >= y1:
-                areas.append(0)
-                continue
-            mask = np.zeros((y1-y0, x1-x0), np.uint8)
-            cv2.drawContours(mask, [b.contour], -1, 255, cv2.FILLED, offset=(-x0, -y0))
-            areas.append(cv2.countNonZero(mask))
+            _, _, mask = _blob_mask_region(b.contour, image_shape)
+            areas.append(cv2.countNonZero(mask) if mask.size else 0)
         return areas
     foreground = _draw_blob_union_mask(image_shape, blobs)
     areas = []
@@ -1203,19 +1170,12 @@ def _missing_result_obb_blob(
 
 
 def _result_obb_overlap_candidates(
-    blobs: list, boxes: list, poly: np.ndarray, available: list[int],
+    blob_regions: list, obb_region: tuple, available: list[int],
 ) -> list[tuple[int, int]]:
     """Positive raster overlaps with blobs not yet owned by a centre match."""
-    ox0, oy0, ox1, oy1 = _polygon_bounds(poly)
     candidates = []
     for index in available:
-        blob = blobs[index]
-        bx, by, bw, bh = boxes[index]
-        x0, y0 = max(ox0, bx), max(oy0, by)
-        x1, y1 = min(ox1, bx + bw), min(oy1, by + bh)
-        if x1 <= x0 or y1 <= y0:
-            continue
-        _blob_pixels, overlap = _rasterize_overlap(blob.contour, poly, x0, y0, x1, y1)
+        overlap = _mask_region_overlap(blob_regions[index], obb_region)
         if overlap > 0:
             candidates.append((index, overlap))
     return candidates
@@ -5349,12 +5309,11 @@ class CrossingReviewApp(ctk.CTk):
             by_frame.setdefault(int(frame_idx), [])
         output = []
         for frame_idx, frame_blobs in by_frame.items():
-            _match_result_obbs_to_blobs(frame_blobs, frame_idx, result_match)
             obbs = result_match.obbs_by_frame.get(frame_idx)
             if obbs is None or image_shape is None:
                 output.extend(frame_blobs)
                 continue
-            regions = [_result_obb_mask(poly, image_shape) for poly in obbs]
+            regions = _match_result_obbs_to_blobs(frame_blobs, frame_idx, result_match, image_shape)
             areas = _result_blob_pixel_areas(frame_blobs, obbs, image_shape)
             owners = [[i for i, b in enumerate(frame_blobs) if ri in b.result_obb_indices] for ri in range(len(obbs))]
             for b in frame_blobs:
@@ -5806,7 +5765,12 @@ class CrossingReviewApp(ctk.CTk):
         return None
 
     def _blob_tooltip_text(self, blob: BlobMetrics) -> str:
-        lines = [f"Area: {int(round(blob.area))} px"]
+        shape = (self.reader.height, self.reader.width)
+        blob_region = _blob_mask_region(blob.contour, shape)
+        blob_mask = blob_region[2]
+        blob_pixels = cv2.countNonZero(blob_mask) if blob_mask.size else 0
+        lines = [f"Blob mask area: {blob_pixels} px",
+                 f"Contour area (Outlier Extraction): {blob.area:g} px²"]
         if self.analysis_iqr_stats and "area" in self.analysis_iqr_stats:
             q1, _median, q3, iqr = self._normalized_area_stat(self.analysis_iqr_stats["area"])
             if iqr > 1e-9:
@@ -5823,10 +5787,16 @@ class CrossingReviewApp(ctk.CTk):
                 lines.append("IQR: 0")
         if self._result_match is not None:
             lines.append(f"Result OBBs: {blob.result_obb_count}")
+            obbs = self._result_match.obbs_by_frame.get(int(blob.frame))
+            if obbs is not None and blob_mask.size:
+                for ri in blob.result_obb_indices:
+                    inside_pixels = _mask_region_overlap(blob_region, _result_obb_mask(obbs[ri], shape))
+                    label = "This blob inside OBB" if len(blob.result_obb_indices) == 1 else f"This blob inside OBB {ri+1}"
+                    lines.append(f"{label}: {inside_pixels} px")
             if blob.result_blob_area is not None:
-                lines.append(f"Blob area inside OBB: {blob.result_blob_area} px")
+                lines.append(f"All source blob pixels inside OBB (Result threshold): {blob.result_blob_area} px")
             if blob.result_obb_count == 1 and not blob.manual_outlier:
-                lines.append(f"OBB coverage: {blob.result_obb_coverage * 100:.0f}%")
+                lines.append(f"Source blob OBB coverage: {blob.result_obb_coverage * 100:.0f}%")
             if blob.result_area_outlier:
                 lines.append("Outside Result area bounds")
         lines.append("outlier" if blob.is_crossing else "non-outlier")

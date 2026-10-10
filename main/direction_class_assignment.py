@@ -29,6 +29,7 @@ if PROJECT_ROOT not in sys.path:
 
 from gui.color import OBB_COLOR, OUTLIER_COLOR
 from path_utils import resolve_config_paths
+from main.roi import contour_mask_region, convex_polygon_mask_region, mask_region_overlap
 from video_frame_count import (
     clamp_frame_range_to_usable_count,
     read_video_frame_info,
@@ -1042,6 +1043,7 @@ def rescue_directions_from_result(
     cfg: dict,
     result_by_frame: Dict[int, List[ResultObb]],
     refine_deleted_keys: Iterable[Tuple[int, int]] = (),
+    *, image_shape: Tuple[int, int],
 ) -> Dict[str, int]:
     """Rescue only direction failures using conservative frame-local matches.
 
@@ -1065,21 +1067,18 @@ def rescue_directions_from_result(
             continue
         boxes = result_by_frame.get(fid, [])
         polygons = [_result_obb_points(box) for box in boxes]
-        masks = []
+        obb_regions = [convex_polygon_mask_region(poly, image_shape) if poly is not None else None
+                       for poly in polygons]
+        blob_regions = []
         areas = []
         overlaps = np.zeros((len(blobs), len(boxes)), dtype=np.int64)
         for bi, blob in enumerate(blobs):
-            x, y, w, h = blob.rect
-            mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.drawContours(mask, [blob.contour], -1, 1, cv2.FILLED, offset=(-x, -y))
-            masks.append(mask)
-            areas.append(cv2.countNonZero(mask))
-            for ri, poly in enumerate(polygons):
-                if poly is None or poly[:, 0].max() < x or poly[:, 0].min() >= x + w or poly[:, 1].max() < y or poly[:, 1].min() >= y + h:
-                    continue
-                obb_mask = np.zeros_like(mask)
-                cv2.fillConvexPoly(obb_mask, np.round(poly - (x, y)).astype(np.int32), 1)
-                overlaps[bi, ri] = cv2.countNonZero(mask & obb_mask)
+            region = contour_mask_region(blob.contour, image_shape)
+            blob_regions.append(region)
+            areas.append(cv2.countNonZero(region[2]) if region[2].size else 0)
+            for ri, obb_region in enumerate(obb_regions):
+                if obb_region is not None:
+                    overlaps[bi, ri] = mask_region_overlap(region, obb_region)
         owners = []
         for ri, box in enumerate(boxes):
             inside = [bi for bi, blob in enumerate(blobs)
@@ -1149,17 +1148,8 @@ def rescue_directions_from_result(
             if any(overlaps[bj, ri] / max(1, areas[bj]) > 0.1 for bj in range(len(blobs)) if bj != bi):
                 reject("obb_spans_multiple_blobs")
                 continue
-            x, y, w, h = blob.rect
-            overlapping_blob = False
-            for bj, other in enumerate(blobs):
-                if bj == bi:
-                    continue
-                ox, oy, ow, oh = other.rect
-                x0, y0, x1, y1 = max(x, ox), max(y, oy), min(x + w, ox + ow), min(y + h, oy + oh)
-                if x0 < x1 and y0 < y1 and np.any(masks[bi][y0-y:y1-y, x0-x:x1-x] & masks[bj][y0-oy:y1-oy, x0-ox:x1-ox]):
-                    overlapping_blob = True
-                    break
-            if overlapping_blob:
+            if any(bj != bi and mask_region_overlap(blob_regions[bi], other) > 0
+                   for bj, other in enumerate(blob_regions)):
                 reject("overlapping_segmentation")
                 continue
             axis, long_side, aspect, blob_obb = _obb_geometry_from_contour(blob.contour, fit_mode)
@@ -2307,7 +2297,10 @@ def main() -> None:
     refine_delete_map = load_refine_delete_map(session_path)
     refine_delete_stats = apply_refine_deletions(blob_records, refine_delete_map)
     if pre_result_by_frame is not None:
-        direction_stats.update(rescue_directions_from_result(blob_records, cfg, pre_result_by_frame, refine_delete_map))
+        direction_stats.update(rescue_directions_from_result(
+            blob_records, cfg, pre_result_by_frame, refine_delete_map,
+            image_shape=_probe_video_frame_shape(str(cfg["TRAINING_VIDEO_PATH"])),
+        ))
         print(
             "[PRE_RESULT_PATH] trajectory accepted="
             f"{direction_stats['trajectory_accepted_blobs']}, result rescued={direction_stats['result_rescued_blobs']}, "
