@@ -189,20 +189,25 @@ def get_init_max_dist_ratio(cfg: dict) -> float:
     return float(cfg.get("INIT_MAX_DIST", 1.5))
 
 
-def compute_individual_distance_stats(blob_records: Dict[int, List[BlobInfo]], cfg: dict) -> Dict[str, float]:
+def compute_individual_distance_stats(
+    blob_records: Dict[int, List[BlobInfo]], cfg: dict, *,
+    result_scale_axis_lengths: Optional[Sequence[float]] = None,
+) -> Dict[str, float]:
     # This body-length estimate is not used by the OBB IoU initial matcher,
     # but it normalizes the measured inter-frame displacement below.
     all_non_crossing = [b for items in blob_records.values() for b in items if not b.is_crossing]
-    major_axis_lengths = [float(b.obb_major_axis_len) for b in all_non_crossing]
+    major_axis_lengths = (
+        [float(b.obb_major_axis_len) for b in all_non_crossing]
+        if result_scale_axis_lengths is None
+        else [float(length) for length in result_scale_axis_lengths]
+    )
     axis_bounds = iqr_bounds(
         major_axis_lengths,
         float(cfg.get("SIZE_IQR_MULTIPLIER_MIN", 1.5)),
         float(cfg.get("SIZE_IQR_MULTIPLIER_MAX", 1.5)),
     )
     source = [
-        float(b.obb_major_axis_len)
-        for b in all_non_crossing
-        if inside_bounds(float(b.obb_major_axis_len), axis_bounds)
+        length for length in major_axis_lengths if inside_bounds(length, axis_bounds)
     ]
     if not source:
         source = major_axis_lengths
@@ -210,7 +215,7 @@ def compute_individual_distance_stats(blob_records: Dict[int, List[BlobInfo]], c
     if individual_distance_px <= 0.0:
         raise RuntimeError("Failed to compute body length in initial_tracking.")
     init_max_dist_px = individual_distance_px * get_init_max_dist_ratio(cfg)
-    return {
+    stats = {
         "individual_distance_px": individual_distance_px,
         "individual_distance_source_count": len(source),
         "individual_distance_source_total_non_crossing": len(all_non_crossing),
@@ -219,6 +224,49 @@ def compute_individual_distance_stats(blob_records: Dict[int, List[BlobInfo]], c
         "init_max_dist_ratio": get_init_max_dist_ratio(cfg),
         "init_max_dist_px": init_max_dist_px,
     }
+    if result_scale_axis_lengths is not None:
+        stats["result_scale_source_count"] = len(major_axis_lengths)
+    return stats
+
+
+def _result_verified_scale_axis_lengths(
+    pickle_obj, frame_indices: Sequence[int], cfg: dict, image_shape: Sequence[int],
+) -> List[float]:
+    """Use the image-generation rescue gates to measure original single contours.
+
+    These samples supply body scale only; the Initial Tracking records retain
+    their segmentation flags and never receive Result IDs or directions.
+    """
+    from direction_class_assignment import (
+        build_blob_records, load_pre_result_csv, load_refine_delete_map,
+        rescue_directions_from_result,
+    )
+
+    records = build_blob_records(
+        resolve_blob_sequence(pickle_obj), frame_indices,
+        obb_fit_mode=cfg.get("OBB_FIT_MODE", "min_area"),
+        segmentation_source_blobs=getattr(pickle_obj, "segmentation_source_blobs", None),
+    )
+    for frame_blobs in records.values():
+        for blob in frame_blobs:
+            blob.erase_final = True
+            blob.erase_reasons_final = ["traj_unmatched"]
+    result_by_frame = load_pre_result_csv(str(cfg["PRE_RESULT_PATH"]), frame_indices)
+    refine_delete_map = load_refine_delete_map(str(cfg["SESSION_PATH"]), include_applied=True)
+    rescue_directions_from_result(
+        records, cfg, result_by_frame, refine_delete_map, image_shape=image_shape,
+    )
+    lengths = [
+        float(blob.obb_major_axis_len)
+        for frame_blobs in records.values() for blob in frame_blobs
+        if not blob.erase_final and blob.direction_source == "result"
+        and blob.obb_major_axis_len is not None and blob.obb_major_axis_len > 0
+    ]
+    if not lengths:
+        raise RuntimeError(
+            "No Result-verified single-animal contours were found for body-length measurement."
+        )
+    return lengths
 
 
 def _as_contour_array(value) -> np.ndarray:
@@ -655,6 +703,8 @@ def compute_auto_params(
     cfg: dict,
     frame_shape: Sequence[int],
     fps: float,
+    *,
+    result_scale_axis_lengths: Optional[Sequence[float]] = None,
 ) -> dict:
     """Measure the segmented frames and return automatic config values plus statistics."""
     if len(frame_shape) < 2:
@@ -670,12 +720,14 @@ def compute_auto_params(
         for blob in frame_blobs
         if not blob.is_crossing
     ]
-    if not non_crossing:
+    if not non_crossing and result_scale_axis_lengths is None:
         raise RuntimeError("No non-crossing blobs were found for automatic parameter measurement.")
 
     frame_indices = sorted(int(f) for f in blob_records.keys())
 
-    distance_stats = compute_individual_distance_stats(blob_records, cfg)
+    distance_stats = compute_individual_distance_stats(
+        blob_records, cfg, result_scale_axis_lengths=result_scale_axis_lengths,
+    )
     individual_distance_px = float(distance_stats["individual_distance_px"])
 
     localized_ratio_threshold = validate_threshold(
@@ -820,6 +872,7 @@ def save_assignments(rows: List[Dict[str, object]], out_dir: str, tracking_stats
             "individual_distance_px",
             "individual_distance_source_count",
             "individual_distance_source_total_non_crossing",
+            "result_scale_source_count",
             "obb_major_axis_lo",
             "obb_major_axis_hi",
             "init_max_dist_ratio",
@@ -918,11 +971,26 @@ def _prepare_context(
         obb_fit_mode=cfg.get("OBB_FIT_MODE", "min_area"),
     )
 
+    result_scale_axis_lengths = None
+    if (
+        str(cfg.get("PRE_RESULT_PATH", "") or "").strip()
+        and not cfg.get("WITHOUT_DIRECTION_ESTIMATION", False)
+        and not any(not blob.is_crossing for items in blob_records.values() for blob in items)
+    ):
+        result_scale_axis_lengths = _result_verified_scale_axis_lengths(
+            pickle_obj, frame_indices, cfg, (frame_info.height, frame_info.width),
+        )
+        print(
+            "[PRE_RESULT_PATH] body-length measurement from verified original contours: "
+            f"{len(result_scale_axis_lengths)}"
+        )
+
     auto_params = compute_auto_params(
         blob_records,
         cfg,
         (frame_info.height, frame_info.width),
         frame_info.fps,
+        result_scale_axis_lengths=result_scale_axis_lengths,
     )
     auto_enabled = bool(cfg.get("AUTO_PARAMS", True))
     print(f"[initial_tracking] AUTO_PARAMS={auto_enabled}")

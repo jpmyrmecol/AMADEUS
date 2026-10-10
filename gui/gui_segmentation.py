@@ -375,6 +375,7 @@ class BlobMetrics:
     result_blob_area: Optional[int] = None  # original segment union inside OBB (Result threshold)
     result_generated: bool = False
     result_protected: bool = False
+    result_source_index: Optional[int] = None
     result_source_frame: Optional[tuple] = field(default=None, repr=False, compare=False)
 
 
@@ -1098,6 +1099,34 @@ def _restore_result_inputs(blobs: list[BlobMetrics]) -> list[BlobMetrics]:
                 for sources in frames.values() for b in sources]
     restored.extend(b for b in blobs if b.frame not in frames)
     return restored
+
+
+def _segmentation_pickle_blob(blob: BlobMetrics, source_index: Optional[int] = None) -> SimpleNamespace:
+    """Keep exclusion provenance separate from the contour used for erasure."""
+    item = SimpleNamespace(contour=blob.contour.astype(np.int32), is_outlier=bool(blob.is_crossing))
+    if blob.result_protected:
+        item.result_protected = True
+    if blob.result_generated or blob.result_missing:
+        exclusion = "synthetic"
+    elif blob.manual_outlier:
+        exclusion = "manual"
+    elif blob.result_obb_count > 1:
+        exclusion = "result_multiple"
+    elif not blob.is_crossing:
+        exclusion = ""
+    elif blob.result_area_outlier:
+        exclusion = "result_area"
+    elif blob.area_outlier or blob.bbox_area_outlier or blob.width_outlier or blob.height_outlier:
+        exclusion = "statistical"
+    else:
+        exclusion = "result_overlap"
+    if exclusion:
+        item.segmentation_exclusion = exclusion
+    if blob.result_obb_count:
+        item.result_obb_count = int(blob.result_obb_count)
+    if source_index is not None:
+        item.segmentation_source_index = int(source_index)
+    return item
 
 
 def _result_region_covered_at_most_half(region, foreground: np.ndarray) -> bool:
@@ -5173,6 +5202,7 @@ class CrossingReviewApp(ctk.CTk):
             result_blob_area=blob.result_blob_area,
             result_generated=blob.result_generated,
             result_protected=blob.result_protected,
+            result_source_index=blob.result_source_index,
             result_source_frame=blob.result_source_frame,
         )
 
@@ -5278,6 +5308,7 @@ class CrossingReviewApp(ctk.CTk):
             b.result_blob_area = None
             b.result_obb_indices = ()
             b.result_protected = False
+            b.result_source_index = None
             b.result_source_frame = None
             b.is_crossing = bool(b.manual_outlier or b.area_outlier)
         if result_match is not None:
@@ -5313,6 +5344,8 @@ class CrossingReviewApp(ctk.CTk):
             if obbs is None or image_shape is None:
                 output.extend(frame_blobs)
                 continue
+            for index, b in enumerate(frame_blobs):
+                b.result_source_index = index
             regions = _match_result_obbs_to_blobs(frame_blobs, frame_idx, result_match, image_shape)
             areas = _result_blob_pixel_areas(frame_blobs, obbs, image_shape)
             owners = [[i for i, b in enumerate(frame_blobs) if ri in b.result_obb_indices] for ri in range(len(obbs))]
@@ -6522,13 +6555,17 @@ class CrossingReviewApp(ctk.CTk):
                 raise RuntimeError("In this mode, please compute the background first.")
             source = self._build_export_source_all_frames()
         blobs_in_video: list[list[SimpleNamespace]] = []
+        segmentation_source_blobs: dict[int, list[SimpleNamespace]] = {}
         for fid in range(self.frame_count):
             frame_blobs = []
             for b in source.get(fid, []):
-                item = SimpleNamespace(contour=b.contour.astype(np.int32), is_outlier=bool(b.is_crossing))
-                if b.result_protected:
-                    item.result_protected = True
+                item = _segmentation_pickle_blob(b, b.result_source_index)
                 frame_blobs.append(item)
+                if b.result_source_frame is not None and fid not in segmentation_source_blobs:
+                    segmentation_source_blobs[fid] = [
+                        _segmentation_pickle_blob(original, index)
+                        for index, original in enumerate(b.result_source_frame)
+                    ]
             blobs_in_video.append(frame_blobs)
         if metadata is None:
             metadata = {
@@ -6540,7 +6577,7 @@ class CrossingReviewApp(ctk.CTk):
                 "pre_result_path": self._active_pre_result_path(),
             }
         with open(path, "wb") as f:
-            pickle.dump(SimpleNamespace(
+            exported = SimpleNamespace(
                 blobs_in_video=blobs_in_video,
                 source_frame_count=int(self.frame_count),
                 background_frame_start=int(metadata["background_frame_start"]),
@@ -6551,7 +6588,10 @@ class CrossingReviewApp(ctk.CTk):
                 pre_result_path=to_relative_path(
                     metadata.get("pre_result_path", ""), os.path.dirname(os.path.abspath(path)),
                 ),
-            ), f)
+            )
+            if segmentation_source_blobs:
+                exported.segmentation_source_blobs = segmentation_source_blobs
+            pickle.dump(exported, f)
 
     def _launch_easy_tracking(self, session_path: str, video_path: str):
         target = str(gui_script("gui_easy_tracking.py"))

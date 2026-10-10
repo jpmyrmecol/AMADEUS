@@ -145,6 +145,13 @@ class BlobRecord:
     result_rescue_reason: str = ""
     result_track_id: Optional[int] = None
     result_blob_coverage: Optional[float] = None
+    segmentation_exclusion: str = ""
+    segmentation_obb_count: int = 0
+    segmentation_source_index: Optional[int] = None
+    source_fragment_indices: Tuple[int, ...] = ()
+    result_source_restored: bool = False
+    result_mask_only: bool = False
+    result_before_reasons: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -265,12 +272,26 @@ def ensure_dirs(paths: Iterable[str]) -> None:
         os.makedirs(p, exist_ok=True)
 
 
-def reset_without_crossing_output_dir(out_dir: str) -> None:
+def reset_without_crossing_output_dir(out_dir: str, *, preserve_applied_deletions: bool = False) -> None:
     import shutil
     keep_names = {"refine"}
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir, exist_ok=True)
         return
+    if preserve_applied_deletions:
+        for name in os.listdir(out_dir):
+            path = os.path.join(out_dir, name)
+            if not re.fullmatch(r"refine_add\d+", name) or not os.path.isfile(os.path.join(path, "delete_blobs_applied.csv")):
+                continue
+            keep_names.add(name)
+            for child in os.listdir(path):
+                if child == "delete_blobs_applied.csv":
+                    continue
+                child_path = os.path.join(path, child)
+                if os.path.isdir(child_path):
+                    shutil.rmtree(child_path)
+                else:
+                    os.remove(child_path)
     for name in os.listdir(out_dir):
         if name in keep_names:
             continue
@@ -295,18 +316,29 @@ def reset_without_crossing_output_dir(out_dir: str) -> None:
                 os.remove(os.path.join(refine_dir, name))
 
 
-def load_refine_delete_map(session_path: str) -> Dict[Tuple[int, int], List[str]]:
-    path = os.path.join(session_path, SINGLE_ANIMAL_IMAGES_DIR_NAME, "refine", "delete_blobs.csv")
+def load_refine_delete_map(session_path: str, *, include_applied: bool = False) -> Dict[Tuple[int, int], List[str]]:
+    root = os.path.join(session_path, SINGLE_ANIMAL_IMAGES_DIR_NAME)
+    raw_path = os.path.join(root, "refine", "delete_blobs.csv")
+    paths = [raw_path]
+    automatic_candidates = {"refine_no_prediction", "refine_no_overlap", "refine_direction_mismatch_ge_90deg",
+                            "refine_run_delete_ge_threshold", LOW_OBB_ASPECT_REASON}
+    if include_applied and os.path.isdir(root):
+        paths.extend(os.path.join(root, name, "delete_blobs_applied.csv") for name in sorted(os.listdir(root))
+                     if re.fullmatch(r"refine(?:_add\d+)?", name))
     out: Dict[Tuple[int, int], List[str]] = {}
-    if not os.path.exists(path):
-        return out
-    with open(path, "r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            frame = int(row["frame"])
-            blob_index = int(row["blob_index"])
-            reasons = [x for x in str(row.get("reasons", "")).split("|") if x]
-            out[(frame, blob_index)] = reasons or ["refine_delete"]
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                key = (int(row["frame"]), int(row["blob_index"]))
+                reasons = [x for x in str(row.get("reasons", "")).split("|") if x] or ["refine_delete"]
+                if include_applied and path == raw_path:
+                    # Automatic candidates may have been kept by the run policy.
+                    # Honor its applied decisions and retain explicit custom marks.
+                    reasons = [reason for reason in reasons if reason not in automatic_candidates]
+                for reason in reasons:
+                    append_unique_reason(out.setdefault(key, []), reason)
     return out
 
 
@@ -314,7 +346,10 @@ def apply_refine_deletions(blob_records: Dict[int, List[BlobRecord]], refine_del
     count = 0
     for fid, records in blob_records.items():
         for b in records:
-            reasons = refine_delete_map.get((int(fid), int(b.blob_index)))
+            reasons = list(refine_delete_map.get((int(fid), int(b.blob_index)), []))
+            for index in b.source_fragment_indices:
+                for reason in refine_delete_map.get((int(fid), index), []):
+                    append_unique_reason(reasons, reason)
             if not reasons:
                 continue
             b.erase_final = True
@@ -560,12 +595,33 @@ def get_required_tracking_stat(stats: Dict[str, str], key: str, cast):
 
 def build_blob_records(
     blob_seq, frame_indices: Sequence[int], obb_fit_mode: str = "min_area",
+    *, segmentation_source_blobs: Optional[dict] = None,
 ) -> Dict[int, List[BlobRecord]]:
+    """Load emitted masks and recover one candidate for each real source contour."""
     obb_fit_mode = normalize_obb_fit_mode(obb_fit_mode)
     out: Dict[int, List[BlobRecord]] = {}
     for fid in tqdm(frame_indices, desc="Preparing blobs"):
         records: List[BlobRecord] = []
-        for bi, bl in enumerate(get_frame_blobs(blob_seq, fid)):
+        emitted = list(get_frame_blobs(blob_seq, fid))
+        emitted_count = len(emitted)
+        sources = (segmentation_source_blobs or {}).get(int(fid), [])
+        source_groups = {}
+        if sources:
+            for bi, item in enumerate(emitted):
+                source_index = getattr(item, "segmentation_source_index", None)
+                if source_index is not None:
+                    source_groups.setdefault(int(source_index), []).append(bi)
+        mask_only_indices = set()
+        for source in sources:
+            source_index = int(source.segmentation_source_index)
+            group = source_groups.get(source_index, [])
+            same = [bi for bi in group if np.array_equal(np.asarray(emitted[bi].contour).reshape(-1, 2),
+                                                       np.asarray(source.contour).reshape(-1, 2))]
+            if same:
+                continue
+            mask_only_indices.update(group)
+            emitted.append(source)
+        for bi, bl in enumerate(emitted):
             cnt = np.asarray(bl.contour, dtype=np.int32)
             if cnt.size == 0:
                 continue
@@ -587,6 +643,12 @@ def build_blob_records(
                     result_protected=bool(getattr(bl, "result_protected", False)),
                     frame=int(fid),
                     blob_index=int(bi),
+                    segmentation_exclusion=str(getattr(bl, "segmentation_exclusion", "")),
+                    segmentation_obb_count=int(getattr(bl, "result_obb_count", 0)),
+                    segmentation_source_index=getattr(bl, "segmentation_source_index", None),
+                    source_fragment_indices=tuple(source_groups.get(getattr(bl, "segmentation_source_index", None), [])),
+                    result_source_restored=bool(bi >= emitted_count),
+                    result_mask_only=bool(bi in mask_only_indices),
                 )
             )
         out[int(fid)] = records
@@ -606,7 +668,7 @@ def classify_blobs_stage1(
     individual_distance_source_total_non_crossing: int,
     init_max_dist_px: float,
 ) -> Dict[str, Tuple[float, float]]:
-    all_non_crossing = [b for lst in blob_records.values() for b in lst if not b.pickle_outlier]
+    all_non_crossing = [b for lst in blob_records.values() for b in lst if not b.pickle_outlier and not b.result_mask_only]
 
     area_values = [b.area for b in all_non_crossing]
     bbox_values = [b.bbox_area for b in all_non_crossing]
@@ -633,6 +695,15 @@ def classify_blobs_stage1(
             reasons: List[str] = []
             if b.pickle_outlier:
                 reasons.append("pickle_outlier")
+            if b.result_mask_only:
+                reasons.append("segmentation_fragment")
+            if b.result_source_restored:
+                reasons.append("segmentation_source_restored")
+            if str(cfg.get("PRE_RESULT_PATH", "") or "").strip():
+                if b.segmentation_exclusion in {"manual", "synthetic", "result_multiple"}:
+                    reasons.append("segmentation_" + b.segmentation_exclusion)
+                elif b.segmentation_obb_count > 1:
+                    reasons.append("segmentation_result_multiple")
             if b.obb_aspect_ratio is not None and np.isfinite(b.obb_aspect_ratio):
                 b.low_obb_aspect_outlier = bool(float(b.obb_aspect_ratio) < min_obb_aspect_ratio)
                 if b.low_obb_aspect_outlier:
@@ -1044,25 +1115,36 @@ def rescue_directions_from_result(
     result_by_frame: Dict[int, List[ResultObb]],
     refine_deleted_keys: Iterable[Tuple[int, int]] = (),
     *, image_shape: Tuple[int, int],
-) -> Dict[str, int]:
-    """Rescue only direction failures using conservative frame-local matches.
+) -> Dict[str, object]:
+    """Re-evaluate statistical and direction exclusions using real source masks.
 
     Imported IDs are audit information only. Trajectories, source contours,
-    hard segmentation exclusions and explicit refinement deletions are kept.
+    Manual/synthetic exclusions, mixed contours and explicit refinement
+    deletions remain excluded. Generated erase masks never become donors.
     """
     direction_reasons = {
         "disp_too_small", "motion_ambiguous", "short_run", "traj_unmatched",
         "insufficient_valid_frames", "direction_unassigned",
     }
+    statistical_reasons = {
+        "pickle_outlier", "low_obb_aspect", "jump_outlier", "area_outlier",
+        "bbox_area_outlier", "width_outlier", "height_outlier", "obb_major_axis_outlier",
+        "segmentation_source_restored",
+    }
+    soft_segmentation = {"statistical", "result_area", "result_overlap"}
     deleted = set(refine_deleted_keys)
     stats = Counter(trajectory_accepted_blobs=0, result_rescue_candidates=0,
                     result_rescued_blobs=0, result_rescue_failed_blobs=0,
                     result_rescue_ineligible_blobs=0)
     fit_mode = cfg.get("OBB_FIT_MODE", "min_area")
     for fid, blobs in blob_records.items():
-        if all(not blob.erase_final and blob.class_id is not None for blob in blobs):
+        if all(not b.erase_final and b.class_id is not None and not b.result_mask_only
+               and b.segmentation_exclusion not in {"manual", "synthetic", "result_multiple"}
+               and b.segmentation_obb_count <= 1 and (fid, b.blob_index) not in deleted
+               and all((fid, index) not in deleted for index in b.source_fragment_indices) for b in blobs):
             for blob in blobs:
-                blob.direction_source = "trajectory"
+                if not blob.direction_source:
+                    blob.direction_source = "trajectory"
             stats["trajectory_accepted_blobs"] += len(blobs)
             continue
         boxes = result_by_frame.get(fid, [])
@@ -1079,20 +1161,32 @@ def rescue_directions_from_result(
             for ri, obb_region in enumerate(obb_regions):
                 if obb_region is not None:
                     overlaps[bi, ri] = mask_region_overlap(region, obb_region)
+        geometry_indices = [bi for bi, blob in enumerate(blobs) if not blob.result_mask_only
+                            and blob.segmentation_exclusion not in {"synthetic", "manual"}]
+        manual_regions = [blob_regions[bi] for bi, blob in enumerate(blobs)
+                          if blob.segmentation_exclusion == "manual"]
         owners = []
         for ri, box in enumerate(boxes):
-            inside = [bi for bi, blob in enumerate(blobs)
-                      if cv2.pointPolygonTest(blob.contour, (box.cx, box.cy), False) >= 0]
+            inside = [bi for bi in geometry_indices
+                      if cv2.pointPolygonTest(blobs[bi].contour, (box.cx, box.cy), False) >= 0]
             if inside:
                 owners.append(inside[0] if len(inside) == 1 else -1)
-            elif blobs and overlaps[:, ri].max() > 0:
-                best = np.flatnonzero(overlaps[:, ri] == overlaps[:, ri].max())
-                owners.append(int(best[0]) if len(best) == 1 else -1)
+            elif geometry_indices and overlaps[geometry_indices, ri].max() > 0:
+                maximum = overlaps[geometry_indices, ri].max()
+                best = [bi for bi in geometry_indices if overlaps[bi, ri] == maximum]
+                owners.append(best[0] if len(best) == 1 else -1)
             else:
                 owners.append(-1)
 
         for bi, blob in enumerate(blobs):
-            if blob.class_id is not None:
+            is_deleted = (fid, blob.blob_index) in deleted or any(
+                (fid, index) in deleted for index in blob.source_fragment_indices)
+            if is_deleted:
+                blob.erase_final = True
+                append_unique_reason(blob.erase_reasons_final, "refine_deleted")
+            if blob.result_mask_only or blob.segmentation_exclusion in {"manual", "synthetic", "result_multiple"} or blob.segmentation_obb_count > 1:
+                blob.erase_final = True
+            if blob.class_id is not None and not blob.direction_source:
                 blob.direction_source = "trajectory"
             if not blob.erase_final and blob.class_id is not None:
                 stats["trajectory_accepted_blobs"] += 1
@@ -1102,19 +1196,45 @@ def rescue_directions_from_result(
                 blob.result_rescue_reason = reason
                 stats[f"result_rescue_rejected:{reason}"] += 1
 
-            if (fid, blob.blob_index) in deleted:
+            blob.result_before_reasons = list(blob.erase_reasons_final)
+            if blob.segmentation_exclusion:
+                append_unique_reason(blob.result_before_reasons, "segmentation:" + blob.segmentation_exclusion)
+            if is_deleted:
                 stats["result_rescue_ineligible_blobs"] += 1
                 reject("refine_deleted")
                 continue
-            if blob.erase_stage1 or blob.pickle_outlier:
+            if blob.result_mask_only:
                 stats["result_rescue_ineligible_blobs"] += 1
-                reject("stage1_excluded")
+                reject("source_fragment")
                 continue
-            if blob.class_id is not None or not blob.erase_reasons_final or not set(blob.erase_reasons_final) <= direction_reasons:
+            if blob.segmentation_exclusion in {"manual", "synthetic", "result_multiple"} or blob.segmentation_obb_count > 1:
                 stats["result_rescue_ineligible_blobs"] += 1
-                reject("not_direction_failure")
+                reject("segmentation_" + ("result_multiple" if blob.segmentation_obb_count > 1 else blob.segmentation_exclusion))
+                continue
+            if blob.pickle_outlier and blob.segmentation_exclusion not in soft_segmentation:
+                stats["result_rescue_ineligible_blobs"] += 1
+                reject("segmentation_reason_unknown")
+                continue
+            reasons = set(blob.erase_reasons_final)
+            if not reasons and blob.class_id is None:
+                reasons = {"direction_unassigned"}
+                append_unique_reason(blob.result_before_reasons, "direction_unassigned")
+            if not reasons <= direction_reasons | statistical_reasons:
+                stats["result_rescue_ineligible_blobs"] += 1
+                reject("non_reassessable_exclusion")
                 continue
             stats["result_rescue_candidates"] += 1
+            if blob.area <= 0 or areas[bi] <= 0 or not np.all(np.isfinite(blob.center)):
+                reject("invalid_segmentation")
+                continue
+            points = blob.contour.reshape(-1, 2)
+            if np.any(points[:, 0] < 0) or np.any(points[:, 0] >= image_shape[1]) or \
+                    np.any(points[:, 1] < 0) or np.any(points[:, 1] >= image_shape[0]):
+                reject("segmentation_outside_frame")
+                continue
+            if any(mask_region_overlap(blob_regions[bi], region) > 0 for region in manual_regions):
+                reject("manual_exclusion_overlap")
+                continue
             if not boxes:
                 reject("no_result_frame")
                 continue
@@ -1139,25 +1259,26 @@ def rescue_directions_from_result(
                 continue
             coverage = float(overlaps[bi, ri]) / max(1, areas[bi])
             blob.result_blob_coverage = coverage
-            if coverage < 0.9:
+            if coverage < 0.85:
                 reject("insufficient_blob_coverage")
                 continue
             if sum(overlaps[bi, rj] / max(1, areas[bi]) > 0.1 for rj in range(len(boxes))) > 1:
                 reject("competing_result_obb")
                 continue
-            if any(overlaps[bj, ri] / max(1, areas[bj]) > 0.1 for bj in range(len(blobs)) if bj != bi):
+            if any(overlaps[bj, ri] / max(1, areas[bj]) > 0.1 and overlaps[bj, ri] > 0.05 * areas[bi]
+                   for bj in geometry_indices if bj != bi):
                 reject("obb_spans_multiple_blobs")
                 continue
-            if any(bj != bi and mask_region_overlap(blob_regions[bi], other) > 0
-                   for bj, other in enumerate(blob_regions)):
+            if any(bj != bi and mask_region_overlap(blob_regions[bi], blob_regions[bj]) > 0
+                   for bj in geometry_indices):
                 reject("overlapping_segmentation")
                 continue
             axis, long_side, aspect, blob_obb = _obb_geometry_from_contour(blob.contour, fit_mode)
-            if axis is None or aspect is None or aspect < max(1.25, get_min_obb_aspect_ratio(cfg)):
+            if axis is None or aspect is None or aspect < 1.25:
                 reject("axis_ambiguous")
                 continue
             short_side = long_side / aspect
-            if not (0.75 <= box.w / long_side <= 1.25 and short_side > 0 and 0.75 <= box.h / short_side <= 1.25):
+            if not (0.70 <= box.w / long_side <= 1.40 and short_side > 0 and 0.70 <= box.h / short_side <= 1.40):
                 reject("obb_size_mismatch")
                 continue
             theta = math.radians(box.heading % 360.0)
@@ -1165,7 +1286,7 @@ def rescue_directions_from_result(
             if abs(float(np.dot(axis, direction))) < math.cos(math.radians(20.0)):
                 reject("heading_axis_mismatch")
                 continue
-            if _result_obb_iou(blob_obb, box) < 0.7:
+            if _result_obb_iou(blob_obb, box) < 0.6:
                 reject("obb_shape_mismatch")
                 continue
             length = contour_axis_length(blob.center, direction, blob.contour)
@@ -1177,10 +1298,22 @@ def rescue_directions_from_result(
             blob.axis_length = length
             blob.direction_source = "result"
             blob.result_rescue_reason = "rescued"
+            blob.result_protected = True
             blob.erase_final = False
             blob.erase_reasons_final = []
             stats["result_rescued_blobs"] += 1
+            for reason in blob.result_before_reasons:
+                stats["result_rescue_before:" + reason] += 1
     stats["result_rescue_failed_blobs"] = stats["result_rescue_candidates"] - stats["result_rescued_blobs"]
+    stats["result_rescue_final_kept_blobs"] = sum(b.class_id is not None and not b.erase_final
+                                                for rows in blob_records.values() for b in rows)
+    stats["result_rescue_source_blobs"] = sum(not b.result_mask_only and b.segmentation_exclusion != "synthetic"
+                                            for rows in blob_records.values() for b in rows)
+    stats["result_rescue_erase_mask_blobs"] = sum(b.result_mask_only or b.segmentation_exclusion == "synthetic"
+                                                for rows in blob_records.values() for b in rows)
+    baseline_count = stats["trajectory_accepted_blobs"]
+    stats["result_rescue_gain_ratio"] = stats["result_rescued_blobs"] / baseline_count if baseline_count else "n/a"
+    stats["result_rescue_gain_percent"] = 100 * stats["result_rescued_blobs"] / baseline_count if baseline_count else "n/a"
     return dict(stats)
 
 
@@ -1242,7 +1375,9 @@ def save_blob_classification_csv(blob_records: Dict[int, List[BlobRecord]], boun
             "obb_major_axis_hi",
             "jump_lo",
             "jump_hi",
-        ] + (["direction_source", "result_rescue_reason", "result_track_id", "result_blob_coverage"]
+        ] + (["direction_source", "result_rescue_reason", "result_track_id", "result_blob_coverage",
+              "segmentation_exclusion", "segmentation_source_index", "result_source_restored",
+              "result_mask_only", "result_before_reasons"]
              if include_result_info else []))
         for fid in sorted(blob_records.keys()):
             for b in blob_records[fid]:
@@ -1306,7 +1441,10 @@ def save_blob_classification_csv(blob_records: Dict[int, List[BlobRecord]], boun
                     f"{bounds['jump_bounds'][1]:.3f}" if np.isfinite(bounds['jump_bounds'][1]) else str(bounds['jump_bounds'][1]),
                 ] + ([b.direction_source, b.result_rescue_reason,
                       "" if b.result_track_id is None else b.result_track_id,
-                      "" if b.result_blob_coverage is None else f"{b.result_blob_coverage:.6f}"]
+                      "" if b.result_blob_coverage is None else f"{b.result_blob_coverage:.6f}",
+                      b.segmentation_exclusion,
+                      "" if b.segmentation_source_index is None else b.segmentation_source_index,
+                      int(b.result_source_restored), int(b.result_mask_only), "|".join(b.result_before_reasons)]
                      if include_result_info else []))
     return path
 
@@ -1800,6 +1938,15 @@ def _process_without_crossing_frame(
     saved_preview_count = 0
     if fid in ctx["preview_ids"]:
         preview = canvas.copy()
+        preview_removed = [b for b in remove_blobs if b.contour.reshape(-1, 2).shape[0] >= 3]
+        result_rescued = any(b.direction_source == "result" for b in valid_blobs)
+        if result_rescued:
+            rescued_fragments = {index for b in valid_blobs if b.direction_source == "result"
+                                 for index in b.source_fragment_indices}
+            for b in preview_removed:
+                if b.blob_index in rescued_fragments:
+                    continue
+                draw_obb(preview, contour_to_obb_points(b.contour, obb_fit_mode=ctx["obb_fit_mode"]), OUTLIER_COLOR, 2)
         for b in valid_blobs:
             obb_pts = contour_to_obb_points(b.contour, obb_fit_mode=ctx["obb_fit_mode"])
             draw_obb(preview, obb_pts, OBB_COLOR, 2)
@@ -1813,8 +1960,9 @@ def _process_without_crossing_frame(
                     outline_thickness=1,
                     scale=1.2,
                 )
-        for b in remove_blobs:
-            draw_obb(preview, contour_to_obb_points(b.contour, obb_fit_mode=ctx["obb_fit_mode"]), OUTLIER_COLOR, 2)
+        if not result_rescued:
+            for b in preview_removed:
+                draw_obb(preview, contour_to_obb_points(b.contour, obb_fit_mode=ctx["obb_fit_mode"]), OUTLIER_COLOR, 2)
         cv2.imwrite(os.path.join(ctx["prev_dir"], img_name), preview, ctx["png_write_params"])
         saved_preview_count = 1
 
@@ -2229,7 +2377,8 @@ def main() -> None:
         raise FileNotFoundError(initial_tracking_stats_path)
 
     with open(pickle_path, "rb") as f:
-        blob_seq = resolve_blob_sequence(pickle.load(f))
+        segmentation_data = pickle.load(f)
+    blob_seq = resolve_blob_sequence(segmentation_data)
     initial_tracking_assignments = load_initial_tracking_csv(initial_tracking_csv_path)
     initial_tracking_stats = load_tracking_stats_csv(initial_tracking_stats_path)
 
@@ -2258,7 +2407,8 @@ def main() -> None:
     pre_result_by_frame = load_pre_result_csv(pre_result_path, direction_frame_indices) if pre_result_path else None
 
     out_dir = os.path.join(session_path, SINGLE_ANIMAL_IMAGES_DIR_NAME)
-    reset_without_crossing_output_dir(out_dir)
+    refine_delete_map = load_refine_delete_map(session_path, include_applied=bool(pre_result_path))
+    reset_without_crossing_output_dir(out_dir, preserve_applied_deletions=bool(pre_result_path))
     ensure_dirs([out_dir])
 
     individual_distance_px = float(get_required_tracking_stat(initial_tracking_stats, "individual_distance_px", float))
@@ -2269,6 +2419,7 @@ def main() -> None:
     blob_records = build_blob_records(
         blob_seq, direction_frame_indices,
         obb_fit_mode=cfg.get("OBB_FIT_MODE", "min_area"),
+        segmentation_source_blobs=getattr(segmentation_data, "segmentation_source_blobs", None) if pre_result_path else None,
     )
     min_valid_frames, min_valid_ratio, source_fps = resolve_direction_min_valid_frames(cfg)
     cfg["_derived_source_fps"] = float(source_fps)
@@ -2294,7 +2445,6 @@ def main() -> None:
     pre_direction_stats = classify_blobs_pre_direction(blob_records, cfg)
     pre_direction_run_csv_path = save_pre_direction_run_csv(blob_records, out_dir)
     direction_stats = estimate_directions(blob_records, cfg, float(bounds.get("individual_distance_px", 0.0)))
-    refine_delete_map = load_refine_delete_map(session_path)
     refine_delete_stats = apply_refine_deletions(blob_records, refine_delete_map)
     if pre_result_by_frame is not None:
         direction_stats.update(rescue_directions_from_result(
@@ -2304,7 +2454,8 @@ def main() -> None:
         print(
             "[PRE_RESULT_PATH] trajectory accepted="
             f"{direction_stats['trajectory_accepted_blobs']}, result rescued={direction_stats['result_rescued_blobs']}, "
-            f"result rescue failed={direction_stats['result_rescue_failed_blobs']}"
+            f"result rescue failed={direction_stats['result_rescue_failed_blobs']}, "
+            f"final accepted={direction_stats['result_rescue_final_kept_blobs']}"
         )
 
     cfg["_derived_jump_threshold_px"] = float(bounds.get("jump_threshold_px", 0.0))
