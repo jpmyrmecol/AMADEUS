@@ -1127,6 +1127,18 @@ def _result_obb_mask(poly: np.ndarray, image_shape: tuple) -> tuple[int, int, np
     return x0, y0, mask
 
 
+def _result_region_covered_at_most_half(region, foreground: np.ndarray) -> bool:
+    x, y, obb_mask = region
+    if not obb_mask.size:
+        return False
+    h, w = obb_mask.shape
+    obb_pixels = cv2.countNonZero(obb_mask)
+    if not obb_pixels:
+        return False
+    foreground_pixels = cv2.countNonZero(obb_mask & foreground[y:y+h, x:x+w])
+    return foreground_pixels * 2 <= obb_pixels
+
+
 def _result_blob_pixel_areas(blobs: list[BlobMetrics], obbs, image_shape: tuple) -> list[int]:
     blobs = _restore_result_inputs(blobs)
     if obbs is None:
@@ -5327,6 +5339,8 @@ class CrossingReviewApp(ctk.CTk):
 
         Only real segment masks seed classification. Generated rectangle pixels
         never become evidence for another OBB or alter its measured area.
+        Full-box expansion requires the triggering outlier mask to cover at most
+        half of the visible rasterized OBB.
         """
         by_frame: dict[int, list[BlobMetrics]] = {}
         for b in blobs:
@@ -5354,6 +5368,7 @@ class CrossingReviewApp(ctk.CTk):
                     b.is_crossing = b.result_area_outlier
             targets = {ri for ri, area in enumerate(areas)
                        if not owners[ri] or not inside_bounds(area, result_match.area_bounds)}
+            expanded_targets = set()
             while True:
                 for ri in targets:
                     for index in owners[ri]:
@@ -5365,17 +5380,28 @@ class CrossingReviewApp(ctk.CTk):
                 # A trusted healthy mask wins conflicting duplicate/manual
                 # pixels. Promotion propagates only through real source masks.
                 seeds = rejected & cv2.bitwise_not(protected)
+                for ri in targets - expanded_targets:
+                    if owners[ri]:
+                        target_outliers = _draw_blob_union_mask(
+                            image_shape, [frame_blobs[index] for index in owners[ri]],
+                        )
+                    else:
+                        target_outliers = seeds
+                    if _result_region_covered_at_most_half(regions[ri], target_outliers):
+                        expanded_targets.add(ri)
                 additions = set()
                 for ri, (x, y, mask) in enumerate(regions):
                     h, w = mask.shape
-                    if mask.size and cv2.countNonZero(mask & seeds[y:y+h, x:x+w]):
+                    if mask.size and cv2.countNonZero(mask & seeds[y:y+h, x:x+w]) and \
+                            _result_region_covered_at_most_half(regions[ri], seeds):
                         additions.add(ri)
                 if additions <= targets:
                     break
                 targets |= additions
+                expanded_targets |= additions
 
             expanded = rejected.copy()
-            for ri in targets:
+            for ri in expanded_targets:
                 x, y, mask = regions[ri]
                 h, w = mask.shape
                 if mask.size:
@@ -5400,7 +5426,7 @@ class CrossingReviewApp(ctk.CTk):
                     frame_output.append(b)
                 else:
                     frame_output.extend(_solid_region_blobs(b, mask & cv2.bitwise_not(exclusion), x0, y0))
-            for ri in sorted(targets):
+            for ri in sorted(expanded_targets):
                 template = _missing_result_obb_blob(obbs[ri], frame_idx, len(frame_output), image_shape)
                 if template is None:
                     continue
