@@ -230,6 +230,8 @@ class VideoFrameReader:
         self.frame_count_adjusted = self.frame_count != self.reported_frame_count
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frame_bytes = max(1, self.width * self.height * 3)
+        self.cache_capacity = max(2, min(FRAME_CACHE_SIZE, (128 * 1024 * 1024) // frame_bytes))
         fps = float(self.cap.get(cv2.CAP_PROP_FPS))
         self.fps = fps if fps > 0 else 0.0
 
@@ -302,7 +304,7 @@ class VideoFrameReader:
             self.cache.move_to_end(frame_idx)
         else:
             self.cache[frame_idx] = frame_bgr
-            while len(self.cache) > FRAME_CACHE_SIZE:
+            while len(self.cache) > self.cache_capacity:
                 self.cache.popitem(last=False)
 
     def _clamp_frame_idx(self, frame_idx: int) -> int:
@@ -3869,34 +3871,41 @@ class CrossingReviewApp(ctk.CTk):
         return True
 
     def _queue_prefetch(self, center_frame: int):
-        if self.reader is None:
+        reader = self.reader
+        if reader is None or self.playback_active or self._arrow_key_play.direction:
             return
         if self.prefetch_after_id is not None:
             self.after_cancel(self.prefetch_after_id)
             self.prefetch_after_id = None
-
-        # Cancel any running prefetch thread, then start a new one.
         self._prefetch_cancel.set()
         cancel = threading.Event()
         self._prefetch_cancel = cancel
 
-        frames = []
-        for d in range(1, max(PREFETCH_FORWARD, PREFETCH_BACKWARD) + 1):
-            if d <= PREFETCH_FORWARD:
-                frames.append(center_frame + d)
-            if d <= PREFETCH_BACKWARD:
-                frames.append(center_frame - d)
-        frames = [f for f in frames if 0 <= f < self.frame_count]
+        def start_when_idle():
+            self.prefetch_after_id = None
+            if (cancel.is_set() or reader is not self.reader or self.playback_active
+                    or self._arrow_key_play.direction):
+                return
+            budget = max(1, reader.cache_capacity - 1)
+            forward = min(5, budget)
+            backward = min(2, max(0, budget - forward))
+            frames = [
+                fid for d in range(1, max(forward, backward) + 1)
+                for fid in (center_frame + d, center_frame - d)
+                if ((fid > center_frame and d <= forward)
+                    or (fid < center_frame and d <= backward))
+                and 0 <= fid < self.frame_count
+            ]
 
-        reader = self.reader
+            def worker():
+                for fid in frames:
+                    if cancel.is_set() or reader is not self.reader:
+                        return
+                    reader.prefetch(fid)
 
-        def worker():
-            for fid in frames:
-                if cancel.is_set() or reader is None:
-                    return
-                reader.prefetch(fid)
+            threading.Thread(target=worker, name="segmentation-preview-prefetch", daemon=True).start()
 
-        threading.Thread(target=worker, daemon=True).start()
+        self.prefetch_after_id = self.after(120, start_when_idle)
 
     def _reset_view_state(self):
         self.base_fit_scale = 1.0
@@ -6014,11 +6023,14 @@ class CrossingReviewApp(ctk.CTk):
         self._schedule_playback(delay_ms=1)
 
     def stop_playback(self, update_button: bool = True):
+        was_active = self.playback_active
         self.playback_active = False
         self._playback_timing = None
         if self.playback_job is not None:
             self.after_cancel(self.playback_job)
             self.playback_job = None
+        if was_active and self.reader is not None and not self._closing:
+            self._queue_prefetch(self.current_frame)
         if update_button:
             self._update_play_button()
 
