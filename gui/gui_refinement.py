@@ -2648,9 +2648,15 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.after_cancel(self.playback_job)
             self.playback_job = None
         if was_active:
+            # A stop should not launch new background video decoding.
+            # Keep already decoded frames in the cache, but avoid competing
+            # prefetch work when the user repeatedly toggles Play/Stop.
             self._cancel_pending_frame_request()
-            if self.reader is not None and not self._closing and self._arrow_key_play.direction == 0:
-                self._queue_prefetch(self.current_frame)
+            if self.prefetch_after_id is not None:
+                self.after_cancel(self.prefetch_after_id)
+                self.prefetch_after_id = None
+            if self.reader is not None:
+                self.reader.cancel_prefetch()
         if update_button:
             self._update_play_button()
 
