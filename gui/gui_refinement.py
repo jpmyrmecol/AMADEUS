@@ -345,11 +345,15 @@ class VideoFrameReader:
     ) -> tuple[np.ndarray, int]:
         if self._closed.is_set():
             raise RuntimeError("Video reader is closed.")
-        if current_pos != frame_idx:
-            if not cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx)):
-                # Some backends return False even when seeking succeeds, so the
-                # subsequent read remains the authoritative check.
-                pass
+        gap = frame_idx - current_pos
+        if 0 < gap <= 12:
+            # Skipped frames only need a grab, not conversion and GUI rendering.
+            # For nearby frames this also avoids repeated random seeks in compressed video.
+            for _ in range(gap):
+                if not cap.grab():
+                    raise RuntimeError(f"Failed to skip to frame {frame_idx} in {self.video_path}")
+        elif current_pos != frame_idx:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
         ok, frame = cap.read()
         if not ok or frame is None:
             raise RuntimeError(f"Failed to read frame {frame_idx} from {self.video_path}")
@@ -416,6 +420,12 @@ class VideoFrameReader:
                 max(0, int(backward)),
             )
             self._prefetch_cond.notify()
+
+    def cancel_prefetch(self) -> None:
+        """Discard the navigation prefetch plan when real-time playback starts."""
+        with self._prefetch_cond:
+            self._prefetch_generation += 1
+            self._prefetch_request = None
 
     def _prefetch_order(self, center: int, forward: int, backward: int) -> list[int]:
         # Nearest frames first on both sides.  Direction reversal therefore has
@@ -615,8 +625,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.playback_active = False
         self.playback_interval_ms = 95  # Held-arrow-key navigation only.
         self.playback_speed = 1.0
-        self._playback_anchor_time = 0.0
-        self._playback_anchor_frame = 0.0
+        self._playback_timing: tuple[float, float, float] | None = None
         self.playback_job: Optional[str] = None
         self.play_button: Optional[ctk.CTkButton] = None
         self.speed_button: Optional[ctk.CTkButton] = None
@@ -887,6 +896,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.frame_count = 0
         self.num_ids = 0
         self.playback_speed = 1.0
+        self._playback_timing = None
         self._update_play_button()
         self.current_frame = 0
         self.requested_frame = 0
@@ -2144,6 +2154,11 @@ class UmaDirectionRefinementApp(ctk.CTk):
                 pass
 
             generation, reader, frame_idx, reset_view = item
+            # Playback may have advanced while this request waited in the queue.
+            # Decode the newest source-video frame rather than an obsolete frame.
+            timing = self._playback_timing
+            if timing is not None and generation == self._decode_gen and reader is self.reader:
+                frame_idx = max(frame_idx, self._playback_frame_at(time.monotonic(), reader, timing))
             frame = None
             error: Exception | None = None
             try:
@@ -2165,7 +2180,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if (
             generation != self._decode_gen
             or reader is not self.reader
-            or frame_idx != self.requested_frame
+            or (
+                frame_idx != self.requested_frame
+                and (not self.playback_active or frame_idx < self.requested_frame)
+            )
         ):
             return
         self.current_frame = frame_idx
@@ -2176,7 +2194,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._draw_canvas(frame, preserve_view=not reset_view)
         self.update_info_panel()
         self._last_displayed_frame = frame_idx
-        self._queue_prefetch(frame_idx)
+        if not self.playback_active:
+            self._queue_prefetch(frame_idx)
 
     def _handle_frame_decode_error(
         self,
@@ -2450,17 +2469,28 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.start_playback()
 
     def cycle_playback_speed(self):
-        self.set_playback_speed({1.0: 2.0, 2.0: 4.0, 4.0: 1.0}[self.playback_speed])
+        speeds = (1.0, 2.0, 4.0, 0.5, 0.25)
+        self.set_playback_speed(speeds[(speeds.index(self.playback_speed) + 1) % len(speeds)])
+
+    @staticmethod
+    def _playback_frame_at(
+        now: float,
+        reader: VideoFrameReader,
+        timing: tuple[float, float, float],
+    ) -> int:
+        anchor_frame, anchor_time, speed = timing
+        return min(
+            reader.frame_count - 1,
+            int(anchor_frame + max(0.0, now - anchor_time) * reader.fps * speed),
+        )
 
     def set_playback_speed(self, speed: float):
-        if speed not in (1.0, 2.0, 4.0):
-            raise ValueError("Playback speed must be 1, 2, or 4.")
-        if self.playback_active and self.reader is not None:
+        if speed not in (1.0, 2.0, 4.0, 0.5, 0.25):
+            raise ValueError("Playback speed must be 0.25, 0.5, 1, 2, or 4.")
+        if self._playback_timing is not None and self.reader is not None:
             now = time.monotonic()
-            self._playback_anchor_frame += (
-                (now - self._playback_anchor_time) * self.reader.fps * self.playback_speed
-            )
-            self._playback_anchor_time = now
+            anchor = self._playback_frame_at(now, self.reader, self._playback_timing)
+            self._playback_timing = (float(anchor), now, speed)
         self.playback_speed = speed
         self._update_play_button()
         if self.playback_active:
@@ -2469,7 +2499,6 @@ class UmaDirectionRefinementApp(ctk.CTk):
     def on_canvas_speed_click(self, _event, speed: float):
         if self.reader is None:
             return "break"
-        # A multiclick is not an arrow drag or a canvas pan.
         self.on_canvas_release()
         self.set_playback_speed(speed)
         if not self.playback_active:
@@ -2483,15 +2512,16 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self._cancel_pending_frame_request()
         if self.current_frame >= self.frame_count - 1:
             return
+        self.reader.cancel_prefetch()
+        self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
         self.playback_active = True
-        self._playback_anchor_frame = float(self.current_frame)
-        self._playback_anchor_time = time.monotonic()
         self._update_play_button()
         self._schedule_playback(delay_ms=1)
 
     def stop_playback(self, update_button: bool = True):
         was_active = self.playback_active
         self.playback_active = False
+        self._playback_timing = None
         if self.playback_job is not None:
             self.after_cancel(self.playback_job)
             self.playback_job = None
@@ -2517,32 +2547,28 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.playback_job = None
         if not self.playback_active:
             return
-        if self.reader is None or self.frame_count <= 0:
+        reader = self.reader
+        timing = self._playback_timing
+        if reader is None or timing is None:
             self.stop_playback()
             return
         if self.current_frame >= self.frame_count - 1:
             self.stop_playback()
             return
 
-        # Use elapsed wall time rather than a fixed interval per rendered frame.
-        # A slow decode/render skips obsolete frames without slowing the video clock.
         now = time.monotonic()
-        rate = self.reader.fps * self.playback_speed
-        target = min(
-            self.frame_count - 1,
-            int(self._playback_anchor_frame + (now - self._playback_anchor_time) * rate),
-        )
+        target = self._playback_frame_at(now, reader, timing)
         if self._has_pending_frame_request():
+            # One decode is already running or pending. The worker will use the
+            # newest wall-clock target when it actually begins decoding.
             self._schedule_playback(delay_ms=8)
         elif target > self.current_frame:
             self.request_frame(target, reset_view=False, immediate=True)
             self._schedule_playback(delay_ms=8)
         else:
-            until_next = (
-                (self.current_frame + 1 - self._playback_anchor_frame) / rate
-                + self._playback_anchor_time - now
-            )
-            self._schedule_playback(delay_ms=max(1, int(until_next * 1000)))
+            anchor_frame, anchor_time, speed = timing
+            next_due = anchor_time + (self.current_frame + 1 - anchor_frame) / (reader.fps * speed)
+            self._schedule_playback(delay_ms=max(1, int((next_due - now) * 1000)))
 
     def step_id(self, delta: int):
         if self.df is None:
