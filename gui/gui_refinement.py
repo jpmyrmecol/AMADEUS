@@ -306,6 +306,9 @@ class VideoFrameReader:
             raise RuntimeError(f"Failed to open video: {video_path}")
         self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.fps = float(self.cap.get(cv2.CAP_PROP_FPS))
+        frame_bytes = max(1, int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                          * int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) * 3)
+        self.cache_capacity = max(2, min(FRAME_CACHE_SIZE, (192 * 1024 * 1024) // frame_bytes))
         if self.frame_count <= 0 or not np.isfinite(self.fps) or self.fps <= 0:
             self.cap.release()
             raise RuntimeError(f"Video frame count or FPS metadata is invalid: {video_path}")
@@ -361,7 +364,7 @@ class VideoFrameReader:
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), frame_idx + 1
 
     def _trim_cache_locked(self) -> None:
-        while len(self.cache) > FRAME_CACHE_SIZE:
+        while len(self.cache) > self.cache_capacity:
             self.cache.popitem(last=False)
 
     def _store_cached(self, frame_idx: int, frame: np.ndarray) -> None:
@@ -2525,6 +2528,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self._cancel_pending_frame_request()
         if self.current_frame >= self.frame_count - 1:
             return
+        if self.prefetch_after_id is not None:
+            self.after_cancel(self.prefetch_after_id)
+            self.prefetch_after_id = None
         self.reader.cancel_prefetch()
         self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
         self.playback_active = True
@@ -2540,6 +2546,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.playback_job = None
         if was_active:
             self._cancel_pending_frame_request()
+            if self.reader is not None and not self._closing and self._arrow_key_play.direction == 0:
+                self._queue_prefetch(self.current_frame)
         if update_button:
             self._update_play_button()
 
@@ -3264,11 +3272,23 @@ class UmaDirectionRefinementApp(ctk.CTk):
         reader = self.reader
         if reader is None:
             return
-        reader.request_prefetch(
-            center_frame,
-            forward=PREFETCH_FORWARD,
-            backward=PREFETCH_BACKWARD,
-        )
+        if self.prefetch_after_id is not None:
+            self.after_cancel(self.prefetch_after_id)
+        # Prefetch only a small neighbourhood once navigation has settled.
+        # Large eager caches competed with restart decoding, especially at 4K.
+        def prefetch_when_idle():
+            self.prefetch_after_id = None
+            if (reader is not self.reader or self.playback_active
+                    or self._arrow_key_play.direction != 0):
+                return
+            budget = max(1, reader.cache_capacity - 1)
+            reader.request_prefetch(
+                center_frame,
+                forward=min(6, budget),
+                backward=min(2, max(0, budget - 6)),
+            )
+
+        self.prefetch_after_id = self.after(120, prefetch_when_idle)
 
     def _render_display_frame(self, rgb: np.ndarray) -> np.ndarray:
         display = rgb.copy()
