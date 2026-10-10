@@ -304,6 +304,10 @@ class VideoFrameReader:
         if not self.cap.isOpened():
             raise RuntimeError(f"Failed to open video: {video_path}")
         self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.fps = float(self.cap.get(cv2.CAP_PROP_FPS))
+        if self.frame_count <= 0 or not np.isfinite(self.fps) or self.fps <= 0:
+            self.cap.release()
+            raise RuntimeError(f"Video frame count or FPS metadata is invalid: {video_path}")
 
         self.prefetch_cap = cv2.VideoCapture(video_path)
         if not self.prefetch_cap.isOpened():
@@ -609,9 +613,13 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._key_play_wait_count: int = 0
 
         self.playback_active = False
-        self.playback_interval_ms = 95
+        self.playback_interval_ms = 95  # Held-arrow-key navigation only.
+        self.playback_speed = 1.0
+        self._playback_anchor_time = 0.0
+        self._playback_anchor_frame = 0.0
         self.playback_job: Optional[str] = None
         self.play_button: Optional[ctk.CTkButton] = None
+        self.speed_button: Optional[ctk.CTkButton] = None
 
         self.requested_frame = 0
         self.frame_render_job: Optional[str] = None
@@ -779,6 +787,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         ctk.CTkButton(nav, text="<", width=50, command=lambda: self.step_frame(-1)).pack(side="left", padx=4)
         self.play_button = ctk.CTkButton(nav, text="Play", width=60, command=self.toggle_playback)
         self.play_button.pack(side="left")
+        self.speed_button = ctk.CTkButton(nav, text="1×", width=48, command=self.cycle_playback_speed)
+        self.speed_button.pack(side="left", padx=(4, 0))
         ctk.CTkButton(nav, text=">", width=50, command=lambda: self.step_frame(1)).pack(side="left", padx=4)
         ctk.CTkButton(nav, text=">|", width=50, command=self.go_last_frame).pack(side="left", padx=(0, 12))
 
@@ -823,6 +833,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
+        self.canvas.bind("<Double-Button-1>", lambda event: self.on_canvas_speed_click(event, 2.0))
+        self.canvas.bind("<Triple-Button-1>", lambda event: self.on_canvas_speed_click(event, 4.0))
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
         self.canvas.bind("<ButtonPress-3>", self.on_canvas_right_click)
@@ -873,6 +885,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._rear_y_idx = None
         self.frame_count = 0
         self.num_ids = 0
+        self.playback_speed = 1.0
+        self._update_play_button()
         self.current_frame = 0
         self.requested_frame = 0
         self._last_displayed_frame = -1
@@ -1821,8 +1835,6 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if suffix in VIDEO_DROP_SUFFIXES:
             self.video_path_var.set(path)
             self.try_load_files()
-            if self.reader is None:
-                self.set_status("Video selected. Drop or select a tracking CSV to load the preview.", auto_clear=False)
             return
         if suffix in TRACKING_DROP_SUFFIXES:
             self._load_tracking_input(path)
@@ -1912,7 +1924,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
     def try_load_files(self):
         video_path = self.video_path_var.get().strip()
         csv_path = self.csv_path_var.get().strip()
-        if video_path and csv_path and os.path.exists(video_path) and os.path.exists(csv_path):
+        if video_path and os.path.isfile(video_path):
             self.load_files()
 
     def load_files(self, preserve_view: bool = False):
@@ -1921,24 +1933,26 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if not video_path or not os.path.exists(video_path):
             messagebox.showerror("Error", "Video file not found.")
             return
-        if not csv_path or not os.path.exists(csv_path):
+        if csv_path and not os.path.isfile(csv_path):
             messagebox.showerror("Error", "CSV file not found.")
             return
 
         try:
-            df = _convert.load_wide_for_gui(csv_path, standard_front_first=True)
-            self._validate_uma_csv(df)
+            df = _convert.load_wide_for_gui(csv_path, standard_front_first=True) if csv_path else None
+            if df is not None:
+                self._validate_uma_csv(df)
             reader = VideoFrameReader(video_path)
         except Exception as e:
             messagebox.showerror("Error", str(e))
             return
 
-        _ic = self._idx_col(df)
-        positions = pd.to_numeric(df[_ic], errors="raise").astype(int).to_numpy()
-        if reader.frame_count > 0 and (positions.min(initial=0) < 0 or positions.max(initial=0) >= reader.frame_count):
-            messagebox.showerror("Error", f"CSV {_ic} is out of the video's frame range. video frames={reader.frame_count}, CSV {_ic} max={positions.max(initial=0)}")
-            reader.close()
-            return
+        if df is not None:
+            _ic = self._idx_col(df)
+            positions = pd.to_numeric(df[_ic], errors="raise").astype(int).to_numpy()
+            if positions.min(initial=0) < 0 or positions.max(initial=0) >= reader.frame_count:
+                messagebox.showerror("Error", f"CSV {_ic} is out of the video's frame range. video frames={reader.frame_count}, CSV {_ic} max={positions.max(initial=0)}")
+                reader.close()
+                return
 
         saved_frame = self.current_frame if preserve_view else 0
 
@@ -1961,36 +1975,53 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.canvas.delete("all")
         except Exception:
             pass
-        self.df = df.copy()
-        pending_source = self._pending_refinement_source
-        if pending_source is None and self.loaded_csv_path == self._normalized_path(csv_path):
-            pending_source = {
-                "output_kind": self.refinement_output_kind,
-                "result_df": self.refinement_obb_df,
-                "source_path": self.refinement_source_path,
-                "source_paths": list(self.refinement_source_paths),
-            }
-        if pending_source is None:
-            pending_source = {
-                "output_kind": "rear_front",
-                "result_df": None,
-                "source_path": csv_path,
-                "source_paths": [csv_path],
-            }
-        self._activate_refinement_source(pending_source, csv_path)
-        self.frame_count = len(self.df)
-        self.num_ids = (len(self.df.columns) - 1) // 4
-        _tids = np.arange(self.num_ids)
-        self._front_x_idx = (1 + 4 * _tids).astype(np.intp)
-        self._front_y_idx = (2 + 4 * _tids).astype(np.intp)
-        self._rear_x_idx  = (3 + 4 * _tids).astype(np.intp)
-        self._rear_y_idx  = (4 + 4 * _tids).astype(np.intp)
-        self.df_np = self.df.to_numpy(dtype=np.float64)
-        self.refinement_pose_np = self.df_np.copy()
-        self.id_palette = make_id_palette(self.num_ids, color_space="rgb")
+        self.df = df.copy() if df is not None else None
+        if self.df is not None:
+            pending_source = self._pending_refinement_source
+            if pending_source is None and self.loaded_csv_path == self._normalized_path(csv_path):
+                pending_source = {
+                    "output_kind": self.refinement_output_kind,
+                    "result_df": self.refinement_obb_df,
+                    "source_path": self.refinement_source_path,
+                    "source_paths": list(self.refinement_source_paths),
+                }
+            if pending_source is None:
+                pending_source = {
+                    "output_kind": "rear_front",
+                    "result_df": None,
+                    "source_path": csv_path,
+                    "source_paths": [csv_path],
+                }
+            self._activate_refinement_source(pending_source, csv_path)
+            self.frame_count = len(self.df)
+            self.num_ids = (len(self.df.columns) - 1) // 4
+            tids = np.arange(self.num_ids)
+            self._front_x_idx = (1 + 4 * tids).astype(np.intp)
+            self._front_y_idx = (2 + 4 * tids).astype(np.intp)
+            self._rear_x_idx = (3 + 4 * tids).astype(np.intp)
+            self._rear_y_idx = (4 + 4 * tids).astype(np.intp)
+            self.df_np = self.df.to_numpy(dtype=np.float64)
+            self.refinement_pose_np = self.df_np.copy()
+            self.id_palette = make_id_palette(self.num_ids, color_space="rgb")
+        else:
+            self.frame_count = reader.frame_count
+            self.num_ids = 0
+            self.df_np = None
+            self.refinement_pose_np = None
+            self.refinement_obb_df = None
+            self.refinement_source_path = None
+            self.refinement_source_paths.clear()
+            self.refinement_output_kind = "rear_front"
+            self.loaded_csv_path = None
+            self._pending_refinement_source = None
+            self._front_x_idx = self._front_y_idx = None
+            self._rear_x_idx = self._rear_y_idx = None
+            self.id_palette = []
         self.current_frame = 0
         self.requested_frame = 0
         self.current_id = 0
+        self.playback_speed = 1.0
+        self._update_play_button()
         self.last_save_path = None
         self.save_count = 0
         self.edited_keys.clear()
@@ -2006,7 +2037,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         # Re-issue the current-frame request after Tk has applied the new data
         # arrays. This fixes stale overlays after CSV replacement at the same frame.
         self.after_idle(lambda f=target_frame, rv=not preserve_view: self.request_frame(f, reset_view=rv, immediate=True))
-        self.set_status(f"Loaded: {os.path.basename(video_path)} / IDs={self.num_ids} / frames={self.frame_count}")
+        detail = f"IDs={self.num_ids}" if self.df is not None else "video only"
+        self.set_status(f"Loaded: {os.path.basename(video_path)} / {detail} / frames={self.frame_count} / fps={reader.fps:g}")
         _start_maximized(self)
 
     @staticmethod
@@ -2035,7 +2067,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
     def _configure_controls(self):
         self.frame_spin.configure(from_=0, to=max(0, self.frame_count - 1))
-        self.id_spin.configure(from_=0, to=max(0, self.num_ids - 1), wrap=True)
+        self.id_spin.configure(from_=0, to=max(0, self.num_ids - 1), wrap=True,
+                               state="normal" if self.df is not None else "disabled")
         self.frame_scale.configure(from_=0, to=max(0, self.frame_count - 1))
 
     def _reset_view_state(self):
@@ -2273,7 +2306,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         return "break"
 
     def on_frame_entry_commit(self, _event=None):
-        if self.df is None:
+        if self.reader is None:
             return None
         try:
             frame_idx = int(self.frame_spin.get())
@@ -2310,12 +2343,12 @@ class UmaDirectionRefinementApp(ctk.CTk):
         return "break"
 
     def on_frame_scale(self, value):
-        if self.df is None:
+        if self.reader is None:
             return
         self.request_frame(int(round(float(value))), reset_view=False, immediate=True)
 
     def request_frame(self, frame_idx: int, reset_view: bool = False, immediate: bool = False):
-        if self.reader is None or self.df is None:
+        if self.reader is None:
             return
         frame_idx = max(0, min(self.frame_count - 1, int(frame_idx)))
         self.requested_frame = frame_idx
@@ -2333,7 +2366,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._set_frame(self.requested_frame, reset_view=reset_view)
 
     def _set_frame(self, frame_idx: int, reset_view: bool = False):
-        if self.reader is None or self.df is None:
+        if self.reader is None:
             return
         frame_idx = max(0, min(self.frame_count - 1, int(frame_idx)))
         self.requested_frame = frame_idx
@@ -2392,7 +2425,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._set_id(tid)
 
     def step_frame(self, delta: int):
-        if self.df is None:
+        if self.reader is None:
             return
         base_frame = self._navigation_base_frame()
         self.request_frame(base_frame + int(delta), reset_view=False, immediate=False)
@@ -2401,7 +2434,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.request_frame(0, reset_view=False, immediate=True)
 
     def go_last_frame(self):
-        if self.df is not None:
+        if self.reader is not None:
             self.request_frame(self.frame_count - 1, reset_view=False, immediate=True)
 
     def toggle_playback(self):
@@ -2410,20 +2443,45 @@ class UmaDirectionRefinementApp(ctk.CTk):
         else:
             self.start_playback()
 
-    def start_playback(self):
-        if self.df is None or self.frame_count <= 0:
-            return
+    def cycle_playback_speed(self):
+        self.set_playback_speed({1.0: 2.0, 2.0: 4.0, 4.0: 1.0}[self.playback_speed])
+
+    def set_playback_speed(self, speed: float):
+        if speed not in (1.0, 2.0, 4.0):
+            raise ValueError("Playback speed must be 1, 2, or 4.")
+        if self.playback_active and self.reader is not None:
+            now = time.monotonic()
+            self._playback_anchor_frame += (
+                (now - self._playback_anchor_time) * self.reader.fps * self.playback_speed
+            )
+            self._playback_anchor_time = now
+        self.playback_speed = speed
+        self._update_play_button()
         if self.playback_active:
+            self._schedule_playback(delay_ms=1)
+
+    def on_canvas_speed_click(self, _event, speed: float):
+        if self.reader is None:
+            return "break"
+        # A multiclick is not an arrow drag or a canvas pan.
+        self.on_canvas_release()
+        self.set_playback_speed(speed)
+        if not self.playback_active:
+            self.start_playback()
+        return "break"
+
+    def start_playback(self):
+        if self.reader is None or self.frame_count <= 1 or self.playback_active:
             return
+        if self._has_pending_frame_request():
+            self._cancel_pending_frame_request()
         if self.current_frame >= self.frame_count - 1:
             return
         self.playback_active = True
+        self._playback_anchor_frame = float(self.current_frame)
+        self._playback_anchor_time = time.monotonic()
         self._update_play_button()
-        self._step_frame_for_playback(1)
-        if self.current_frame < self.frame_count - 1:
-            self._schedule_playback(initial=True)
-        else:
-            self.stop_playback()
+        self._schedule_playback(delay_ms=1)
 
     def stop_playback(self, update_button: bool = True):
         was_active = self.playback_active
@@ -2439,39 +2497,46 @@ class UmaDirectionRefinementApp(ctk.CTk):
     def _update_play_button(self):
         if self.play_button is not None:
             self.play_button.configure(text="Stop" if self.playback_active else "Play")
+        if self.speed_button is not None:
+            self.speed_button.configure(text=f"{self.playback_speed:g}×")
 
-    def _schedule_playback(self, initial: bool = False, delay_ms: int | None = None):
+    def _schedule_playback(self, delay_ms: int = 8):
         if not self.playback_active:
             return
         if self.playback_job is not None:
             self.after_cancel(self.playback_job)
-        delay = int(delay_ms) if delay_ms is not None else (220 if initial else self.playback_interval_ms)
-        self.playback_job = self.after(delay, self._playback_tick)
+        self.playback_job = self.after(max(1, int(delay_ms)), self._playback_tick)
 
     def _playback_tick(self):
         self.playback_job = None
         if not self.playback_active:
             return
-        if self.df is None or self.frame_count <= 0:
+        if self.reader is None or self.frame_count <= 0:
             self.stop_playback()
             return
         if self.current_frame >= self.frame_count - 1:
             self.stop_playback()
             return
-        if self._has_pending_frame_request():
-            self._schedule_playback(initial=False, delay_ms=8)
-            return
-        self._step_frame_for_playback(1)
-        if self.playback_active and self.current_frame < self.frame_count - 1:
-            self._schedule_playback(initial=False)
-        else:
-            self.stop_playback()
 
-    def _step_frame_for_playback(self, delta: int):
-        if self.df is None:
-            return
-        base_frame = self._navigation_base_frame()
-        self.request_frame(base_frame + int(delta), reset_view=False, immediate=True)
+        # Use elapsed wall time rather than a fixed interval per rendered frame.
+        # A slow decode/render skips obsolete frames without slowing the video clock.
+        now = time.monotonic()
+        rate = self.reader.fps * self.playback_speed
+        target = min(
+            self.frame_count - 1,
+            int(self._playback_anchor_frame + (now - self._playback_anchor_time) * rate),
+        )
+        if self._has_pending_frame_request():
+            self._schedule_playback(delay_ms=8)
+        elif target > self.current_frame:
+            self.request_frame(target, reset_view=False, immediate=True)
+            self._schedule_playback(delay_ms=8)
+        else:
+            until_next = (
+                (self.current_frame + 1 - self._playback_anchor_frame) / rate
+                + self._playback_anchor_time - now
+            )
+            self._schedule_playback(delay_ms=max(1, int(until_next * 1000)))
 
     def step_id(self, delta: int):
         if self.df is None:
@@ -2520,7 +2585,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._key_play_job = self.after(self.playback_interval_ms, self._key_play_tick)
 
     def _key_play_step(self):
-        if self.df is None:
+        if self.reader is None:
             return
         if self.left_button_down and self.drag_mode is not None and self.drag_tid is not None and self.drag_last_canvas is not None:
             self._apply_drag_from_canvas(self.drag_last_canvas)
@@ -2769,6 +2834,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
         return self.candidate_labels_by_key.get((int(frame), int(tid)), "")
 
     def update_info_panel(self):
+        if self.df is None:
+            self.preview_title_var.set(f"frame {self.current_frame} / video only")
+            self._assign_history_var.set("")
+            return
         risk = self._candidate_label_for(self.current_frame, self.current_id)
         suffix = f" | {risk}" if risk else ""
         self.preview_title_var.set(f"frame {self.current_frame} / ID {self.current_id}{suffix}")
