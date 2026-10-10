@@ -560,6 +560,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.loaded_csv_path: str | None = None
         self._pending_refinement_source: dict | None = None
         self.last_save_path: Optional[str] = None
+        self._refined_source_overwrite_path: str | None = None
         self._companion_save_active = False
         self._companion_save_messages: queue.Queue = queue.Queue()
         self.prefetch_after_id: Optional[str] = None
@@ -932,6 +933,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.refinement_obb_df = None
         self.refinement_pose_np = None
         self.refinement_source_path = None
+        self._refined_source_overwrite_path = None
         self.refinement_source_paths.clear()
         self.refinement_output_kind = "rear_front"
         self.loaded_csv_path = None
@@ -1913,6 +1915,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
             "result_df": result_df,
             "source_path": path,
             "source_paths": [path],
+            "allow_refined_overwrite": Path(path).stem.lower().endswith(
+                ("_refined", "_refined_rear_front", "_rear_front_refined")
+            ),
         }
         if info.requires_keypoint_selection:
             def on_converted(csv_path: str) -> None:
@@ -1949,6 +1954,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
         result_df = source.get("result_df")
         self.refinement_obb_df = result_df.copy(deep=True) if result_df is not None else None
         self.refinement_source_path = str(source.get("source_path") or loaded_csv_path)
+        self._refined_source_overwrite_path = (
+            self._normalized_path(self.refinement_source_path)
+            if source.get("allow_refined_overwrite", False) else None
+        )
         source_paths = source.get("source_paths") or [self.refinement_source_path]
         self.refinement_source_paths = {
             self._normalized_path(path) for path in source_paths if str(path).strip()
@@ -2022,6 +2031,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
                     "result_df": self.refinement_obb_df,
                     "source_path": self.refinement_source_path,
                     "source_paths": list(self.refinement_source_paths),
+                    "allow_refined_overwrite": self._refined_source_overwrite_path is not None,
                 }
             if pending_source is None:
                 pending_source = {
@@ -2048,6 +2058,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.refinement_pose_np = None
             self.refinement_obb_df = None
             self.refinement_source_path = None
+            self._refined_source_overwrite_path = None
             self.refinement_source_paths.clear()
             self.refinement_output_kind = "rear_front"
             self.loaded_csv_path = None
@@ -2060,7 +2071,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.current_id = 0
         self.playback_speed = 1.0
         self._update_play_button()
-        self.last_save_path = None
+        # A directly imported refined CSV is the default Ctrl+S destination.
+        self.last_save_path = self._refined_source_overwrite_path
         self.save_count = 0
         self.edited_keys.clear()
         self.selected_tids.clear()
@@ -3220,7 +3232,12 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.set_status("Companion CSVs are still saving; try again when finished.", auto_clear=False)
             return False
         output_path = self._normalized_path(path)
-        if output_path in self.refinement_source_paths:
+        update_loaded_refined = (
+            not save_as
+            and self._refined_source_overwrite_path is not None
+            and output_path == self._refined_source_overwrite_path
+        )
+        if output_path in self.refinement_source_paths and not update_loaded_refined:
             messagebox.showwarning(
                 "Choose another file",
                 "The original input CSV cannot be overwritten. Choose a different output path.",
@@ -3240,6 +3257,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
                               _convert.center_csv_path(source_path)):
                 if companion.is_file():
                     protected_inputs.add(self._normalized_path(companion))
+        if update_loaded_refined:
+            # For a direct *_refined.csv import these are its own derived
+            # rear/front and center siblings, refreshed together with Ctrl+S.
+            protected_inputs.difference_update(self._normalized_path(p) for p in sidecar_paths)
         if (len({output_path, *(self._normalized_path(p) for p in sidecar_paths)})
                 != 1 + len(sidecar_paths)
                 or any(self._normalized_path(p) in protected_inputs for p in sidecar_paths)):
@@ -3378,6 +3399,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         stem = Path(self.refinement_source_path or csv_path).stem
         if stem.endswith("_rear_front"):
             stem = stem[:-len("_rear_front")]
+        if stem.endswith("_refined"):
+            return f"{stem}_copy.csv"
         return f"{stem}_refined.csv"
 
     def img_to_canvas(self, pt: np.ndarray) -> np.ndarray:
