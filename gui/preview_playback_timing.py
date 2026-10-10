@@ -39,9 +39,10 @@ class AdaptivePreviewPacer:
         if old is None:
             self.estimated_seconds = duration
         else:
-            # Slow down promptly under load; recover gradually after cached
-            # or unusually cheap frames instead of oscillating on every restart.
-            weight = 0.35 if duration > old else 0.05
+            # Do not mistake a single OS/GUI stall for a lasting drop in
+            # decoding capacity. Repeated slow frames still raise the estimate.
+            duration = min(duration, max(0.04, old * 2.5))
+            weight = 0.30 if duration > old else 0.10
             self.estimated_seconds = old + weight * (duration - old)
 
     def delay_ms(self, now: float, frame_rate: float) -> int:
