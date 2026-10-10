@@ -1833,18 +1833,24 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._activate_dataset_input()
         suffix = Path(path).suffix.lower()
         if suffix in VIDEO_DROP_SUFFIXES:
-            self.video_path_var.set(path)
-            self.try_load_files()
+            self._select_video_input(path)
             return
         if suffix in TRACKING_DROP_SUFFIXES:
             self._load_tracking_input(path)
+
+    def _select_video_input(self, path: str) -> None:
+        if self.reader is not None and self._normalized_path(self.reader.video_path) != self._normalized_path(path):
+            # A new video must not inherit the previous video's tracking data.
+            self.csv_path_var.set("")
+            self._pending_refinement_source = None
+        self.video_path_var.set(path)
+        self.try_load_files()
 
     def browse_video(self):
         self._activate_dataset_input()
         path = filedialog.askopenfilename(title="Select video", filetypes=VIDEO_EXTS)
         if path:
-            self.video_path_var.set(path)
-            self.try_load_files()
+            self._select_video_input(path)
 
     def browse_csv(self):
         self._activate_dataset_input()
@@ -1923,7 +1929,6 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
     def try_load_files(self):
         video_path = self.video_path_var.get().strip()
-        csv_path = self.csv_path_var.get().strip()
         if video_path and os.path.isfile(video_path):
             self.load_files()
 
