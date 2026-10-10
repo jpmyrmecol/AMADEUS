@@ -107,6 +107,7 @@ _AUTO_MARKER_COLOR = "#3d8bd6"
 
 _SPIN_CFG = dict(
     bg="#343638", fg="#dce4ee",
+    disabledbackground="#343638", disabledforeground="#929292",
     insertbackground="#dce4ee",
     buttonbackground="#565b5e",
     relief="flat",
