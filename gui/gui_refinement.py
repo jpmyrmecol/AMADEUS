@@ -642,6 +642,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
         self._preview_pacer = AdaptivePreviewPacer()
+        # Learned playback request interval survives Stop/Start but not a new video.
+        # Independent of the arrow-key navigation pacer.
+        self._playback_pacer = AdaptivePreviewPacer()
         self.playback_job: Optional[str] = None
         self.play_button: Optional[ctk.CTkButton] = None
         self.speed_button: Optional[ctk.CTkButton] = None
@@ -2010,6 +2013,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
         self.reader = reader
         self._preview_pacer.reset()
+        self._playback_pacer.reset()
         self.frame_cache_rgb = None
         self._last_displayed_frame = -1
         try:
@@ -2222,6 +2226,12 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._draw_canvas(frame, preserve_view=not reset_view)
         self.update_info_panel()
         self._last_displayed_frame = frame_idx
+        # Learn the effective decode-and-render duration. Keep the estimate
+        # across pauses; a new playback session only resets the request clock.
+        if self.playback_active and self._playback_pacer.last_request_time is not None:
+            self._playback_pacer.observe_frame(
+                time.monotonic() - self._playback_pacer.last_request_time
+            )
         # Preserve post-v1.1.13 arrow-key hold timing without changing
         # the v1.1.13 Play/Stop state machine.
         if self._arrow_key_play.repeating:
@@ -2576,6 +2586,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if self.current_frame >= self.frame_count - 1:
             return
         self.reader.cancel_prefetch()
+        self._playback_pacer.resume()
         self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
         self.playback_active = True
         self._update_play_button()
@@ -2626,12 +2637,24 @@ class UmaDirectionRefinementApp(ctk.CTk):
             # newest wall-clock target when it actually begins decoding.
             self._schedule_playback(delay_ms=8)
         elif target > self.current_frame:
+            # Reuse the learned decoding/rendering interval after Stop/Start.
+            # The source-video position still follows the v1.1.13 wall clock.
+            pacing_delay = self._playback_pacer.delay_ms(
+                now, reader.fps * self.playback_speed
+            )
+            if pacing_delay > 0:
+                self._schedule_playback(delay_ms=pacing_delay)
+                return
+            self._playback_pacer.begin_frame(time.monotonic())
             self.request_frame(target, reset_view=False, immediate=True)
             self._schedule_playback(delay_ms=8)
         else:
             anchor_frame, anchor_time, speed = timing
             next_due = anchor_time + (self.current_frame + 1 - anchor_frame) / (reader.fps * speed)
-            self._schedule_playback(delay_ms=max(1, int((next_due - now) * 1000)))
+            self._schedule_playback(delay_ms=max(
+                1, int((next_due - now) * 1000),
+                self._playback_pacer.delay_ms(now, reader.fps * speed),
+            ))
 
     def step_id(self, delta: int):
         if self.df is None:
