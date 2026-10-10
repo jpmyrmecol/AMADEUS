@@ -50,6 +50,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_refinement
 
 ensure_import_paths(PROJECT_ROOT, MAIN_DIR)
 from gui.color import WHITE_RGB, make_id_palette
+from gui.preview_key_navigation import ArrowKeyHoldPlayback
 from main.video_compat import SUPPORTED_VIDEO_SUFFIXES, VIDEO_DROP_SUFFIXES, VIDEO_FILETYPES
 
 from assign_types import (
@@ -618,12 +619,19 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._right_pane: Optional[ctk.CTkFrame] = None
         self._left_pane_visible: bool = True
 
-        self._key_play_job: Optional[str] = None
         self._key_play_delta: int = 0
-        self._key_play_wait_count: int = 0
+        self._arrow_key_play = ArrowKeyHoldPlayback(
+            self,
+            current_frame=lambda: self.current_frame,
+            frame_bounds=lambda: (0, self.frame_count - 1) if self.reader is not None else (0, -1),
+            fps=lambda: self.reader.fps if self.reader is not None else 30.0,
+            speed=lambda: self.playback_speed,
+            seek=lambda target: self.request_frame(target, reset_view=False, immediate=True),
+            busy=self._has_pending_frame_request,
+            pause=self.stop_playback,
+        )
 
         self.playback_active = False
-        self.playback_interval_ms = 95  # Held-arrow-key navigation only.
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
         self.playback_job: Optional[str] = None
@@ -2194,7 +2202,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._draw_canvas(frame, preserve_view=not reset_view)
         self.update_info_panel()
         self._last_displayed_frame = frame_idx
-        if not self.playback_active:
+        if not self.playback_active and self._arrow_key_play.direction == 0:
             self._queue_prefetch(frame_idx)
 
     def _handle_frame_decode_error(
@@ -2581,45 +2589,17 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._select_single_tid(self.current_id + int(delta))
 
     def _stop_key_play(self):
-        if self._key_play_job is not None:
-            try:
-                self.after_cancel(self._key_play_job)
-            except Exception:
-                pass
-            self._key_play_job = None
-        self._key_play_delta = 0
-        self._key_play_wait_count = 0
+        self._arrow_key_play.stop()
 
     def _start_key_play(self, delta: int):
-        dragging = self.left_button_down and self.drag_mode is not None
-        if dragging:
-            # During drag: single-step per key event (no auto-repeat tick),
-            # matching the old behaviour where repeat was suppressed while dragging.
+        if self.left_button_down and self.drag_mode is not None:
+            # Keep exact per-keypress stepping while an arrow is being edited.
             self._stop_key_play()
             self._key_play_delta = delta
             self._key_play_step()
-            self._key_play_delta = 0  # reset so next OS key event fires again
+            self._key_play_delta = 0
             return
-        if self._key_play_delta == delta:
-            return  # already playing in this direction
-        self._stop_key_play()
-        self._key_play_delta = delta
-        self._key_play_step()
-        self._key_play_job = self.after(220, self._key_play_tick)
-
-    def _key_play_tick(self):
-        self._key_play_job = None
-        if self._key_play_delta == 0:
-            self._key_play_wait_count = 0
-            return
-        # Back-pressure: wait for the current frame to render before advancing.
-        if self._has_pending_frame_request():
-            self._key_play_wait_count += 1
-            self._key_play_job = self.after(8, self._key_play_tick)
-            return
-        self._key_play_wait_count = 0
-        self._key_play_step()
-        self._key_play_job = self.after(self.playback_interval_ms, self._key_play_tick)
+        self._arrow_key_play.press(delta)
 
     def _key_play_step(self):
         if self.reader is None:
@@ -2643,9 +2623,6 @@ class UmaDirectionRefinementApp(ctk.CTk):
             return None
         if self._event_from_spinbox():
             return None
-        if self.playback_active and keysym in {"Left", "Right"}:
-            self.stop_playback()
-            return "break"
         if keysym == "Left":
             self._start_key_play(-1)
         elif keysym == "Right":
@@ -2659,7 +2636,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
     def on_key_release(self, event):
         keysym = str(event.keysym)
         if keysym in {"Left", "Right"}:
-            self._stop_key_play()
+            self._arrow_key_play.release(-1 if keysym == "Left" else 1)
         return "break"
 
     def on_focus_out(self, _event=None):
