@@ -3003,6 +3003,9 @@ class CrossingReviewApp(ctk.CTk):
         control._absolute_canvas = tk.Canvas(parent, height=52, bg=_SPIN_CFG["bg"], highlightthickness=0)
         control._absolute_canvas.pack(fill="x", pady=(2, 0))
         control._absolute_canvas.bind("<Configure>", lambda _e: self._draw_absolute_slider(result=result))
+        control._absolute_canvas.bind(
+            "<Motion>", lambda event: self._update_absolute_slider_cursor(event, result=result),
+        )
         control._absolute_canvas.bind("<Button-1>", lambda _e: self._start_absolute_drag(_e, result=result))
         control._absolute_canvas.bind("<Double-Button-1>", lambda _e: self._reset_absolute_handle_to_default(_e, result=result))
         control._absolute_canvas.bind("<B1-Motion>", lambda _e: self._drag_absolute_handle(_e, result=result))
@@ -3051,6 +3054,14 @@ class CrossingReviewApp(ctk.CTk):
         width = max(1, control._absolute_canvas.winfo_width() - 24)
         return [12 + min(1.0, max(0.0, float(var.get()) / control._absolute_slider_cap)) * width
                 for var in (control.area_absolute_min_var, control.area_absolute_max_var)]
+
+    def _update_absolute_slider_cursor(self, event, *, result=False):
+        control = self._result_area_control if result else self
+        over_handle = any(
+            (event.x - x) ** 2 + (event.y - 18) ** 2 <= 64
+            for x in self._absolute_handle_positions(result=result)
+        )
+        control._absolute_canvas.configure(cursor="hand2" if over_handle else "")
 
     def _draw_absolute_slider(self, *, result=False):
         control = self._result_area_control if result else self
