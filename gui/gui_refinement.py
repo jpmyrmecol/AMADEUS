@@ -2337,6 +2337,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
                 return
             if answer:
                 self.save_csv_as()
+                # Saving the primary CSV starts background companion writes.
+                # Keep the window alive until those files have finished.
+                if self._companion_save_active or self.edited_keys:
+                    return
 
         self._closing = True
         self._stop_key_play()
