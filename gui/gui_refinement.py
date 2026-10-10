@@ -10,6 +10,7 @@ import re
 import sys
 import threading
 import time
+import uuid
 import tkinter as tk
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -559,6 +560,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.loaded_csv_path: str | None = None
         self._pending_refinement_source: dict | None = None
         self.last_save_path: Optional[str] = None
+        self._companion_save_active = False
+        self._companion_save_messages: queue.Queue = queue.Queue()
         self.prefetch_after_id: Optional[str] = None
         self._decode_gen: int = 0
         self._last_displayed_frame: int = -1
@@ -2287,6 +2290,22 @@ class UmaDirectionRefinementApp(ctk.CTk):
                     )
         except queue.Empty:
             pass
+        try:
+            while True:
+                saved_paths, error = self._companion_save_messages.get_nowait()
+                self._companion_save_active = False
+                if error is not None:
+                    self.set_status(f"Companion CSV save failed: {error}", auto_clear=False)
+                    messagebox.showerror(
+                        "Companion CSV save failed",
+                        "The main refined CSV was saved, but its companion CSVs could not all be written.\n"
+                        f"{error}",
+                    )
+                else:
+                    names = ", ".join(Path(p).name for p in saved_paths)
+                    self.set_status(f"Refinement CSVs saved: {names}", auto_clear=False)
+        except queue.Empty:
+            pass
         if not self._closing:
             self.after(8, self._pump_frame_queue)
 
@@ -2303,6 +2322,12 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.status_var.set("")
 
     def on_close(self):
+        if self._companion_save_active:
+            messagebox.showinfo(
+                "Saving companion CSVs",
+                "The rear/front and center CSVs are still being saved. Please close the window after saving finishes.",
+            )
+            return
         if self.edited_keys and self.df is not None:
             answer = messagebox.askyesnocancel(
                 "Unsaved changes",
@@ -3134,7 +3159,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
     def save_csv_quick(self):
         """Ctrl+S: save to last path without dialog; fall back to Save As if no path set."""
-        if self.df is None:
+        if self.df is None or self._companion_save_active:
+            if self._companion_save_active:
+                self.set_status("Companion CSVs are still saving; try again when finished.", auto_clear=False)
             return
         if self.last_save_path:
             self._save_refinement_csv(self.last_save_path)
@@ -3143,7 +3170,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
     def save_csv_as(self):
         """Save As button: always prompt for file path."""
-        if self.df is None:
+        if self.df is None or self._companion_save_active:
+            if self._companion_save_active:
+                self.set_status("Companion CSVs are still saving; try again when finished.", auto_clear=False)
             return
         source_path = Path(self.refinement_source_path or self.csv_path_var.get())
         default_name = self._default_output_path(self.csv_path_var.get())
@@ -3159,38 +3188,127 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if self._save_refinement_csv(path, save_as=True):
             self.last_save_path = path
 
+    def _companion_csv_paths(self, path: str, *, amadeus_result: bool) -> tuple[Path | None, Path]:
+        """Derive sidecars from the selected output without replacing the main CSV."""
+        main_path = Path(path)
+        if amadeus_result:
+            rear_front_path = main_path.with_name(f"{main_path.stem}_rear_front.csv")
+            center_path = main_path.with_name(f"{main_path.stem}_center.csv")
+            return rear_front_path, center_path
+        # A rear/front-only input already saves that data as its primary CSV.
+        center_path = _convert.center_csv_path(main_path)
+        if self._normalized_path(center_path) == self._normalized_path(main_path):
+            center_path = main_path.with_name(f"{main_path.stem}_center.csv")
+        return None, center_path
+
     def _save_refinement_csv(self, path: str, *, save_as: bool = False) -> bool:
+        if self._companion_save_active:
+            self.set_status("Companion CSVs are still saving; try again when finished.", auto_clear=False)
+            return False
         output_path = self._normalized_path(path)
-        if save_as and output_path in self.refinement_source_paths:
+        if output_path in self.refinement_source_paths:
             messagebox.showwarning(
                 "Choose another file",
                 "The original input CSV cannot be overwritten. Choose a different output path.",
             )
             return False
 
-        if self.refinement_obb_df is not None:
-            if self.refinement_output_kind != "amadeus_result":
-                raise ValueError("OBB source data is present for a non-AMADEUS refinement input.")
-            rear_front = _convert.legacy_wide_to_rear_front(self.df, "front_rear")
-            result = _convert.refine_amadeus_result_from_rear_front(
-                self.refinement_obb_df,
-                rear_front,
-                self.position_edited_keys,
-                self.direction_reversed_keys,
+        amadeus_result = self.refinement_obb_df is not None
+        if amadeus_result and self.refinement_output_kind != "amadeus_result":
+            raise ValueError("OBB source data is present for a non-AMADEUS refinement input.")
+        rear_front_path, center_path = self._companion_csv_paths(path, amadeus_result=amadeus_result)
+        sidecar_paths = ([rear_front_path] if rear_front_path is not None else []) + [center_path]
+        if (len({output_path, *(self._normalized_path(p) for p in sidecar_paths)})
+                != 1 + len(sidecar_paths)
+                or any(self._normalized_path(p) in self.refinement_source_paths for p in sidecar_paths)):
+            messagebox.showwarning(
+                "Choose another file",
+                "A companion CSV would overwrite an input file or the main output. Choose a different output path.",
             )
-            _convert.save_amadeus_result_csv(result, path)
-            self.refinement_obb_df = result.copy(deep=True)
-            self.refinement_output_kind = "amadeus_result"
-            self.position_edited_keys.clear()
-            self.direction_reversed_keys.clear()
-        else:
+            return False
+
+        try:
+            # The primary CSV is committed first, preserving the existing save format.
+            # This DataFrame is independent of subsequent GUI edits and is passed to
+            # the worker without rereading mutable GUI state.
             standard = _convert.legacy_wide_to_rear_front(self.df, "front_rear")
-            _convert.save_rear_front_csv(standard, path)
+            if amadeus_result:
+                result = _convert.refine_amadeus_result_from_rear_front(
+                    self.refinement_obb_df,
+                    standard,
+                    self.position_edited_keys,
+                    self.direction_reversed_keys,
+                )
+                _convert.save_amadeus_result_csv(result, path)
+                companion_source = result
+                self.refinement_obb_df = result.copy(deep=True)
+                self.refinement_output_kind = "amadeus_result"
+                self.position_edited_keys.clear()
+                self.direction_reversed_keys.clear()
+            else:
+                _convert.save_rear_front_csv(standard, path)
+                companion_source = standard
+        except Exception as exc:
+            self.set_status(f"Failed to save refined CSV: {exc}", auto_clear=False)
+            messagebox.showerror("Save failed", str(exc))
+            return False
+
         self.edited_keys.clear()
         self.refinement_pose_np = self.df_np.copy()
         self.save_count += 1
-        self.set_status(f"Saved ({self.save_count}): {path}")
+        self._companion_save_active = True
+        self.set_status(f"Main CSV saved ({self.save_count}); saving companion CSVs...", auto_clear=False)
+
+        thread = threading.Thread(
+            target=self._write_refinement_companions,
+            args=(companion_source, tuple(sidecar_paths), amadeus_result),
+            name="refinement-companion-csv-save",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except Exception as exc:
+            self._companion_save_active = False
+            self.set_status(f"Main CSV saved, but companion save could not start: {exc}", auto_clear=False)
+            messagebox.showerror("Companion save failed", str(exc))
         return True
+
+    def _write_refinement_companions(
+        self,
+        source: pd.DataFrame,
+        paths: tuple[Path, ...],
+        amadeus_result: bool,
+    ) -> None:
+        """Generate sidecars off the Tk thread, using a single immutable snapshot."""
+        temporary_paths: list[Path] = []
+        error: Exception | None = None
+        try:
+            rear_front = (
+                _convert.amadeus_result_to_rear_front(source, round_digits=None)
+                if amadeus_result else source
+            )
+            center = _convert.rear_front_to_center(rear_front)
+            if amadeus_result:
+                data_to_save = ((paths[0], rear_front, _convert.save_rear_front_csv),
+                                (paths[1], center, _convert.save_center_csv))
+            else:
+                data_to_save = ((paths[0], center, _convert.save_center_csv),)
+            # Finish writing both temporary files before replacing either output.
+            for destination, frame_data, writer in data_to_save:
+                temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+                temporary_paths.append(temporary)
+                writer(frame_data, temporary)
+            for temporary, (destination, _, _) in zip(temporary_paths, data_to_save):
+                os.replace(temporary, destination)
+        except Exception as exc:
+            error = exc
+        finally:
+            for temporary in temporary_paths:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._companion_save_messages.put((paths, error))
 
     def open_export_video_dialog(self):
         if self.reader is None or self.df is None:
