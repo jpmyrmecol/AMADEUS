@@ -633,6 +633,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
             seek=lambda target: self.request_frame(target, reset_view=False, immediate=True),
             busy=self._has_pending_frame_request,
             pause=self.stop_playback,
+            pacer=lambda: self._preview_pacer,
+            async_seek=True,
         )
 
         self.playback_active = False
@@ -2213,6 +2215,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if self.playback_active and self._preview_request_started_at is not None:
             self._preview_pacer.observe_frame(time.monotonic() - self._preview_request_started_at)
             self._preview_request_started_at = None
+        if self._arrow_key_play.repeating:
+            self._arrow_key_play.frame_rendered()
         if not self.playback_active and self._arrow_key_play.direction == 0:
             self._queue_prefetch(frame_idx)
 
