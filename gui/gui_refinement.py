@@ -351,7 +351,7 @@ class VideoFrameReader:
         if self._closed.is_set():
             raise RuntimeError("Video reader is closed.")
         gap = frame_idx - current_pos
-        if 0 < gap <= 12:
+        if current_pos >= 0 and 0 < gap <= 12:
             # Skipped frames only need a grab, not conversion and GUI rendering.
             # For nearby frames this also avoids repeated random seeks in compressed video.
             for _ in range(gap):
