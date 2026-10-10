@@ -46,6 +46,7 @@ from main.video_encoders import (
 )
 from main.video_frame_count import detect_seekable_frame_count
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
+from gui.preview_playback_timing import AdaptivePreviewPacer
 
 
 ctk.set_appearance_mode("dark")
@@ -640,6 +641,7 @@ class PreprocessApp(ctk.CTk):
         self.playback_active = False
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
+        self._preview_pacer = AdaptivePreviewPacer()
         self._arrow_key_play = ArrowKeyHoldPlayback(
             self,
             current_frame=lambda: self.current_frame,
@@ -1807,6 +1809,7 @@ class PreprocessApp(ctk.CTk):
             self.reader.close()
         self.view_initialized = False
         self.reader = reader
+        self._preview_pacer.reset()
         self.video_path_var.set(path)
         self.output_folder_var.set(os.path.dirname(path))
         self.current_frame = 0
@@ -2229,6 +2232,7 @@ class PreprocessApp(ctk.CTk):
             if not self.set_frame(self.in_frame):
                 return
         self._cancel_preview_prefetch()
+        self._preview_pacer.resume()
         self.playback_active = True
         self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
         self._update_playback_buttons()
@@ -2250,14 +2254,24 @@ class PreprocessApp(ctk.CTk):
         rate = self.reader.fps * speed
         frame_idx = min(self.out_frame, int(anchor_frame + max(0.0, now - anchor_time) * rate))
         if frame_idx > self.current_frame:
-            if not self.set_frame(frame_idx, from_playback=True):
+            wait_ms = self._preview_pacer.delay_ms(now, rate)
+            if wait_ms > 0:
+                self._schedule_playback_step(delay_ms=wait_ms)
+                return
+            started = time.monotonic()
+            self._preview_pacer.begin_frame(started)
+            rendered = self.set_frame(frame_idx, from_playback=True)
+            self._preview_pacer.observe_frame(time.monotonic() - started)
+            if not rendered:
                 self.stop_playback()
                 return
         if self.current_frame >= self.out_frame:
             self.stop_playback()
             return
+        now = time.monotonic()
         next_due = anchor_time + (self.current_frame + 1 - anchor_frame) / rate
-        self._schedule_playback_step(delay_ms=max(1, int((next_due - time.monotonic()) * 1000)))
+        timeline_wait = max(1, math.ceil((next_due - now) * 1000))
+        self._schedule_playback_step(delay_ms=max(timeline_wait, self._preview_pacer.delay_ms(now, rate)))
 
     def stop_playback(self, update_button: bool = True) -> None:
         was_active = self.playback_active
