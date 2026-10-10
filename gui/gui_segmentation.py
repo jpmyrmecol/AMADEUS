@@ -242,6 +242,7 @@ class VideoFrameReader:
 
         from collections import OrderedDict
         self.cache: "OrderedDict[int, np.ndarray]" = OrderedDict()
+        self._cache_lock = threading.RLock()
         self._cap_lock = threading.Lock()
         self._prefetch_lock = threading.Lock()
         self._cap_pos: int = -1
@@ -301,12 +302,13 @@ class VideoFrameReader:
         return frame, frame_idx + 1, frame_idx
 
     def _cache_put(self, frame_idx: int, frame_bgr: np.ndarray):
-        if frame_idx in self.cache:
-            self.cache.move_to_end(frame_idx)
-        else:
-            self.cache[frame_idx] = frame_bgr
-            while len(self.cache) > self.cache_capacity:
-                self.cache.popitem(last=False)
+        with self._cache_lock:
+            if frame_idx in self.cache:
+                self.cache.move_to_end(frame_idx)
+            else:
+                self.cache[frame_idx] = frame_bgr
+                while len(self.cache) > self.cache_capacity:
+                    self.cache.popitem(last=False)
 
     def _clamp_frame_idx(self, frame_idx: int) -> int:
         frame_idx = int(frame_idx)
@@ -316,13 +318,15 @@ class VideoFrameReader:
 
     def read_bgr_with_index(self, frame_idx: int) -> "tuple[np.ndarray, int]":
         frame_idx = self._clamp_frame_idx(frame_idx)
-        if frame_idx in self.cache:
-            self.cache.move_to_end(frame_idx)
-            return self.cache[frame_idx].copy(), frame_idx
-        with self._cap_lock:
+        with self._cache_lock:
             if frame_idx in self.cache:
                 self.cache.move_to_end(frame_idx)
                 return self.cache[frame_idx].copy(), frame_idx
+        with self._cap_lock:
+            with self._cache_lock:
+                if frame_idx in self.cache:
+                    self.cache.move_to_end(frame_idx)
+                    return self.cache[frame_idx].copy(), frame_idx
             frame, self._cap_pos, actual_idx = self._decode_bgr(self.cap, frame_idx, self._cap_pos)
             self._cache_put(actual_idx, frame)
             return frame.copy(), actual_idx
@@ -335,11 +339,15 @@ class VideoFrameReader:
         if self.prefetch_cap is None:
             return
         frame_idx = int(frame_idx)
-        if frame_idx < 0 or frame_idx >= self.frame_count or frame_idx in self.cache:
+        if frame_idx < 0 or frame_idx >= self.frame_count:
             return
-        with self._prefetch_lock:
+        with self._cache_lock:
             if frame_idx in self.cache:
                 return
+        with self._prefetch_lock:
+            with self._cache_lock:
+                if frame_idx in self.cache:
+                    return
             try:
                 frame, self._prefetch_pos, actual_idx = self._decode_bgr(
                     self.prefetch_cap, frame_idx, self._prefetch_pos)
@@ -357,7 +365,8 @@ class VideoFrameReader:
         """Release preview frames before a memory-intensive batch operation."""
         with self._cap_lock:
             with self._prefetch_lock:
-                self.cache.clear()
+                with self._cache_lock:
+                    self.cache.clear()
 
 
 @dataclass
