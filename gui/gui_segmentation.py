@@ -66,6 +66,7 @@ from main.roi import (
 )
 from main.video_frame_count import detect_seekable_frame_count
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
+from gui.preview_playback_timing import AdaptivePreviewPacer
 
 APP_TITLE = "AMADEUS: Segmentation"
 WINDOW_W = 1720
@@ -1441,6 +1442,7 @@ class CrossingReviewApp(ctk.CTk):
         self.playback_active = False
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
+        self._preview_pacer = AdaptivePreviewPacer()
         self._arrow_key_play = ArrowKeyHoldPlayback(
             self,
             current_frame=lambda: self.current_frame,
@@ -3642,6 +3644,7 @@ class CrossingReviewApp(ctk.CTk):
         if self.reader is not None:
             self.reader.close()
         self.reader = reader
+        self._preview_pacer.reset()
         self._area_reference_frame = None
         self._area_reference_blobs = []
         self._area_reference_key = None
@@ -6017,6 +6020,7 @@ class CrossingReviewApp(ctk.CTk):
             self.after_cancel(self.prefetch_after_id)
             self.prefetch_after_id = None
         self._prefetch_cancel.set()
+        self._preview_pacer.resume()
         self.playback_active = True
         self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
         self._update_play_button()
@@ -6054,14 +6058,24 @@ class CrossingReviewApp(ctk.CTk):
         rate = self._playback_fps() * speed
         target = min(self.frame_count - 1, int(anchor_frame + max(0.0, now - anchor_time) * rate))
         if target > self.current_frame:
-            if not self.set_frame(target, from_playback=True):
+            wait_ms = self._preview_pacer.delay_ms(now, rate)
+            if wait_ms > 0:
+                self._schedule_playback(delay_ms=wait_ms)
+                return
+            started = time.monotonic()
+            self._preview_pacer.begin_frame(started)
+            rendered = self.set_frame(target, from_playback=True)
+            self._preview_pacer.observe_frame(time.monotonic() - started)
+            if not rendered:
                 self.stop_playback()
                 return
         if self.current_frame >= self.frame_count - 1:
             self.stop_playback()
             return
+        now = time.monotonic()
         next_due = anchor_time + (self.current_frame + 1 - anchor_frame) / rate
-        self._schedule_playback(delay_ms=max(1, int((next_due - time.monotonic()) * 1000)))
+        timeline_wait = max(1, math.ceil((next_due - now) * 1000))
+        self._schedule_playback(delay_ms=max(timeline_wait, self._preview_pacer.delay_ms(now, rate)))
 
     def _open_progress_popup(self, title: str):
         self._close_progress_popup()
