@@ -1271,8 +1271,15 @@ class CrossingReviewApp(ctk.CTk):
         self.result_import_path_var = tk.StringVar(value="")
         self.result_import_min_coverage_var = tk.DoubleVar(value=DEFAULT_RESULT_OBB_COVERAGE)
         self.result_import_area_min_var = tk.IntVar(value=0)
-        self.result_import_area_max_var = tk.IntVar(value=100000)
+        self.result_import_area_max_var = tk.IntVar(value=1000)
         self._result_area_updating = False
+        self._result_area_control = SimpleNamespace(
+            area_absolute_min_var=self.result_import_area_min_var,
+            area_absolute_max_var=self.result_import_area_max_var,
+            _absolute_default_values=None, _absolute_defaults_pending=True,
+        )
+        self._result_area_reference_key = None
+        self._result_area_reference_stats = (0.0, 0.0, 0.0, 0.0)
         self.result_import_show_obb_var = tk.BooleanVar(value=True)
         self.result_import_status_var = tk.StringVar(value="result OBB: not loaded")
 
@@ -1313,6 +1320,9 @@ class CrossingReviewApp(ctk.CTk):
 
         self.current_mask_cache: dict[tuple, tuple[np.ndarray, list[BlobMetrics]]] = {}
         self._area_reference_frame: "np.ndarray | None" = None
+        self._area_reference_key = None
+        self._area_reference_max = 0.0
+        self._area_reference_stats = (0.0, 0.0, 0.0, 0.0)
         self._min_area_slider_cap: Optional[int] = None
         self.analysis_blobs_by_frame: dict[int, list[BlobMetrics]] = {}
         self.analysis_frames: list[int] = []
@@ -1367,6 +1377,11 @@ class CrossingReviewApp(ctk.CTk):
         self._roi_drag_vertex: Optional[int] = None
         self._roi_drag_points: list[list[int]] = []
 
+        self._numeric_entry_commits = {}
+        self._numeric_click_tag = f"SegmentationNumericCommit{id(self)}"
+        for button in (1, 2, 3):
+            self.bind_class(self._numeric_click_tag, f"<ButtonPress-{button}>", self._commit_numeric_on_click)
+        self.bind_all("<Map>", self._tag_numeric_click_target, add="+")
         self._build_ui()
         self._bind_events()
         self._bind_traces()
@@ -1375,6 +1390,53 @@ class CrossingReviewApp(ctk.CTk):
 
     def _maximize_window(self) -> None:
         _maximize_window_once(self)
+
+    def _tag_numeric_click_target(self, event):
+        """Commit pending numeric input before the clicked widget's action."""
+        widget = event.widget
+        ancestor = widget
+        while ancestor is not None and ancestor is not self:
+            ancestor = getattr(ancestor, "master", None)
+        if ancestor is self:
+            tags = widget.bindtags()
+            if self._numeric_click_tag not in tags:
+                widget.bindtags((self._numeric_click_tag, *tags))
+
+    def _register_numeric_entry(self, widget, commit):
+        self._numeric_entry_commits[widget] = commit
+        widget.bind("<Destroy>", lambda _e: self._numeric_entry_commits.pop(widget, None), add="+")
+
+    def _commit_numeric_on_click(self, event):
+        focused = self.focus_get()
+        commit = self._numeric_entry_commits.get(focused)
+        if commit is None or event.widget is focused:
+            return
+        commit()
+        # Labels and canvases do not normally take focus when clicked. Moving
+        # focus prevents a later edit from remaining attached to the old field.
+        event.widget.focus_set()
+
+    def _register_popup_integer_entry(self, widget):
+        """Normalize a dialog value while retaining its Apply/Export action."""
+        state = {"value": int(widget.get())}
+
+        def commit(_event=None):
+            if not widget.winfo_exists():
+                return "break"
+            try:
+                value = int(widget.get().strip())
+                value = max(int(widget.cget("from")), min(int(widget.cget("to")), value))
+            except ValueError:
+                value = state["value"]
+            state["value"] = value
+            widget.delete(0, tk.END)
+            widget.insert(0, str(value))
+            return "break"
+
+        widget.configure(command=commit)
+        for event in ("<Return>", "<KP_Enter>", "<FocusOut>"):
+            widget.bind(event, commit, add="+")
+        self._register_numeric_entry(widget, commit)
 
     def _build_ui(self):
         top = ctk.CTkFrame(self, corner_radius=0)
@@ -1411,6 +1473,7 @@ class CrossingReviewApp(ctk.CTk):
         self.frame_spin.bind("<Return>", self.on_frame_entry_commit, add="+")
         self.frame_spin.bind("<KP_Enter>", self.on_frame_entry_commit, add="+")
         self.frame_spin.bind("<FocusOut>", self.on_frame_entry_commit, add="+")
+        self._register_numeric_entry(self.frame_spin, self.on_frame_entry_commit)
         self.frame_scale = ctk.CTkSlider(nav, orientation="horizontal", command=self.on_frame_scale)
         self.frame_scale.pack(side="left", fill="x", expand=True)
         ctk.CTkButton(nav, text="Fit window", width=90, command=self.fit_canvas_to_window).pack(side="left", padx=(8, 0))
@@ -1656,18 +1719,7 @@ class CrossingReviewApp(ctk.CTk):
             self.result_import_params_frame, "Min OBB coverage",
             self.result_import_min_coverage_var, 0.0, 1.0, 0.1, is_float=True,
         )
-        self.result_import_area_min_scale = self._pack_scale_entry(
-            self.result_import_params_frame, "Minimum blob area",
-            self.result_import_area_min_var, 0, 100000, 1,
-            value_bounds=lambda: (0, int(self.result_import_area_max_var.get())),
-        )
-        self.result_import_area_max_scale = self._pack_scale_entry(
-            self.result_import_params_frame, "Maximum blob area",
-            self.result_import_area_max_var, 0, 100000, 1,
-            value_bounds=lambda: (int(self.result_import_area_min_var.get()), sys.maxsize),
-        )
-        for index, scale in enumerate((self.result_import_area_min_scale, self.result_import_area_max_scale)):
-            scale.bind("<Double-Button-1>", lambda _e, i=index: self._reset_result_area_bound(i))
+        self._build_area_absolute_control(self.result_import_params_frame, result=True)
         ctk.CTkCheckBox(
             self.result_import_params_frame, text="Show imported OBB",
             variable=self.result_import_show_obb_var,
@@ -2071,11 +2123,14 @@ class CrossingReviewApp(ctk.CTk):
         # Loading an older session must not inherit smoothing from the last one.
         self.single_blob_smoothing_enabled_var.set(bool(settings.get("single_blob_smoothing_enabled", False)))
         self.single_blob_smoothing_level_var.set(max(1, min(20, int(settings.get("single_blob_smoothing_level", 3)))))
-        # An old config uses the full video area, not another session's limits.
+        # Missing bounds adopt real-blob defaults after the loaded segmentation
+        # settings are applied; explicit saved limits remain user settings.
+        self._result_area_control._absolute_defaults_pending = not any(
+            key in settings for key in ("result_import_area_min", "result_import_area_max")
+        )
         self.result_import_area_min_var.set(int(settings.get("result_import_area_min", 0)))
-        self.result_import_area_max_var.set(int(settings.get("result_import_area_max", self._result_area_default_max())))
+        self.result_import_area_max_var.set(int(settings.get("result_import_area_max", 1000)))
         self._current_result_area_bounds()
-        self._update_result_area_control_ranges()
 
         self._apply_frame_ranges_from_settings(settings)
         self._toggle_area_outlier_method_controls()
@@ -2450,6 +2505,9 @@ class CrossingReviewApp(ctk.CTk):
         self._min_area_slider_cap = None
         self._absolute_zoomed = False
         self._absolute_dragging = False
+        self._result_area_control._absolute_zoomed = False
+        self._result_area_control._absolute_dragging = False
+        self._result_area_reference_key = None
         self._update_area_control_ranges()
         # Persist the loaded state (and any replacement video path) immediately.
 
@@ -2624,6 +2682,7 @@ class CrossingReviewApp(ctk.CTk):
             sp.delete(0, tk.END)
             sp.insert(0, str(int(initial)))
             sp.pack(side="left")
+            self._register_popup_integer_entry(sp)
             entries[key] = sp
 
         bg_frame = _section("Background estimation")
@@ -2695,7 +2754,7 @@ class CrossingReviewApp(ctk.CTk):
         var.trace_add("write", lambda *_: combo.set(var.get()))
         combo.pack(side="left", fill="x", expand=True)
 
-    def _pack_scale_entry(self, parent, label, var, lo, hi, resolution, is_float: bool = False, enable_var: Optional[tk.BooleanVar] = None, entry_prefix: str = "", slider_lo=None, slider_hi=None, end_sentinel: Optional[int] = None, value_bounds=None):
+    def _pack_scale_entry(self, parent, label, var, lo, hi, resolution, is_float: bool = False, enable_var: Optional[tk.BooleanVar] = None, entry_prefix: str = "", slider_lo=None, slider_hi=None, end_sentinel: Optional[int] = None):
         outer = ctk.CTkFrame(parent, corner_radius=0)
         outer.pack(fill="x", padx=6, pady=3)
 
@@ -2713,9 +2772,6 @@ class CrossingReviewApp(ctk.CTk):
 
         def clamp_value(v):
             lo, hi = float(spinbox.cget("from")), float(spinbox.cget("to"))
-            if value_bounds is not None:
-                bound_lo, bound_hi = value_bounds()
-                lo, hi = max(lo, bound_lo), min(hi, bound_hi)
             if is_float:
                 v = float(v)
                 v = max(float(lo), min(float(hi), v))
@@ -2823,6 +2879,7 @@ class CrossingReviewApp(ctk.CTk):
         spinbox.bind("<Return>", commit_entry, add="+")
         spinbox.bind("<KP_Enter>", commit_entry, add="+")
         spinbox.bind("<FocusOut>", commit_entry, add="+")
+        self._register_numeric_entry(spinbox, commit_entry)
         var.trace_add("write", sync_from_var)
         if enable_var is not None:
             enable_var.trace_add("write", sync_enabled_state)
@@ -2840,16 +2897,17 @@ class CrossingReviewApp(ctk.CTk):
         scale.set_value_range = set_value_range
         return scale
 
-    def _build_area_absolute_control(self, parent):
+    def _build_area_absolute_control(self, parent, *, result=False):
+        control = self._result_area_control if result else self
         row = ctk.CTkFrame(parent, corner_radius=0)
         row.pack(fill="x")
         row.grid_columnconfigure((0, 1), weight=1)
-        self._absolute_entries = []
-        self._absolute_spins = []
-        self._absolute_slider_cap = 100000
-        self._absolute_zoomed = False
-        self._absolute_dragging = False
-        variables = (self.area_absolute_min_var, self.area_absolute_max_var)
+        control._absolute_entries = []
+        control._absolute_spins = []
+        control._absolute_slider_cap = 1000 if result else 100000
+        control._absolute_zoomed = False
+        control._absolute_dragging = False
+        variables = (control.area_absolute_min_var, control.area_absolute_max_var)
         validate = (self.register(lambda value: value == "" or value.isascii() and value.isdecimal()), "%P")
         for index, label in enumerate(("Minimum area", "Maximum area")):
             side = "w" if index == 0 else "e"
@@ -2858,123 +2916,149 @@ class CrossingReviewApp(ctk.CTk):
             spin = tk.Spinbox(
                 row, from_=0, to=sys.maxsize, increment=1, width=12,
                 textvariable=entry, validate="key", validatecommand=validate,
-                command=lambda i=index: self._commit_absolute_entry(i),
+                command=lambda i=index: self._commit_absolute_entry(i, result=result),
                 **_SPIN_CFG,
             )
             spin.grid(row=1, column=index, sticky=side)
             for event in ("<Return>", "<KP_Enter>", "<FocusOut>"):
-                spin.bind(event, lambda _e, i=index: self._commit_absolute_entry(i))
-            self._absolute_entries.append(entry)
-            self._absolute_spins.append(spin)
-        self._absolute_canvas = tk.Canvas(parent, height=52, bg="white", highlightthickness=0)
-        self._absolute_canvas.pack(fill="x", pady=(2, 0))
-        self._absolute_canvas.bind("<Configure>", lambda _e: self._draw_absolute_slider())
-        self._absolute_canvas.bind("<Button-1>", self._start_absolute_drag)
-        self._absolute_canvas.bind("<Double-Button-1>", self._reset_absolute_handle_to_default)
-        self._absolute_canvas.bind("<B1-Motion>", self._drag_absolute_handle)
-        self._absolute_canvas.bind("<ButtonRelease-1>", self._end_absolute_drag)
+                spin.bind(event, lambda _e, i=index: self._commit_absolute_entry(i, result=result))
+            self._register_numeric_entry(spin, lambda i=index: self._commit_absolute_entry(i, result=result))
+            control._absolute_entries.append(entry)
+            control._absolute_spins.append(spin)
+        control._absolute_canvas = tk.Canvas(parent, height=52, bg=_SPIN_CFG["bg"], highlightthickness=0)
+        control._absolute_canvas.pack(fill="x", pady=(2, 0))
+        control._absolute_canvas.bind("<Configure>", lambda _e: self._draw_absolute_slider(result=result))
+        control._absolute_canvas.bind("<Button-1>", lambda _e: self._start_absolute_drag(_e, result=result))
+        control._absolute_canvas.bind("<Double-Button-1>", lambda _e: self._reset_absolute_handle_to_default(_e, result=result))
+        control._absolute_canvas.bind("<B1-Motion>", lambda _e: self._drag_absolute_handle(_e, result=result))
+        control._absolute_canvas.bind("<ButtonRelease-1>", lambda _e: self._end_absolute_drag(_e, result=result))
         for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self._absolute_canvas.bind(event, self._zoom_absolute_slider)
+            control._absolute_canvas.bind(event, lambda _e: self._zoom_absolute_slider(_e, result=result))
         for var in variables:
-            var.trace_add("write", lambda *_: self._sync_absolute_control())
-        self._sync_absolute_control()
+            var.trace_add("write", lambda *_: self._sync_absolute_control(result=result))
+        self._sync_absolute_control(result=result)
 
-    def _commit_absolute_entry(self, index):
-        text = self._absolute_entries[index].get()
+    def _commit_absolute_entry(self, index, *, result=False):
+        control = self._result_area_control if result else self
+        text = control._absolute_entries[index].get()
         if text and text.isascii() and text.isdecimal():
-            variables = (self.area_absolute_min_var, self.area_absolute_max_var)
+            if result:
+                control._absolute_defaults_pending = False
+            variables = (control.area_absolute_min_var, control.area_absolute_max_var)
             if int(text) != int(variables[index].get()):
-                self._set_absolute_threshold(index, int(text))
-            self._absolute_slider_cap = max(self._absolute_slider_cap, int(variables[index].get()))
-            self._draw_absolute_slider()
+                self._set_absolute_threshold(index, int(text), result=result)
+            control._absolute_slider_cap = max(control._absolute_slider_cap, int(variables[index].get()))
+            self._draw_absolute_slider(result=result)
         else:
-            self._sync_absolute_control()
+            self._sync_absolute_control(result=result)
 
-    def _set_absolute_threshold(self, index, value):
-        variables = (self.area_absolute_min_var, self.area_absolute_max_var)
+    def _set_absolute_threshold(self, index, value, *, result=False):
+        control = self._result_area_control if result else self
+        variables = (control.area_absolute_min_var, control.area_absolute_max_var)
         other = int(variables[1 - index].get())
         value = max(0, int(value))
         value = min(value, other) if index == 0 else max(value, other)
-        self._absolute_defaults_pending = False
+        control._absolute_defaults_pending = False
         variables[index].set(value)
-        self._sync_absolute_control()
+        self._sync_absolute_control(result=result)
 
-    def _sync_absolute_control(self, *, force=False):
+    def _sync_absolute_control(self, *, force=False, result=False):
+        control = self._result_area_control if result else self
         if getattr(self, "_updating_area_ranges", False) and not force:
             return
-        values = (self.area_absolute_min_var.get(), self.area_absolute_max_var.get())
-        for entry, value in zip(self._absolute_entries, values):
+        values = (control.area_absolute_min_var.get(), control.area_absolute_max_var.get())
+        for entry, value in zip(control._absolute_entries, values):
             entry.set(str(int(value)))
-        self._draw_absolute_slider()
+        self._draw_absolute_slider(result=result)
 
-    def _absolute_handle_positions(self):
-        width = max(1, self._absolute_canvas.winfo_width() - 24)
-        return [12 + min(1.0, max(0.0, float(var.get()) / self._absolute_slider_cap)) * width
-                for var in (self.area_absolute_min_var, self.area_absolute_max_var)]
+    def _absolute_handle_positions(self, *, result=False):
+        control = self._result_area_control if result else self
+        width = max(1, control._absolute_canvas.winfo_width() - 24)
+        return [12 + min(1.0, max(0.0, float(var.get()) / control._absolute_slider_cap)) * width
+                for var in (control.area_absolute_min_var, control.area_absolute_max_var)]
 
-    def _draw_absolute_slider(self):
-        canvas = self._absolute_canvas
+    def _draw_absolute_slider(self, *, result=False):
+        control = self._result_area_control if result else self
+        canvas = control._absolute_canvas
         canvas.delete("all")
-        left, right = self._absolute_handle_positions()
+        left, right = self._absolute_handle_positions(result=result)
         canvas.create_line(12, 18, max(12, canvas.winfo_width() - 12), 18,
-                           fill="#c8c8c8", width=5)
-        canvas.create_line(left, 18, right, 18, fill="#245b45", width=5)
-        canvas.create_text(12, 43, text="0", anchor="w", fill="#333333")
+                           fill="#4a4d50", width=5)
+        canvas.create_line(left, 18, right, 18, fill="#aab0b5", width=5)
+        canvas.create_text(12, 43, text="0", anchor="w", fill=_SPIN_CFG["fg"])
         canvas.create_text(max(12, canvas.winfo_width() - 12), 43,
-                           text=str(self._absolute_slider_cap), anchor="e", fill="#333333")
+                           text=str(control._absolute_slider_cap), anchor="e", fill=_SPIN_CFG["fg"])
         # Off-scale handles stay at the right edge; zooming never changes thresholds.
-        # Opposing triangles keep both handles visible even at equal thresholds.
-        canvas.create_polygon(left - 7, 5, left + 7, 5, left, 18, fill="#245b45")
-        canvas.create_polygon(right - 7, 31, right + 7, 31, right, 18, fill="#245b45")
+        for position in (left, right):
+            canvas.create_oval(position - 8, 10, position + 8, 26, fill="#115e37", outline="")
 
-    def _reset_absolute_handle_to_default(self, event):
-        defaults = self._absolute_default_values
+    def _reset_absolute_handle_to_default(self, event, *, result=False):
+        control = self._result_area_control if result else self
+        defaults = control._absolute_default_values
         if defaults is None:
             return "break"
-        left, right = self._absolute_handle_positions()
-        hit_min = abs(event.x - left) <= 9 and 3 <= event.y <= 20
-        hit_max = abs(event.x - right) <= 9 and 16 <= event.y <= 33
+        left, right = self._absolute_handle_positions(result=result)
+        hit_min = (event.x - left) ** 2 + (event.y - 18) ** 2 <= 81
+        hit_max = (event.x - right) ** 2 + (event.y - 18) ** 2 <= 81
         if hit_min and hit_max:
-            index = 0 if event.y < 18 else 1
+            if abs(left - right) >= 1:
+                index = 0 if abs(event.x - left) < abs(event.x - right) else 1
+            else:
+                index = 0 if event.y < 18 else 1
         elif hit_min:
             index = 0
         elif hit_max:
             index = 1
         else:
             return None
-        self._set_absolute_threshold(index, defaults[index])
+        self._set_absolute_threshold(index, defaults[index], result=result)
         return "break"
 
-    def _start_absolute_drag(self, event):
-        self._absolute_dragging = True
-        left, right = self._absolute_handle_positions()
+    def _start_absolute_drag(self, event, *, result=False):
+        control = self._result_area_control if result else self
+        control._absolute_dragging = True
+        left, right = self._absolute_handle_positions(result=result)
         if abs(left - right) < 1:
-            self._absolute_active_handle = 0 if event.y < 18 else 1
+            control._absolute_active_handle = None
+            control._absolute_drag_start_x = event.x
+            # Do not quantize a coincident handle's value on button press.
+            # The first actual movement decides which endpoint is being moved.
+            return
         else:
-            self._absolute_active_handle = 0 if abs(event.x - left) <= abs(event.x - right) else 1
-        self._drag_absolute_handle(event)
+            control._absolute_active_handle = 0 if abs(event.x - left) <= abs(event.x - right) else 1
+        self._drag_absolute_handle(event, result=result)
 
-    def _end_absolute_drag(self, _event=None):
-        self._absolute_dragging = False
+    def _end_absolute_drag(self, _event=None, *, result=False):
+        control = self._result_area_control if result else self
+        control._absolute_dragging = False
 
-    def _drag_absolute_handle(self, event):
-        width = max(1, self._absolute_canvas.winfo_width() - 24)
+    def _drag_absolute_handle(self, event, *, result=False):
+        control = self._result_area_control if result else self
+        width = max(1, control._absolute_canvas.winfo_width() - 24)
         fraction = max(0.0, min(1.0, (event.x - 12) / width))
-        value = int(math.floor(fraction * self._absolute_slider_cap + 0.5))
-        self._set_absolute_threshold(self._absolute_active_handle, value)
+        value = int(math.floor(fraction * control._absolute_slider_cap + 0.5))
+        if control._absolute_active_handle is None:
+            if event.x < control._absolute_drag_start_x:
+                control._absolute_active_handle = 0
+            elif event.x > control._absolute_drag_start_x:
+                control._absolute_active_handle = 1
+            else:
+                return
+        self._set_absolute_threshold(control._absolute_active_handle, value, result=result)
 
-    def _zoom_absolute_slider(self, event):
+    def _zoom_absolute_slider(self, event, *, result=False):
+        control = self._result_area_control if result else self
         number = getattr(event, "num", None)
         delta = getattr(event, "delta", 0)
         if number == 4 or delta > 0:
-            cap = max(1, int(self._absolute_slider_cap / 1.2))
+            cap = max(1, int(control._absolute_slider_cap / 1.2))
         elif number == 5 or delta < 0:
-            cap = max(self._absolute_slider_cap + 1, math.ceil(self._absolute_slider_cap * 1.2))
+            cap = max(control._absolute_slider_cap + 1, math.ceil(control._absolute_slider_cap * 1.2))
         else:
             return "break"
-        self._absolute_zoomed = True
-        self._absolute_slider_cap = cap
-        self._draw_absolute_slider()
+        control._absolute_zoomed = True
+        control._absolute_slider_cap = cap
+        self._draw_absolute_slider(result=result)
         return "break"
 
     def _update_area_control_ranges(self):
@@ -3023,6 +3107,7 @@ class CrossingReviewApp(ctk.CTk):
             if reference_changed and not self._absolute_zoomed and not self._absolute_dragging:
                 self._absolute_slider_cap = area_cap
             self._sync_absolute_control(force=True)
+            self._update_result_area_control_ranges()
             if self._area_reference_max <= 0:
                 return  # No detected blob provides a meaningful size reference yet.
             cap = max(1.0, float(math.ceil(self._area_reference_max * 1.2)))
@@ -3474,11 +3559,17 @@ class CrossingReviewApp(ctk.CTk):
         self.result_import_status_var.set(self._result_import_status_text())
         self._result_area_updating = True
         try:
+            self._result_area_control._absolute_defaults_pending = True
+            self._result_area_control._absolute_default_values = None
+            self._result_area_control._absolute_zoomed = False
+            self._result_area_control._absolute_dragging = False
+            self._result_area_reference_key = None
+            self._result_area_reference_stats = (0.0, 0.0, 0.0, 0.0)
             self.result_import_area_min_var.set(0)
-            self.result_import_area_max_var.set(self._result_area_default_max())
+            self.result_import_area_max_var.set(1000)
         finally:
             self._result_area_updating = False
-        self._update_result_area_control_ranges()
+        self._sync_absolute_control(result=True)
         self._refresh_result_match()
 
         self._reset_view_state()
@@ -4199,9 +4290,6 @@ class CrossingReviewApp(ctk.CTk):
             area_bounds=self._current_result_area_bounds(),
         )
 
-    def _result_area_default_max(self) -> int:
-        return max(1, int(self.reader.width) * int(self.reader.height)) if self.reader is not None else 100000
-
     def _current_result_area_bounds(self) -> tuple[float, float]:
         lo, hi = int(self.result_import_area_min_var.get()), int(self.result_import_area_max_var.get())
         if not 0 <= lo <= hi:
@@ -4209,14 +4297,53 @@ class CrossingReviewApp(ctk.CTk):
         return float(lo), float(hi)
 
     def _update_result_area_control_ranges(self):
-        limit = max(self._result_area_default_max(), int(self.result_import_area_min_var.get()),
-                    int(self.result_import_area_max_var.get()))
-        for scale in (self.result_import_area_min_scale, self.result_import_area_max_scale):
-            scale.set_value_range(0, limit, clamp_current=False)
+        control = self._result_area_control
+        reference_key = (self._area_reference_key, 0)
+        stats = self._area_reference_stats
+        has_reference = self._area_reference_max > 0
+        if not has_reference and self.reader is not None and self.frame_bgr_cache is not None:
+            reference_key = (self._area_reference_key, int(self.current_frame))
+            _, blobs = self._segment_frame(self.frame_bgr_cache, self.current_frame)
+            has_reference = any(b.area > 0 for b in blobs if not b.manual_outlier)
+            stats = self._compute_iqr_stats(blobs)["area"]
+        if not has_reference and self.analysis_iqr_stats and any(
+            not b.manual_outlier and b.area > 0 for blobs in self.analysis_blobs_by_frame.values() for b in blobs
+        ):
+            reference_key = (self._area_reference_key, "sampled", self.analysis_iqr_stats["area"])
+            stats = self.analysis_iqr_stats["area"]
+            has_reference = True
+        reference_changed = reference_key != self._result_area_reference_key
+        self._result_area_reference_key = reference_key
+        self._result_area_reference_stats = stats
+        if has_reference:
+            q1, median, q3, iqr = self._normalized_area_stat(stats)
+            # Round outward so a constant non-multiple-of-ten reference is
+            # included by its defaults, while ordinary Absolute stays unchanged.
+            lo = max(0, int(math.floor((q1 - 1.5 * iqr) / 10.0)) * 10)
+            hi = max(lo, int(math.ceil((q3 + 1.5 * iqr) / 10.0)) * 10)
+            control._absolute_default_values = (lo, hi)
+            if control._absolute_defaults_pending and not self._applying_config and (
+                int(self.result_import_area_min_var.get()), int(self.result_import_area_max_var.get())
+            ) != (lo, hi):
+                self._result_area_updating = True
+                try:
+                    self.result_import_area_min_var.set(lo)
+                    self.result_import_area_max_var.set(hi)
+                finally:
+                    self._result_area_updating = False
+                self._refresh_result_match()
+            cap = max(1, math.ceil(max(median * 2, hi * 1.2)))
+        else:
+            control._absolute_default_values = None
+            cap = 1000
+        if reference_changed and not control._absolute_zoomed and not control._absolute_dragging:
+            control._absolute_slider_cap = cap
+        self._sync_absolute_control(force=True, result=True)
 
     def _on_result_area_changed(self, index: int):
         if self._applying_config or self._result_area_updating:
             return
+        self._result_area_control._absolute_defaults_pending = False
         variables = (self.result_import_area_min_var, self.result_import_area_max_var)
         value, other = max(0, int(variables[index].get())), max(0, int(variables[1 - index].get()))
         bounded = min(value, other) if index == 0 else max(value, other)
@@ -4224,14 +4351,15 @@ class CrossingReviewApp(ctk.CTk):
         try:
             if bounded != int(variables[index].get()):
                 variables[index].set(bounded)
-            self._update_result_area_control_ranges()
+            self._sync_absolute_control(result=True)
         finally:
             self._result_area_updating = False
         self._on_result_import_changed()
 
     def _reset_result_area_bound(self, index: int):
-        variables = (self.result_import_area_min_var, self.result_import_area_max_var)
-        variables[index].set(0 if index == 0 else max(self._result_area_default_max(), int(variables[0].get())))
+        defaults = self._result_area_control._absolute_default_values
+        if defaults is not None:
+            self._set_absolute_threshold(index, defaults[index], result=True)
         return "break"
 
     def _active_pre_result_path(self) -> str:
@@ -6554,6 +6682,7 @@ class CrossingReviewApp(ctk.CTk):
             sp.delete(0, tk.END)
             sp.insert(0, str(int(initial)))
             sp.pack(side="left")
+            self._register_popup_integer_entry(sp)
             entries[key] = sp
 
         _range_row("Start frame", "start", default_start)
