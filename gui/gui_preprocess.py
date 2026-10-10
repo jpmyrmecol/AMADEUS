@@ -366,9 +366,16 @@ class VideoFrameReader:
             raise RuntimeError(f"Failed to open video: {video_path}")
 
         self._lock = threading.Lock()
+        self._cache_lock = threading.RLock()
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_cap = None
+        self._prefetch_pos = -1
+        self._closed = threading.Event()
         self.cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self.raw_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         self.raw_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        frame_bytes = max(1, self.raw_width * self.raw_height * 3)
+        self.cache_capacity = max(2, min(FRAME_CACHE_SIZE, (96 * 1024 * 1024) // frame_bytes))
         self.reported_frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         self.frame_count = detect_seekable_frame_count(video_path, self.reported_frame_count)
         self.fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
@@ -448,23 +455,70 @@ class VideoFrameReader:
         return self._apply_orientation(frame)
 
     def _cache_put(self, frame_idx: int, frame_bgr: np.ndarray) -> None:
-        self.cache[int(frame_idx)] = frame_bgr
-        self.cache.move_to_end(int(frame_idx))
-        while len(self.cache) > FRAME_CACHE_SIZE:
-            self.cache.popitem(last=False)
+        with self._cache_lock:
+            self.cache[int(frame_idx)] = frame_bgr
+            self.cache.move_to_end(int(frame_idx))
+            while len(self.cache) > self.cache_capacity:
+                self.cache.popitem(last=False)
 
     def read_bgr(self, frame_idx: int) -> np.ndarray:
         frame_idx = max(0, min(max(0, self.frame_count - 1), int(frame_idx)))
-        cached = self.cache.get(frame_idx)
-        if cached is not None:
-            self.cache.move_to_end(frame_idx)
-            return cached.copy()
+        with self._cache_lock:
+            cached = self.cache.get(frame_idx)
+            if cached is not None:
+                self.cache.move_to_end(frame_idx)
+                return cached.copy()
         frame = self._read_uncached(frame_idx)
         self._cache_put(frame_idx, frame)
         return frame.copy()
 
+    def prefetch(self, frame_idx: int) -> None:
+        """Keep a few paused-preview frames ready without blocking the Tk thread."""
+        frame_idx = int(frame_idx)
+        if self._closed.is_set() or frame_idx < 0 or frame_idx >= self.frame_count:
+            return
+        with self._cache_lock:
+            if frame_idx in self.cache:
+                return
+        with self._prefetch_lock:
+            if self._closed.is_set():
+                return
+            with self._cache_lock:
+                if frame_idx in self.cache:
+                    return
+            if self._prefetch_cap is None:
+                cap = cv2.VideoCapture(self.video_path)
+                if not cap.isOpened():
+                    cap.release()
+                    return
+                # Match the main capture's metadata-based rotation, when enabled.
+                if self.rotation_degrees and self._manual_rotation_degrees == 0 and hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
+                    cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
+                self._prefetch_cap = cap
+            cap = self._prefetch_cap
+            gap = frame_idx - self._prefetch_pos
+            if 0 < gap <= 12:
+                for _ in range(gap):
+                    if not cap.grab():
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                        break
+            elif self._prefetch_pos != frame_idx:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                self._prefetch_pos = -1
+                return
+            self._prefetch_pos = frame_idx + 1
+            self._cache_put(frame_idx, self._apply_orientation(frame))
+
     def close(self) -> None:
-        self.cap.release()
+        self._closed.set()
+        with self._prefetch_lock:
+            if self._prefetch_cap is not None:
+                self._prefetch_cap.release()
+                self._prefetch_cap = None
+        with self._lock:
+            self.cap.release()
 
 
 @dataclass
@@ -595,6 +649,8 @@ class PreprocessApp(ctk.CTk):
             seek=lambda target: self.set_frame(target, from_playback=True),
             pause=self.stop_playback,
         )
+        self._prefetch_after_id: str | None = None
+        self._prefetch_cancel = threading.Event()
         self.playback_job: str | None = None
         self.status_clear_job: str | None = None
         self.config_save_job: str | None = None
@@ -1745,6 +1801,7 @@ class PreprocessApp(ctk.CTk):
 
         self._arrow_key_play.stop()
         self.stop_playback(update_button=False)
+        self._cancel_preview_prefetch()
         self._dismiss_seek_edit()
         if self.reader is not None:
             self.reader.close()
@@ -2099,6 +2156,8 @@ class PreprocessApp(ctk.CTk):
         self.frame_slider.set(frame_idx)
         self._update_timeline_labels()
         self.redraw_current_frame()
+        if not self.playback_active and self._arrow_key_play.direction == 0:
+            self._schedule_preview_prefetch(frame_idx)
         return True
 
     def step_frame(self, delta: int) -> None:
@@ -2169,6 +2228,7 @@ class PreprocessApp(ctk.CTk):
         if self.current_frame >= self.out_frame:
             if not self.set_frame(self.in_frame):
                 return
+        self._cancel_preview_prefetch()
         self.playback_active = True
         self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
         self._update_playback_buttons()
@@ -2200,6 +2260,7 @@ class PreprocessApp(ctk.CTk):
         self._schedule_playback_step(delay_ms=max(1, int((next_due - time.monotonic()) * 1000)))
 
     def stop_playback(self, update_button: bool = True) -> None:
+        was_active = self.playback_active
         self.playback_active = False
         self._playback_timing = None
         if self.playback_job is not None:
@@ -2208,8 +2269,49 @@ class PreprocessApp(ctk.CTk):
             except tk.TclError:
                 pass
             self.playback_job = None
+        if was_active and self.reader is not None and self._arrow_key_play.direction == 0:
+            self._schedule_preview_prefetch(self.current_frame)
         if update_button:
             self._update_playback_buttons()
+
+    def _cancel_preview_prefetch(self) -> None:
+        if self._prefetch_after_id is not None:
+            self.after_cancel(self._prefetch_after_id)
+            self._prefetch_after_id = None
+        self._prefetch_cancel.set()
+
+    def _schedule_preview_prefetch(self, center_frame: int) -> None:
+        reader = self.reader
+        if reader is None:
+            return
+        self._cancel_preview_prefetch()
+        cancel = threading.Event()
+        self._prefetch_cancel = cancel
+
+        def start_when_idle():
+            self._prefetch_after_id = None
+            if cancel.is_set() or self.playback_active or self._arrow_key_play.direction or reader is not self.reader:
+                return
+            budget = max(1, reader.cache_capacity - 1)
+            forward = min(4, budget)
+            backward = min(2, max(0, budget - forward))
+            frames = [
+                center_frame + d for d in range(1, forward + 1)
+                if center_frame + d < reader.frame_count
+            ] + [
+                center_frame - d for d in range(1, backward + 1)
+                if center_frame - d >= 0
+            ]
+
+            def worker():
+                for fid in frames:
+                    if cancel.is_set() or reader is not self.reader:
+                        return
+                    reader.prefetch(fid)
+
+            threading.Thread(target=worker, name="cropping-preview-prefetch", daemon=True).start()
+
+        self._prefetch_after_id = self.after(120, start_when_idle)
 
     def _update_playback_buttons(self) -> None:
         if hasattr(self, "play_button"):
@@ -3227,7 +3329,9 @@ class PreprocessApp(ctk.CTk):
             while self.export_thread is not None and self.export_thread.is_alive() and time.time() < deadline:
                 self.update()
                 time.sleep(0.03)
+        self._arrow_key_play.stop()
         self.stop_playback(update_button=False)
+        self._cancel_preview_prefetch()
         self._flush_crop_trimming_config_save()
         if self.status_clear_job is not None:
             try:
