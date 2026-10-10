@@ -352,7 +352,12 @@ class VideoFrameReader:
         if self._closed.is_set():
             raise RuntimeError("Video reader is closed.")
         gap = frame_idx - current_pos
-        if current_pos >= 0 and 0 < gap <= 12:
+        if current_pos == -1 and frame_idx == 0:
+            # A fresh VideoCapture is already positioned at frame zero.
+            # Seeking to zero can force FFmpeg to scan a very long video's
+            # index before the first frame is decoded.
+            pass
+        elif current_pos >= 0 and 0 < gap <= 12:
             # Skipped frames only need a grab, not conversion and GUI rendering.
             # For nearby frames this also avoids repeated random seeks in compressed video.
             for _ in range(gap):
@@ -2626,7 +2631,24 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._preview_request_started_at = None
 
         restart_at_beginning = self.current_frame >= self.frame_count - 1
-        waiting_for_frame = self._has_pending_frame_request()
+        # A displayed frame is already a valid playback anchor. The initial
+        # after_idle request may still be loading the SAME frame; do not hold
+        # the first Start click hostage to that redundant decode, especially
+        # on large compressed videos with expensive initial reads.
+        displayed_frame_ready = (
+            self.frame_cache_rgb is not None
+            and self._last_displayed_frame == self.current_frame
+        )
+        if (displayed_frame_ready and not restart_at_beginning
+                and self.requested_frame == self.current_frame
+                and self._has_pending_frame_request()):
+            self._cancel_pending_frame_request()
+        waiting_for_frame = (
+            not displayed_frame_ready or (
+                self._has_pending_frame_request()
+                and self.requested_frame != self.current_frame
+            )
+        )
         self.playback_active = True
         self._update_play_button()
         if restart_at_beginning or waiting_for_frame:
