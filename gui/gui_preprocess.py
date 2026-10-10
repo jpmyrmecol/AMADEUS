@@ -374,6 +374,7 @@ class VideoFrameReader:
         self.fps_estimated = self.fps <= 0.0
         if self.fps_estimated:
             self.fps = 30.0
+        self._cap_pos = -1
         self.codec = _fourcc_to_string(self.cap.get(cv2.CAP_PROP_FOURCC))
         self.rotation_degrees: int | None = None
         self._manual_rotation_degrees = 0
@@ -430,9 +431,18 @@ class VideoFrameReader:
     def _read_uncached(self, frame_idx: int) -> np.ndarray:
         frame_idx = max(0, min(max(0, self.frame_count - 1), int(frame_idx)))
         with self._lock:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            gap = frame_idx - self._cap_pos
+            if 0 < gap <= 12:
+                for _ in range(gap):
+                    if not self.cap.grab():
+                        raise RuntimeError(f"Failed to skip to frame {frame_idx} in {self.video_path}")
+            elif self._cap_pos != frame_idx:
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ok, frame = self.cap.read()
+            if ok and frame is not None:
+                self._cap_pos = frame_idx + 1
         if not ok or frame is None:
+            self._cap_pos = -1
             raise RuntimeError(f"Failed to read frame {frame_idx} from {self.video_path}")
         return self._apply_orientation(frame)
 
@@ -573,6 +583,8 @@ class PreprocessApp(ctk.CTk):
         self.cursor_position = None
 
         self.playback_active = False
+        self.playback_speed = 1.0
+        self._playback_timing: tuple[float, float, float] | None = None
         self.playback_job: str | None = None
         self.status_clear_job: str | None = None
         self.config_save_job: str | None = None
@@ -938,8 +950,14 @@ class PreprocessApp(ctk.CTk):
         self.first_button.grid(row=0, column=0, padx=(0, 4), pady=(7, 3))
         self.prev_button = ctk.CTkButton(self.timeline_pane, text="<", width=42, command=lambda: self.step_frame(-1))
         self.prev_button.grid(row=0, column=1, padx=4, pady=(7, 3))
-        self.play_button = ctk.CTkButton(self.timeline_pane, text=">", width=54, command=self.toggle_playback)
-        self.play_button.grid(row=0, column=2, padx=4, pady=(7, 3))
+        playback_controls = ctk.CTkFrame(self.timeline_pane, fg_color="transparent", corner_radius=0)
+        playback_controls.grid(row=0, column=2, padx=4, pady=(7, 3))
+        self.play_button = ctk.CTkButton(playback_controls, text=">", width=54, command=self.toggle_playback)
+        self.play_button.pack(side="left")
+        self.playback_speed_button = ctk.CTkButton(
+            playback_controls, text="1×", width=48, command=self.cycle_playback_speed,
+        )
+        self.playback_speed_button.pack(side="left", padx=(4, 0))
         self.next_button = ctk.CTkButton(self.timeline_pane, text=">", width=42, command=lambda: self.step_frame(1))
         self.next_button.grid(row=0, column=3, padx=4, pady=(7, 3))
         self.last_button = ctk.CTkButton(
@@ -1231,6 +1249,8 @@ class PreprocessApp(ctk.CTk):
         for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.canvas.bind(event, self.on_mousewheel)
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press, add="+")
+        self.canvas.bind("<Double-Button-1>", lambda event: self._on_canvas_speed_click(event, 2.0))
+        self.canvas.bind("<Triple-Button-1>", lambda event: self._on_canvas_speed_click(event, 4.0))
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag, add="+")
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release, add="+")
         self.canvas.bind("<Motion>", self._on_canvas_motion, add="+")
@@ -1720,6 +1740,8 @@ class PreprocessApp(ctk.CTk):
         self.video_path_var.set(path)
         self.output_folder_var.set(os.path.dirname(path))
         self.current_frame = 0
+        self.playback_speed = 1.0
+        self._update_playback_buttons()
         self.in_frame = 0
         self.out_frame = reader.frame_count - 1
         self.frame_bgr_cache = None
@@ -2026,19 +2048,23 @@ class PreprocessApp(ctk.CTk):
         self.set_frame(target_frame)
         self.set_status(f"Moved to {boundary_name} frame {target_frame:,}.")
 
-    def set_frame(self, frame_idx: int) -> None:
+    def set_frame(self, frame_idx: int, *, from_playback: bool = False) -> bool:
         if self.reader is None:
-            return
+            return False
+        if self.playback_active and not from_playback:
+            self.stop_playback()
         frame_idx = max(0, min(self._last_frame_index(), int(frame_idx)))
-        self.current_frame = frame_idx
         try:
-            self.frame_bgr_cache = self.reader.read_bgr(frame_idx)
+            frame = self.reader.read_bgr(frame_idx)
         except Exception as exc:
             self.set_status(f"Frame decode failed: {exc}", auto_clear=False)
-            return
+            return False
+        self.current_frame = frame_idx
+        self.frame_bgr_cache = frame
         self.frame_slider.set(frame_idx)
         self._update_timeline_labels()
         self.redraw_current_frame()
+        return True
 
     def step_frame(self, delta: int) -> None:
         if self.reader is None:
@@ -2070,39 +2096,91 @@ class PreprocessApp(ctk.CTk):
             return
         if self.playback_active:
             self.stop_playback()
+        else:
+            self.start_playback()
+
+    def cycle_playback_speed(self) -> None:
+        speeds = (1.0, 2.0, 4.0, 0.5, 0.25)
+        self.set_playback_speed(speeds[(speeds.index(self.playback_speed) + 1) % len(speeds)])
+
+    def set_playback_speed(self, speed: float) -> None:
+        if speed not in (1.0, 2.0, 4.0, 0.5, 0.25):
+            raise ValueError("Playback speed must be 0.25, 0.5, 1, 2, or 4.")
+        if self._playback_timing is not None and self.reader is not None:
+            now = time.monotonic()
+            anchor_frame, anchor_time, previous_speed = self._playback_timing
+            position = anchor_frame + max(0.0, now - anchor_time) * self.reader.fps * previous_speed
+            self._playback_timing = (position, now, speed)
+        self.playback_speed = speed
+        self._update_playback_buttons()
+        if self.playback_active:
+            self._schedule_playback_step(delay_ms=1)
+
+    def _on_canvas_speed_click(self, event, speed: float) -> str:
+        if self.reader is None or self.export_running:
+            return "break"
+        index, mode = self._hit_test_crop(event.x, event.y)
+        if index is not None and mode is not None:
+            return "break"  # Preserve crop selection and drag handles.
+        self.drag_state = None
+        self.set_playback_speed(speed)
+        if not self.playback_active:
+            self.start_playback()
+        return "break"
+
+    def start_playback(self) -> None:
+        if self.reader is None or self.playback_active:
             return
         if self.current_frame >= self.out_frame:
-            self.set_frame(self.in_frame)
+            if not self.set_frame(self.in_frame):
+                return
         self.playback_active = True
-        self.play_button.configure(text="||")
-        self._schedule_playback_step()
+        self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
+        self._update_playback_buttons()
+        self._schedule_playback_step(delay_ms=1)
 
-    def _schedule_playback_step(self) -> None:
+    def _schedule_playback_step(self, *, delay_ms: int = 8) -> None:
         if self.reader is None or not self.playback_active:
             return
-        interval = max(10, int(round(1000.0 / max(1e-9, self.reader.fps))))
-        self.playback_job = self.after(interval, self._playback_step)
+        if self.playback_job is not None:
+            self.after_cancel(self.playback_job)
+        self.playback_job = self.after(max(1, int(delay_ms)), self._playback_step)
 
     def _playback_step(self) -> None:
         self.playback_job = None
-        if self.reader is None or not self.playback_active:
+        if self.reader is None or not self.playback_active or self._playback_timing is None:
             return
+        now = time.monotonic()
+        anchor_frame, anchor_time, speed = self._playback_timing
+        rate = self.reader.fps * speed
+        frame_idx = min(self.out_frame, int(anchor_frame + max(0.0, now - anchor_time) * rate))
+        if frame_idx > self.current_frame:
+            if not self.set_frame(frame_idx, from_playback=True):
+                self.stop_playback()
+                return
         if self.current_frame >= self.out_frame:
             self.stop_playback()
             return
-        self.set_frame(self.current_frame + 1)
-        self._schedule_playback_step()
+        next_due = anchor_time + (self.current_frame + 1 - anchor_frame) / rate
+        self._schedule_playback_step(delay_ms=max(1, int((next_due - time.monotonic()) * 1000)))
 
     def stop_playback(self, update_button: bool = True) -> None:
         self.playback_active = False
+        self._playback_timing = None
         if self.playback_job is not None:
             try:
                 self.after_cancel(self.playback_job)
             except tk.TclError:
                 pass
             self.playback_job = None
-        if update_button and hasattr(self, "play_button"):
-            self.play_button.configure(text=">")
+        if update_button:
+            self._update_playback_buttons()
+
+    def _update_playback_buttons(self) -> None:
+        if hasattr(self, "play_button"):
+            self.play_button.configure(text="||" if self.playback_active else ">")
+        if hasattr(self, "playback_speed_button"):
+            self.playback_speed_button.configure(text=f"{self.playback_speed:g}×")
 
     def _update_timeline_labels(self) -> None:
         self._sync_trim_frame_inputs()
