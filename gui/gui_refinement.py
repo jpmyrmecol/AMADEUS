@@ -2196,10 +2196,15 @@ class UmaDirectionRefinementApp(ctk.CTk):
                 pass
 
             generation, reader, frame_idx, reset_view = item
+            # Ignore stale requests immediately: repeated Stop/Play cycles
+            # invalidate queued decodes. Never spend codec time on one that
+            # the GUI can no longer display.
+            if generation != self._decode_gen or reader is not self.reader:
+                continue
             # Playback may have advanced while this request waited in the queue.
             # Decode the newest source-video frame rather than an obsolete frame.
             timing = self._playback_timing
-            if timing is not None and generation == self._decode_gen and reader is self.reader:
+            if timing is not None:
                 frame_idx = max(frame_idx, self._playback_frame_at(time.monotonic(), reader, timing))
             frame = None
             error: Exception | None = None
@@ -2207,6 +2212,11 @@ class UmaDirectionRefinementApp(ctk.CTk):
                 frame = reader.read(frame_idx)
             except Exception as exc:
                 error = exc
+            # A slow in-flight decode cannot be interrupted, but its decoded
+            # pixels are already cached by the reader for a possible restart.
+            # Do not enqueue an obsolete completion into the UI.
+            if generation != self._decode_gen or reader is not self.reader:
+                continue
             self._frame_queue.put(
                 (generation, reader, frame_idx, reset_view, frame, error)
             )
