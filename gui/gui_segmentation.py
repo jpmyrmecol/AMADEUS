@@ -280,7 +280,13 @@ class VideoFrameReader:
     def _decode_bgr(
         self, cap: cv2.VideoCapture, frame_idx: int, current_pos: int
     ) -> "tuple[np.ndarray, int, int]":
-        if current_pos != frame_idx:
+        gap = frame_idx - current_pos
+        if 0 < gap <= 12:
+            for _ in range(gap):
+                if not cap.grab():
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+                    break
+        elif current_pos != frame_idx:
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
         ok, frame = cap.read()
         if not ok or not self._is_valid_frame(frame):
@@ -1430,6 +1436,8 @@ class CrossingReviewApp(ctk.CTk):
         self.status_clear_job: Optional[str] = None
         self.playback_job: Optional[str] = None
         self.playback_active = False
+        self.playback_speed = 1.0
+        self._playback_timing: tuple[float, float, float] | None = None
         self.config_path: Optional[str] = None
         self.session_path: str = ""
         self.background_rebuild_job: Optional[str] = None
@@ -1542,6 +1550,10 @@ class CrossingReviewApp(ctk.CTk):
         ctk.CTkButton(nav, text="<", width=40, command=lambda: self.step_frame(-1)).pack(side="left", padx=4)
         self.play_button = ctk.CTkButton(nav, text="Play", width=70, command=self.toggle_playback)
         self.play_button.pack(side="left")
+        self.playback_speed_button = ctk.CTkButton(
+            nav, text="1×", width=48, command=self.cycle_playback_speed,
+        )
+        self.playback_speed_button.pack(side="left", padx=(4, 0))
         ctk.CTkButton(nav, text=">", width=40, command=lambda: self.step_frame(1)).pack(side="left", padx=4)
         ctk.CTkButton(nav, text=">|", width=40, command=lambda: self.set_frame(self.frame_count - 1)).pack(side="left", padx=(0, 12))
         ctk.CTkLabel(nav, text="frame").pack(side="left")
@@ -3353,6 +3365,8 @@ class CrossingReviewApp(ctk.CTk):
         self.canvas.bind("<Button-4>", self.on_mousewheel)
         self.canvas.bind("<Button-5>", self.on_mousewheel)
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
+        self.canvas.bind("<Double-Button-1>", lambda event: self.on_canvas_speed_click(event, 2.0))
+        self.canvas.bind("<Triple-Button-1>", lambda event: self.on_canvas_speed_click(event, 4.0))
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
         self.canvas.bind("<Motion>", self.on_canvas_motion)
@@ -3608,6 +3622,8 @@ class CrossingReviewApp(ctk.CTk):
                 pass
             self.background_rebuild_job = None
         self.stop_playback(update_button=False)
+        self.playback_speed = 1.0
+        self._update_play_button()
         if self.reader is not None:
             self.reader.close()
         self.reader = reader
@@ -3778,9 +3794,11 @@ class CrossingReviewApp(ctk.CTk):
             return
         self._draw_canvas(preserve_view=False)
 
-    def set_frame(self, frame_idx: int, reset_view: bool = False):
+    def set_frame(self, frame_idx: int, reset_view: bool = False, *, from_playback: bool = False):
         if self.reader is None or self.frame_count <= 0:
-            return
+            return False
+        if self.playback_active and not from_playback:
+            self.stop_playback()
         if self._roi_drag_mode is not None:
             self.on_canvas_release()
         if self.reader.frame_count != self.frame_count:
@@ -3794,7 +3812,7 @@ class CrossingReviewApp(ctk.CTk):
             self.frame_var.set(self.current_frame)
             self.frame_scale.set(self.current_frame)
             self.set_status(f"Frame read failed: {exc}")
-            return
+            return False
         if self.reader.frame_count != self.frame_count:
             self.frame_count = self.reader.frame_count
             self.frame_spin.configure(from_=0, to=max(0, self.frame_count - 1))
@@ -3806,7 +3824,9 @@ class CrossingReviewApp(ctk.CTk):
         self.frame_bgr_cache = frame_bgr
         self._draw_canvas(preserve_view=not reset_view)
         self._update_analysis_dependent_buttons()
-        self._queue_prefetch(frame_idx)
+        if not self.playback_active:
+            self._queue_prefetch(frame_idx)
+        return True
 
     def _queue_prefetch(self, center_frame: int):
         if self.reader is None:
@@ -5899,17 +5919,63 @@ class CrossingReviewApp(ctk.CTk):
         self.toggle_playback()
         return "break"
 
+    def cycle_playback_speed(self):
+        speeds = (1.0, 2.0, 4.0, 0.5, 0.25)
+        self.set_playback_speed(speeds[(speeds.index(self.playback_speed) + 1) % len(speeds)])
+
+    def _playback_fps(self) -> float:
+        return self.reader.fps if self.reader is not None and self.reader.fps > 0 else 30.0
+
+    def set_playback_speed(self, speed: float):
+        if speed not in (1.0, 2.0, 4.0, 0.5, 0.25):
+            raise ValueError("Playback speed must be 0.25, 0.5, 1, 2, or 4.")
+        if self._playback_timing is not None:
+            now = time.monotonic()
+            anchor_frame, anchor_time, previous_speed = self._playback_timing
+            position = anchor_frame + max(0.0, now - anchor_time) * self._playback_fps() * previous_speed
+            self._playback_timing = (position, now, speed)
+        self.playback_speed = speed
+        self._update_play_button()
+        if self.playback_active:
+            self._schedule_playback(delay_ms=1)
+
+    def on_canvas_speed_click(self, event, speed: float):
+        if self.reader is None:
+            return "break"
+        if self._roi_drag_mode is not None:
+            return "break"
+        points = self._active_roi_geometry()
+        if points:
+            ix, iy = self._canvas_to_image(float(event.x), float(event.y))
+            if any(math.hypot(ix - x, iy - y) * self.scale <= ROI_HANDLE_GRAB_CANVAS_PX
+                   for x, y in points):
+                return "break"
+            if cv2.pointPolygonTest(np.asarray(points, dtype=np.int32), (ix, iy), False) >= 0:
+                return "break"
+        self.last_drag_canvas = None
+        self.set_playback_speed(speed)
+        if not self.playback_active:
+            self.start_playback()
+        return "break"
+
     def start_playback(self):
-        if self.reader is None or self.frame_count <= 0:
+        if self.reader is None or self.frame_count <= 0 or self.playback_active:
             return
         if self.current_frame >= self.frame_count - 1:
-            self.set_frame(0)
+            if not self.set_frame(0):
+                return
+        if self.prefetch_after_id is not None:
+            self.after_cancel(self.prefetch_after_id)
+            self.prefetch_after_id = None
+        self._prefetch_cancel.set()
         self.playback_active = True
+        self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
         self._update_play_button()
-        self._schedule_playback()
+        self._schedule_playback(delay_ms=1)
 
     def stop_playback(self, update_button: bool = True):
         self.playback_active = False
+        self._playback_timing = None
         if self.playback_job is not None:
             self.after_cancel(self.playback_job)
             self.playback_job = None
@@ -5918,31 +5984,32 @@ class CrossingReviewApp(ctk.CTk):
 
     def _update_play_button(self):
         self.play_button.configure(text="Stop" if self.playback_active else "Play")
+        self.playback_speed_button.configure(text=f"{self.playback_speed:g}×")
 
-    def _playback_delay_ms(self) -> int:
-        if self.reader is None or self.reader.fps <= 0:
-            return 33
-        return max(1, int(round(1000.0 / self.reader.fps)))
-
-    def _schedule_playback(self):
+    def _schedule_playback(self, *, delay_ms: int = 8):
         if not self.playback_active:
             return
         if self.playback_job is not None:
             self.after_cancel(self.playback_job)
-        delay = self._playback_delay_ms()
-        self.playback_job = self.after(delay, self._playback_tick)
+        self.playback_job = self.after(max(1, int(delay_ms)), self._playback_tick)
 
     def _playback_tick(self):
         self.playback_job = None
-        if not self.playback_active or self.reader is None:
+        if not self.playback_active or self.reader is None or self._playback_timing is None:
             return
+        now = time.monotonic()
+        anchor_frame, anchor_time, speed = self._playback_timing
+        rate = self._playback_fps() * speed
+        target = min(self.frame_count - 1, int(anchor_frame + max(0.0, now - anchor_time) * rate))
+        if target > self.current_frame:
+            if not self.set_frame(target, from_playback=True):
+                self.stop_playback()
+                return
         if self.current_frame >= self.frame_count - 1:
             self.stop_playback()
             return
-        self.set_frame(self.current_frame + 1)
-        if self.playback_active:
-            self._schedule_playback()
-
+        next_due = anchor_time + (self.current_frame + 1 - anchor_frame) / rate
+        self._schedule_playback(delay_ms=max(1, int((next_due - time.monotonic()) * 1000)))
 
     def _open_progress_popup(self, title: str):
         self._close_progress_popup()
