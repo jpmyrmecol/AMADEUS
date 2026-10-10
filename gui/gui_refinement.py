@@ -645,6 +645,11 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.playback_active = False
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
+        # The playback clock starts only when the initial requested frame is
+        # actually rendered. This is essential for rewinding from the last frame
+        # or resuming while an older decode is still in flight.
+        self._playback_start_pending = False
+        self._playback_start_frame = 0
         self._preview_pacer = AdaptivePreviewPacer()
         self._preview_request_started_at: float | None = None
         self.playback_job: Optional[str] = None
@@ -918,6 +923,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.num_ids = 0
         self.playback_speed = 1.0
         self._playback_timing = None
+        self._playback_start_pending = False
         self._update_play_button()
         self.current_frame = 0
         self.requested_frame = 0
@@ -2012,6 +2018,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.frame_render_job = None
         self._stop_key_play()
         self.stop_playback(update_button=False)
+        self._playback_start_pending = False
 
         self.reader = reader
         self._preview_pacer.reset()
@@ -2212,14 +2219,20 @@ class UmaDirectionRefinementApp(ctk.CTk):
         reset_view: bool,
         frame: np.ndarray,
     ) -> None:
-        if (
-            generation != self._decode_gen
-            or reader is not self.reader
-            or (
-                frame_idx != self.requested_frame
-                and (not self.playback_active or frame_idx < self.requested_frame)
-            )
+        if generation != self._decode_gen or reader is not self.reader:
+            return
+        if frame_idx != self.requested_frame and (
+            not self.playback_active or frame_idx < self.requested_frame
         ):
+            # The worker finished a decode that has since been superseded by
+            # navigation. It is no longer in flight; previously this early
+            # return left the pending flag set indefinitely and blocked Play.
+            if self._pending_decode_gen == generation:
+                self._pending_decode_gen = None
+            if self.playback_active:
+                self._schedule_playback(delay_ms=1)
+            elif self.frame_render_job is None and self.requested_frame != self.current_frame:
+                self.request_frame(self.requested_frame, reset_view=False, immediate=True)
             return
         self._pending_decode_gen = None
         self.current_frame = frame_idx
@@ -2230,6 +2243,15 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._draw_canvas(frame, preserve_view=not reset_view)
         self.update_info_panel()
         self._last_displayed_frame = frame_idx
+        if self.playback_active and self._playback_start_pending:
+            # A paused/restarted run starts its wall clock at the first
+            # successfully displayed frame, not at the button-click time.
+            self._playback_start_pending = False
+            self._playback_timing = (
+                float(frame_idx), time.monotonic(), self.playback_speed
+            )
+            self._preview_pacer.resume()
+            self._schedule_playback(delay_ms=1)
         if self.playback_active and self._preview_request_started_at is not None:
             self._preview_pacer.observe_frame(time.monotonic() - self._preview_request_started_at)
             self._preview_request_started_at = None
@@ -2586,25 +2608,40 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if self.reader is None or self.frame_count <= 1 or self.playback_active:
             return
         self._stop_key_play()
-        # Preserve an in-flight initial-frame decode instead of cancelling it
-        # and leaving the preview without an accepted displayed frame.
-        if self.current_frame >= self.frame_count - 1:
-            self.request_frame(0, reset_view=False, immediate=True)
         if self.prefetch_after_id is not None:
             self.after_cancel(self.prefetch_after_id)
             self.prefetch_after_id = None
         self.reader.cancel_prefetch()
         self._preview_pacer.resume()
         self._preview_request_started_at = None
-        anchor_frame = self.requested_frame if self._has_pending_frame_request() else self.current_frame
-        self._playback_timing = (float(anchor_frame), time.monotonic(), self.playback_speed)
+
+        restart_at_beginning = self.current_frame >= self.frame_count - 1
+        waiting_for_frame = self._has_pending_frame_request()
         self.playback_active = True
         self._update_play_button()
+        if restart_at_beginning or waiting_for_frame:
+            # Never advance playback while the first (or rewound) frame is
+            # still decoding. The completion callback starts the timing clock.
+            self._playback_start_pending = True
+            self._playback_start_frame = (
+                0 if restart_at_beginning else self.requested_frame
+            )
+            self._playback_timing = None
+            if restart_at_beginning:
+                self.request_frame(0, reset_view=False, immediate=True)
+            self._schedule_playback(delay_ms=8)
+            return
+
+        self._playback_start_pending = False
+        self._playback_timing = (
+            float(self.current_frame), time.monotonic(), self.playback_speed
+        )
         self._schedule_playback(delay_ms=1)
 
     def stop_playback(self, update_button: bool = True):
         was_active = self.playback_active
         self.playback_active = False
+        self._playback_start_pending = False
         self._playback_timing = None
         self._preview_request_started_at = None
         if self.playback_job is not None:
@@ -2636,7 +2673,19 @@ class UmaDirectionRefinementApp(ctk.CTk):
             return
         reader = self.reader
         timing = self._playback_timing
-        if reader is None or timing is None:
+        if reader is None:
+            self.stop_playback()
+            return
+        if self._playback_start_pending:
+            # Recover from a superseded/cancelled bootstrap request instead
+            # of silently waiting on a stale generation forever.
+            if not self._has_pending_frame_request():
+                self.request_frame(
+                    self._playback_start_frame, reset_view=False, immediate=True
+                )
+            self._schedule_playback(delay_ms=15)
+            return
+        if timing is None:
             self.stop_playback()
             return
         if self.current_frame >= self.frame_count - 1:
