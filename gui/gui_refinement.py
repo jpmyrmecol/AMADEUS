@@ -2325,7 +2325,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if self._companion_save_active:
             messagebox.showinfo(
                 "Saving companion CSVs",
-                "The rear/front and center CSVs are still being saved. Please close the window after saving finishes.",
+                "Companion CSVs are still being saved. Please close the window after saving finishes.",
             )
             return
         if self.edited_keys and self.df is not None:
@@ -3222,9 +3222,17 @@ class UmaDirectionRefinementApp(ctk.CTk):
             raise ValueError("OBB source data is present for a non-AMADEUS refinement input.")
         rear_front_path, center_path = self._companion_csv_paths(path, amadeus_result=amadeus_result)
         sidecar_paths = ([rear_front_path] if rear_front_path is not None else []) + [center_path]
+        protected_inputs = set(self.refinement_source_paths)
+        # Protect the automatically converted siblings of loaded source files,
+        # even when only the rear/front path was recorded as an input.
+        for source_path in self.refinement_source_paths:
+            for companion in (_convert.rear_front_csv_path(source_path),
+                              _convert.center_csv_path(source_path)):
+                if companion.is_file():
+                    protected_inputs.add(self._normalized_path(companion))
         if (len({output_path, *(self._normalized_path(p) for p in sidecar_paths)})
                 != 1 + len(sidecar_paths)
-                or any(self._normalized_path(p) in self.refinement_source_paths for p in sidecar_paths)):
+                or any(self._normalized_path(p) in protected_inputs for p in sidecar_paths)):
             messagebox.showwarning(
                 "Choose another file",
                 "A companion CSV would overwrite an input file or the main output. Choose a different output path.",
@@ -3265,7 +3273,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
         thread = threading.Thread(
             target=self._write_refinement_companions,
-            args=(companion_source, tuple(sidecar_paths), amadeus_result),
+            args=(Path(path), companion_source, tuple(sidecar_paths), amadeus_result),
             name="refinement-companion-csv-save",
             daemon=True,
         )
@@ -3279,6 +3287,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
     def _write_refinement_companions(
         self,
+        main_path: Path,
         source: pd.DataFrame,
         paths: tuple[Path, ...],
         amadeus_result: bool,
@@ -3312,7 +3321,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
                     temporary.unlink(missing_ok=True)
                 except OSError:
                     pass
-            self._companion_save_messages.put((paths, error))
+            self._companion_save_messages.put(((main_path, *paths), error))
 
     def open_export_video_dialog(self):
         if self.reader is None or self.df is None:
