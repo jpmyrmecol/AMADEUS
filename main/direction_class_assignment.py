@@ -1116,11 +1116,12 @@ def rescue_directions_from_result(
     refine_deleted_keys: Iterable[Tuple[int, int]] = (),
     *, image_shape: Tuple[int, int],
 ) -> Dict[str, object]:
-    """Re-evaluate statistical and direction exclusions using real source masks.
+    """Rescue direction or Stage 1 exclusions using verified real source masks.
 
     Imported IDs are audit information only. Trajectories, source contours,
-    Manual/synthetic exclusions, mixed contours and explicit refinement
-    deletions remain excluded. Generated erase masks never become donors.
+    Segmentation outliers, manual/synthetic exclusions, mixed contours and
+    explicit refinement deletions remain excluded. Generated erase masks never
+    become donors.
     """
     direction_reasons = {
         "disp_too_small", "motion_ambiguous", "short_run", "traj_unmatched",
@@ -1131,14 +1132,13 @@ def rescue_directions_from_result(
         "bbox_area_outlier", "width_outlier", "height_outlier", "obb_major_axis_outlier",
         "segmentation_source_restored",
     }
-    soft_segmentation = {"statistical", "result_area", "result_overlap"}
     deleted = set(refine_deleted_keys)
     stats = Counter(trajectory_accepted_blobs=0, result_rescue_candidates=0,
                     result_rescued_blobs=0, result_rescue_failed_blobs=0,
                     result_rescue_ineligible_blobs=0)
     fit_mode = cfg.get("OBB_FIT_MODE", "min_area")
     for fid, blobs in blob_records.items():
-        if all(not b.erase_final and b.class_id is not None and not b.result_mask_only
+        if all(not b.erase_final and not b.pickle_outlier and b.class_id is not None and not b.result_mask_only
                and b.segmentation_exclusion not in {"manual", "synthetic", "result_multiple"}
                and b.segmentation_obb_count <= 1 and (fid, b.blob_index) not in deleted
                and all((fid, index) not in deleted for index in b.source_fragment_indices) for b in blobs):
@@ -1188,7 +1188,7 @@ def rescue_directions_from_result(
                 blob.erase_final = True
             if blob.class_id is not None and not blob.direction_source:
                 blob.direction_source = "trajectory"
-            if not blob.erase_final and blob.class_id is not None:
+            if not blob.erase_final and not blob.pickle_outlier and blob.class_id is not None:
                 stats["trajectory_accepted_blobs"] += 1
                 continue
 
@@ -1211,9 +1211,11 @@ def rescue_directions_from_result(
                 stats["result_rescue_ineligible_blobs"] += 1
                 reject("segmentation_" + ("result_multiple" if blob.segmentation_obb_count > 1 else blob.segmentation_exclusion))
                 continue
-            if blob.pickle_outlier and blob.segmentation_exclusion not in soft_segmentation:
+            if blob.pickle_outlier:
+                blob.erase_final = True
+                append_unique_reason(blob.erase_reasons_final, "pickle_outlier")
                 stats["result_rescue_ineligible_blobs"] += 1
-                reject("segmentation_reason_unknown")
+                reject("segmentation_outlier")
                 continue
             reasons = set(blob.erase_reasons_final)
             if not reasons and blob.class_id is None:
