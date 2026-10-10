@@ -1451,6 +1451,7 @@ class CrossingReviewApp(ctk.CTk):
             speed=lambda: self.playback_speed,
             seek=lambda target: self.set_frame(target, from_playback=True),
             pause=self.stop_playback,
+            pacer=lambda: self._preview_pacer,
         )
         self.config_path: Optional[str] = None
         self.session_path: str = ""
