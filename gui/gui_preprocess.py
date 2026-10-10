@@ -650,6 +650,7 @@ class PreprocessApp(ctk.CTk):
             speed=lambda: self.playback_speed,
             seek=lambda target: self.set_frame(target, from_playback=True),
             pause=self.stop_playback,
+            pacer=lambda: self._preview_pacer,
         )
         self._prefetch_after_id: str | None = None
         self._prefetch_cancel = threading.Event()
