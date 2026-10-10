@@ -308,9 +308,6 @@ class VideoFrameReader:
             raise RuntimeError(f"Failed to open video: {video_path}")
         self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.fps = float(self.cap.get(cv2.CAP_PROP_FPS))
-        frame_bytes = max(1, int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                          * int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) * 3)
-        self.cache_capacity = max(2, min(FRAME_CACHE_SIZE, (192 * 1024 * 1024) // frame_bytes))
         if self.frame_count <= 0 or not np.isfinite(self.fps) or self.fps <= 0:
             self.cap.release()
             raise RuntimeError(f"Video frame count or FPS metadata is invalid: {video_path}")
@@ -352,16 +349,7 @@ class VideoFrameReader:
         if self._closed.is_set():
             raise RuntimeError("Video reader is closed.")
         gap = frame_idx - current_pos
-        if current_pos == -1 and 0 <= frame_idx <= 12:
-            # A newly opened VideoCapture is positioned at frame zero.
-            # Read the nearby initial frames sequentially: random seeking
-            # even to frame 1 can make long FFmpeg videos very slow to start.
-            for _ in range(frame_idx):
-                if not cap.grab():
-                    raise RuntimeError(
-                        f"Failed to skip to frame {frame_idx} in {self.video_path}"
-                    )
-        elif current_pos >= 0 and 0 < gap <= 12:
+        if 0 < gap <= 12:
             # Skipped frames only need a grab, not conversion and GUI rendering.
             # For nearby frames this also avoids repeated random seeks in compressed video.
             for _ in range(gap):
@@ -375,7 +363,7 @@ class VideoFrameReader:
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), frame_idx + 1
 
     def _trim_cache_locked(self) -> None:
-        while len(self.cache) > self.cache_capacity:
+        while len(self.cache) > FRAME_CACHE_SIZE:
             self.cache.popitem(last=False)
 
     def _store_cached(self, frame_idx: int, frame: np.ndarray) -> None:
