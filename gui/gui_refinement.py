@@ -51,6 +51,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_refinement
 ensure_import_paths(PROJECT_ROOT, MAIN_DIR)
 from gui.color import WHITE_RGB, make_id_palette
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
+from gui.preview_playback_timing import AdaptivePreviewPacer
 from main.video_compat import SUPPORTED_VIDEO_SUFFIXES, VIDEO_DROP_SUFFIXES, VIDEO_FILETYPES
 
 from assign_types import (
@@ -637,6 +638,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.playback_active = False
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
+        self._preview_pacer = AdaptivePreviewPacer()
+        self._preview_request_started_at: float | None = None
         self.playback_job: Optional[str] = None
         self.play_button: Optional[ctk.CTkButton] = None
         self.speed_button: Optional[ctk.CTkButton] = None
@@ -1996,6 +1999,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.stop_playback(update_button=False)
 
         self.reader = reader
+        self._preview_pacer.reset()
+        self._preview_request_started_at = None
         self.frame_cache_rgb = None
         self._last_displayed_frame = -1
         try:
@@ -2205,6 +2210,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._draw_canvas(frame, preserve_view=not reset_view)
         self.update_info_panel()
         self._last_displayed_frame = frame_idx
+        if self.playback_active and self._preview_request_started_at is not None:
+            self._preview_pacer.observe_frame(time.monotonic() - self._preview_request_started_at)
+            self._preview_request_started_at = None
         if not self.playback_active and self._arrow_key_play.direction == 0:
             self._queue_prefetch(frame_idx)
 
@@ -2532,6 +2540,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.after_cancel(self.prefetch_after_id)
             self.prefetch_after_id = None
         self.reader.cancel_prefetch()
+        self._preview_pacer.resume()
+        self._preview_request_started_at = None
         self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
         self.playback_active = True
         self._update_play_button()
@@ -2541,6 +2551,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         was_active = self.playback_active
         self.playback_active = False
         self._playback_timing = None
+        self._preview_request_started_at = None
         if self.playback_job is not None:
             self.after_cancel(self.playback_job)
             self.playback_job = None
@@ -2584,12 +2595,22 @@ class UmaDirectionRefinementApp(ctk.CTk):
             # newest wall-clock target when it actually begins decoding.
             self._schedule_playback(delay_ms=8)
         elif target > self.current_frame:
+            pace_wait = self._preview_pacer.delay_ms(now, reader.fps * self.playback_speed)
+            if pace_wait > 0:
+                self._schedule_playback(delay_ms=pace_wait)
+                return
+            started = time.monotonic()
+            self._preview_pacer.begin_frame(started)
+            self._preview_request_started_at = started
             self.request_frame(target, reset_view=False, immediate=True)
             self._schedule_playback(delay_ms=8)
         else:
             anchor_frame, anchor_time, speed = timing
             next_due = anchor_time + (self.current_frame + 1 - anchor_frame) / (reader.fps * speed)
-            self._schedule_playback(delay_ms=max(1, int((next_due - now) * 1000)))
+            timeline_wait = max(1, math.ceil((next_due - now) * 1000))
+            self._schedule_playback(
+                delay_ms=max(timeline_wait, self._preview_pacer.delay_ms(now, reader.fps * speed))
+            )
 
     def step_id(self, delta: int):
         if self.df is None:
