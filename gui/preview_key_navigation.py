@@ -7,6 +7,8 @@ import math
 import time
 from typing import Callable
 
+from gui.preview_playback_timing import AdaptivePreviewPacer
+
 
 class ArrowKeyHoldPlayback:
     """Single-frame tap followed by source-FPS-paced, frame-skipping key hold.
@@ -26,6 +28,8 @@ class ArrowKeyHoldPlayback:
         seek: Callable[[int], bool | None],
         busy: Callable[[], bool] = lambda: False,
         pause: Callable[[], None] = lambda: None,
+        pacer: Callable[[], AdaptivePreviewPacer] | None = None,
+        async_seek: bool = False,
     ):
         self.owner = owner
         self.current_frame = current_frame
@@ -35,6 +39,9 @@ class ArrowKeyHoldPlayback:
         self.seek = seek
         self.busy = busy
         self.pause = pause
+        self.pacer = pacer
+        self.async_seek = async_seek
+        self._async_started_at: float | None = None
         self.direction = 0
         self.repeating = False
         self._timer = None
@@ -57,6 +64,7 @@ class ArrowKeyHoldPlayback:
         self._cancel("_release_timer")
         self.direction = 0
         self.repeating = False
+        self._async_started_at = None
         self._progress = 0.0
 
     def press(self, direction: int) -> None:
@@ -94,6 +102,8 @@ class ArrowKeyHoldPlayback:
             return
         self.repeating = True
         self._progress = 0.0
+        if self.pacer is not None:
+            self.pacer().resume()
         self._last_tick = time.monotonic()
         self._tick()
 
@@ -111,22 +121,40 @@ class ArrowKeyHoldPlayback:
             self.stop()
             return
         target = min(upper, max(lower, self._start_frame + self.direction * int(self._progress)))
-        if not self.busy() and target != self.current_frame():
-            if self.seek(target) is False:
+        pending = self.busy()
+        if not pending and target != self.current_frame():
+            pacing = self.pacer() if self.pacer is not None else None
+            pause_ms = pacing.delay_ms(now, rate) if pacing is not None else 0
+            if pause_ms:
+                self._timer = self.owner.after(pause_ms, self._tick)
+                return
+            started = time.monotonic()
+            if pacing is not None:
+                pacing.begin_frame(started)
+            if self.async_seek:
+                self._async_started_at = started
+            result = self.seek(target)
+            if not self.async_seek and pacing is not None:
+                pacing.observe_frame(time.monotonic() - started)
+            if result is False:
                 self.stop()
                 return
 
-        if target in (lower, upper) and (
-            (self.direction < 0 and target == lower)
-            or (self.direction > 0 and target == upper)
-        ):
-            return  # Remain held, but do not schedule more work at the boundary.
+        if target in (lower, upper) and target == self.current_frame():
+            return  # Stay held at the video boundary without polling.
 
         if self.busy():
             delay_ms = 8
         else:
-            # Time to the next source-frame boundary (not a fixed per-frame
-            # delay), so expensive rendering cannot accumulate clock drift.
             remaining = (math.floor(self._progress) + 1 - self._progress) / rate
             delay_ms = max(1, int(remaining * 1000))
+            if self.pacer is not None:
+                delay_ms = max(delay_ms, self.pacer().delay_ms(time.monotonic(), rate))
         self._timer = self.owner.after(delay_ms, self._tick)
+
+    def frame_rendered(self) -> None:
+        """Complete a frame-time observation for an asynchronous video reader."""
+        started = self._async_started_at
+        self._async_started_at = None
+        if started is not None and self.pacer is not None:
+            self.pacer().observe_frame(time.monotonic() - started)
