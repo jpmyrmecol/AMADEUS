@@ -441,7 +441,7 @@ class VideoFrameReader:
         frame_idx = max(0, min(max(0, self.frame_count - 1), int(frame_idx)))
         with self._lock:
             gap = frame_idx - self._cap_pos
-            if 0 < gap <= 12:
+            if self._cap_pos >= 0 and 0 < gap <= 12:
                 for _ in range(gap):
                     if not self.cap.grab():
                         raise RuntimeError(f"Failed to skip to frame {frame_idx} in {self.video_path}")
@@ -498,7 +498,7 @@ class VideoFrameReader:
                 self._prefetch_cap = cap
             cap = self._prefetch_cap
             gap = frame_idx - self._prefetch_pos
-            if 0 < gap <= 12:
+            if self._prefetch_pos >= 0 and 0 < gap <= 12:
                 for _ in range(gap):
                     if not cap.grab():
                         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
