@@ -45,6 +45,7 @@ from main.video_encoders import (
     video_stream_bitrate,
 )
 from main.video_frame_count import detect_seekable_frame_count
+from gui.preview_key_navigation import ArrowKeyHoldPlayback
 
 
 ctk.set_appearance_mode("dark")
@@ -585,6 +586,15 @@ class PreprocessApp(ctk.CTk):
         self.playback_active = False
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
+        self._arrow_key_play = ArrowKeyHoldPlayback(
+            self,
+            current_frame=lambda: self.current_frame,
+            frame_bounds=lambda: (0, self._last_frame_index()) if self.reader is not None else (0, -1),
+            fps=lambda: self.reader.fps if self.reader is not None else 30.0,
+            speed=lambda: self.playback_speed,
+            seek=lambda target: self.set_frame(target, from_playback=True),
+            pause=self.stop_playback,
+        )
         self.playback_job: str | None = None
         self.status_clear_job: str | None = None
         self.config_save_job: str | None = None
@@ -1262,8 +1272,10 @@ class PreprocessApp(ctk.CTk):
         self.bind_class(self._seek_click_bindtag, "<ButtonPress-1>", self._on_seek_click_away)
         self._install_seek_click_binding(self)
         self.bind_all("<Map>", lambda event: self._install_seek_click_binding(event.widget), add="+")
-        self.bind_all("<Left>", self._on_frame_navigation_key, add="+")
-        self.bind_all("<Right>", self._on_frame_navigation_key, add="+")
+        for key in ("Left", "Right"):
+            self.bind_all(f"<KeyPress-{key}>", self._on_frame_navigation_key, add="+")
+            self.bind_all(f"<KeyRelease-{key}>", self._on_frame_navigation_key_release, add="+")
+        self.bind("<FocusOut>", self._on_arrow_focus_out, add="+")
 
     def _last_frame_index(self) -> int:
         if self.reader is None:
@@ -1731,6 +1743,7 @@ class PreprocessApp(ctk.CTk):
             messagebox.showerror("Error", str(exc))
             return
 
+        self._arrow_key_play.stop()
         self.stop_playback(update_button=False)
         self._dismiss_seek_edit()
         if self.reader is not None:
@@ -2023,8 +2036,30 @@ class PreprocessApp(ctk.CTk):
         delta = {"Left": -1, "Right": 1}.get(str(getattr(event, "keysym", "")))
         if delta is None:
             return None
-        self.step_frame(delta)
+        self._arrow_key_play.press(delta)
         return "break"
+
+    def _on_frame_navigation_key_release(self, event) -> str | None:
+        if self.reader is None:
+            return None
+        widget = event.widget
+        try:
+            widget_class = widget.winfo_class()
+        except (AttributeError, tk.TclError):
+            widget_class = ""
+        if isinstance(widget, (tk.Entry, tk.Spinbox, tk.Text)) or widget_class in {
+            "Entry", "TEntry", "Spinbox", "TSpinbox", "Text",
+        }:
+            return None
+        delta = {"Left": -1, "Right": 1}.get(str(getattr(event, "keysym", "")))
+        if delta is not None:
+            self._arrow_key_play.release(delta)
+            return "break"
+        return None
+
+    def _on_arrow_focus_out(self, event) -> None:
+        if event.widget is self:
+            self._arrow_key_play.stop()
 
     def _on_frame_slider_double_click(self, _event=None) -> None:
         if self.reader is None or self.export_running:
