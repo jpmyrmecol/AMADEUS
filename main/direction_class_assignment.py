@@ -115,6 +115,7 @@ class BlobRecord:
     pickle_outlier: bool
     frame: int
     blob_index: int
+    result_protected: bool = False
     traj_id: Optional[int] = None
     class_id: Optional[int] = None
     direction_vec: Optional[Tuple[float, float]] = None
@@ -582,6 +583,7 @@ def build_blob_records(
                     obb_major_axis_len=obb_major_axis_len,
                     obb_aspect_ratio=obb_aspect_ratio,
                     pickle_outlier=bool(bl.is_outlier),
+                    result_protected=bool(getattr(bl, "result_protected", False)),
                     frame=int(fid),
                     blob_index=int(bi),
                 )
@@ -1720,6 +1722,14 @@ def _process_without_crossing_frame(
             keep = (remove_mask == 0).astype(np.float32)
             alpha = cv2.GaussianBlur(keep, (ksize, ksize), sigma)[..., None]
             canvas = (frame.astype(np.float32) * alpha + ctx["bg_f32"] * (1.0 - alpha)).astype(np.uint8)
+
+    protected_blobs = [b for b in valid_blobs if b.result_protected]
+    if protected_blobs and remove_blobs:
+        protected_mask = np.zeros((H, W), dtype=np.uint8)
+        for b in protected_blobs:
+            cv2.fillPoly(protected_mask, [b.contour.astype(np.int32)], 255)
+        canvas = canvas.copy()
+        canvas[protected_mask > 0] = frame[protected_mask > 0]
 
     label_lines: List[str] = []
     mask_lines: List[str] = []

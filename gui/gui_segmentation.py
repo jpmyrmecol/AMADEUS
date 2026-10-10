@@ -368,6 +368,11 @@ class BlobMetrics:
     result_single: bool = False       # area outlier rescued as one large animal
     result_missing: bool = False      # full imported OBB with no segmentation owner
     result_area_outlier: bool = False # rejected by the independent Result area bounds
+    result_obb_indices: tuple[int, ...] = ()
+    result_blob_area: Optional[int] = None  # union foreground pixels inside the corresponding OBB
+    result_generated: bool = False
+    result_protected: bool = False
+    result_source_frame: Optional[tuple] = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -531,6 +536,7 @@ def _smooth_classified_blobs(
     """
     if not cfg.single_blob_smoothing_enabled:
         return blobs
+    blobs = _restore_result_inputs(blobs)
     from main.segmentation_core import smooth_single_animal_contour, solid_contours_from_mask
 
     removed = np.zeros(image_shape[:2], dtype=np.uint8)
@@ -1044,15 +1050,18 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
         blob.result_obb_count = 0
         blob.result_obb_coverage = 0.0
         blob.result_single = False
+        blob.result_obb_indices = ()
     obbs = cfg.obbs_by_frame.get(int(frame_idx))
     if obbs is None:
         return []
 
     boxes = [cv2.boundingRect(blob.contour) for blob in blobs]
     owners: list[int] = [-1] * len(obbs)
+    center_candidates = sorted(range(len(blobs)), key=lambda i: blobs[i].manual_outlier)
     for ri, poly in enumerate(obbs):
         center = (float(poly[:, 0].mean()), float(poly[:, 1].mean()))
-        for index, blob in enumerate(blobs):
+        for index in center_candidates:
+            blob = blobs[index]
             bx, by, bw, bh = boxes[index]
             if not (bx <= center[0] <= bx + bw and by <= center[1] <= by + bh):
                 continue
@@ -1076,9 +1085,10 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
         if owners[ri] < 0 and index not in claimed:
             owners[ri] = index
             claimed.add(index)
-    for owner in owners:
+    for ri, owner in enumerate(owners):
         if owner >= 0:
             blobs[owner].result_obb_count += 1
+            blobs[owner].result_obb_indices += (ri,)
 
     for index, blob in enumerate(blobs):
         if blob.result_obb_count != 1 or blob.manual_outlier:
@@ -1090,6 +1100,70 @@ def _match_result_obbs_to_blobs(blobs: list, frame_idx: int, cfg: "_ResultMatchC
         if blob_pixels > 0:
             blob.result_obb_coverage = covered_pixels / blob_pixels
     return [poly for poly, owner in zip(obbs, owners) if owner < 0]
+
+
+def _restore_result_inputs(blobs: list[BlobMetrics]) -> list[BlobMetrics]:
+    """Recover real frame inputs after a prior expansion/protection pass."""
+    frames = {}
+    for blob in blobs:
+        if blob.result_source_frame is not None:
+            frames.setdefault(blob.frame, blob.result_source_frame)
+    if not frames:
+        return blobs
+    restored = [replace(b, contour=b.contour.copy(), result_source_frame=None)
+                for sources in frames.values() for b in sources]
+    restored.extend(b for b in blobs if b.frame not in frames)
+    return restored
+
+
+def _result_obb_mask(poly: np.ndarray, image_shape: tuple) -> tuple[int, int, np.ndarray]:
+    H, W = image_shape[:2]
+    x0, y0, x1, y1 = _polygon_bounds(poly)
+    x0, y0, x1, y1 = max(0, x0), max(0, y0), min(W, x1), min(H, y1)
+    if x0 >= x1 or y0 >= y1:
+        return 0, 0, np.zeros((0, 0), dtype=np.uint8)
+    mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    cv2.fillConvexPoly(mask, np.round(poly - (x0, y0)).astype(np.int32), 255)
+    return x0, y0, mask
+
+
+def _result_blob_pixel_areas(blobs: list[BlobMetrics], obbs, image_shape: tuple) -> list[int]:
+    blobs = _restore_result_inputs(blobs)
+    if obbs is None:
+        areas = []
+        for b in blobs:
+            if b.manual_outlier:
+                continue
+            x, y, w, h = cv2.boundingRect(b.contour)
+            x0, y0, x1, y1 = max(0, x), max(0, y), min(image_shape[1], x+w), min(image_shape[0], y+h)
+            if x0 >= x1 or y0 >= y1:
+                areas.append(0)
+                continue
+            mask = np.zeros((y1-y0, x1-x0), np.uint8)
+            cv2.drawContours(mask, [b.contour], -1, 255, cv2.FILLED, offset=(-x0, -y0))
+            areas.append(cv2.countNonZero(mask))
+        return areas
+    foreground = _draw_blob_union_mask(image_shape, blobs)
+    areas = []
+    for poly in obbs:
+        x, y, mask = _result_obb_mask(poly, image_shape)
+        h, w = mask.shape
+        areas.append(cv2.countNonZero(mask & foreground[y:y+h, x:x+w]) if mask.size else 0)
+    return areas
+
+
+def _solid_region_blobs(template: BlobMetrics, mask: np.ndarray, x: int, y: int) -> list[BlobMetrics]:
+    from main.segmentation_core import solid_contours_from_mask
+
+    output = []
+    for contour in solid_contours_from_mask(mask):
+        contour = contour + np.array([[[x, y]]], dtype=np.int32)
+        # Tracking OBB previews require >=3 points, including 1-pixel strips.
+        # Repeated vertices preserve the exact filled raster footprint.
+        if len(contour) < 3:
+            contour = np.repeat(contour, 4 if len(contour) == 1 else 2, axis=0)
+        output.append(_blob_with_contour(template, contour))
+    return output
 
 
 def _missing_result_obb_blob(
@@ -1320,6 +1394,7 @@ class CrossingReviewApp(ctk.CTk):
 
         self.current_mask_cache: dict[tuple, tuple[np.ndarray, list[BlobMetrics]]] = {}
         self._area_reference_frame: "np.ndarray | None" = None
+        self._area_reference_blobs: list[BlobMetrics] = []
         self._area_reference_key = None
         self._area_reference_max = 0.0
         self._area_reference_stats = (0.0, 0.0, 0.0, 0.0)
@@ -3080,6 +3155,7 @@ class CrossingReviewApp(ctk.CTk):
                 if self._area_reference_frame is None:
                     self._area_reference_frame = self.reader.read_bgr(0)
                 _mask, blobs = self._segment_frame(self._area_reference_frame, 0)
+                self._area_reference_blobs = blobs
                 values = [b.area for b in blobs if not b.manual_outlier]
                 self._area_reference_max = max(values, default=0.0)
                 self._area_reference_stats = self._compute_iqr_stats(blobs)["area"]
@@ -3523,6 +3599,7 @@ class CrossingReviewApp(ctk.CTk):
             self.reader.close()
         self.reader = reader
         self._area_reference_frame = None
+        self._area_reference_blobs = []
         self._area_reference_key = None
         self._min_area_slider_cap = None
         self._absolute_defaults_pending = not self._applying_config
@@ -4298,20 +4375,34 @@ class CrossingReviewApp(ctk.CTk):
 
     def _update_result_area_control_ranges(self):
         control = self._result_area_control
-        reference_key = (self._area_reference_key, 0)
-        stats = self._area_reference_stats
-        has_reference = self._area_reference_max > 0
-        if not has_reference and self.reader is not None and self.frame_bgr_cache is not None:
-            reference_key = (self._area_reference_key, int(self.current_frame))
-            _, blobs = self._segment_frame(self.frame_bgr_cache, self.current_frame)
-            has_reference = any(b.area > 0 for b in blobs if not b.manual_outlier)
-            stats = self._compute_iqr_stats(blobs)["area"]
-        if not has_reference and self.analysis_iqr_stats and any(
-            not b.manual_outlier and b.area > 0 for blobs in self.analysis_blobs_by_frame.values() for b in blobs
-        ):
-            reference_key = (self._area_reference_key, "sampled", self.analysis_iqr_stats["area"])
-            stats = self.analysis_iqr_stats["area"]
-            has_reference = True
+        reference_key = (self._area_reference_key, None)
+        values = []
+        active = self._result_match.obbs_by_frame if self._result_match is not None else None
+        if self.reader is not None:
+            shape = (self.reader.height, self.reader.width)
+            frames = []
+            if self._area_reference_frame is not None:
+                frames.append((0, self._area_reference_blobs))
+            if self.frame_bgr_cache is not None and self.current_frame != 0:
+                frames.append((self.current_frame, None))
+            frames.extend(self.analysis_blobs_by_frame.items())
+            for fid, blobs in frames:
+                obbs = active.get(fid) if active is not None else None
+                if active is not None and obbs is None:
+                    continue
+                if blobs is None:
+                    blobs = self._segment_frame(self.frame_bgr_cache, fid)[1]
+                areas = _result_blob_pixel_areas(blobs, obbs, shape)
+                values = [area for area in areas if area > 0]
+                if values:
+                    reference_key = (self._area_reference_key, fid, id(obbs), tuple(values))
+                    break
+        has_reference = bool(values)
+        if has_reference:
+            q1, median, q3 = np.percentile(np.asarray(values, np.float64), (25, 50, 75))
+            stats = (float(q1), float(median), float(q3), float(q3-q1))
+        else:
+            stats = (0.0, 0.0, 0.0, 0.0)
         reference_changed = reference_key != self._result_area_reference_key
         self._result_area_reference_key = reference_key
         self._result_area_reference_stats = stats
@@ -5095,11 +5186,16 @@ class CrossingReviewApp(ctk.CTk):
             result_single=blob.result_single,
             result_missing=blob.result_missing,
             result_area_outlier=blob.result_area_outlier,
+            result_obb_indices=blob.result_obb_indices,
+            result_blob_area=blob.result_blob_area,
+            result_generated=blob.result_generated,
+            result_protected=blob.result_protected,
+            result_source_frame=blob.result_source_frame,
         )
 
     def _compute_iqr_stats(self, all_blobs: list[BlobMetrics]) -> dict[str, tuple[float, float, float, float]]:
         # Only Area is used for IQR outlier judgment; BBox/Width/Height IQR judgment is not used.
-        values = [b.area for b in all_blobs if not b.manual_outlier]
+        values = [b.area for b in _restore_result_inputs(all_blobs) if not b.manual_outlier]
         if not values:
             return {"area": (0.0, 0.0, 0.0, 0.0)}
         q1, median, q3 = np.percentile(
@@ -5179,11 +5275,12 @@ class CrossingReviewApp(ctk.CTk):
             bounds = self.analysis_bounds
         if result_match is None:
             result_match = self._result_match
-        out = [self._clone_blob(b) for b in blobs] if clone else blobs
+        inputs = _restore_result_inputs(blobs)
+        out = [self._clone_blob(b) for b in inputs] if clone else inputs
         # Rebuild imported rectangles against real segmentation, never against
         # rectangles left by a prior classification or a now-disabled import.
-        had_missing = any(b.result_missing for b in out)
-        out[:] = [b for b in out if not b.result_missing]
+        had_missing = any(b.result_generated or b.result_missing or b.result_source_frame is not None for b in blobs)
+        out[:] = [b for b in out if not (b.result_generated or b.result_missing)]
         area_bounds = bounds.get("area", (-float("inf"), float("inf"))) if bounds else (-float("inf"), float("inf"))
 
         for b in out:
@@ -5195,13 +5292,17 @@ class CrossingReviewApp(ctk.CTk):
             b.result_obb_coverage = 0.0
             b.result_single = False
             b.result_area_outlier = False
+            b.result_blob_area = None
+            b.result_obb_indices = ()
+            b.result_protected = False
+            b.result_source_frame = None
             b.is_crossing = bool(b.manual_outlier or b.area_outlier)
         if result_match is not None:
             image_shape = (self.reader.height, self.reader.width) if self.reader is not None else None
             self._rescue_single_animal_outliers(
                 out, result_match, frame_idx=frame_idx, image_shape=image_shape,
             )
-        if had_missing or any(b.result_missing for b in out):
+        if had_missing or any(b.result_generated for b in out):
             for index, b in enumerate(out):
                 b.blob_index = index
         return out
@@ -5211,33 +5312,103 @@ class CrossingReviewApp(ctk.CTk):
         blobs: list[BlobMetrics], result_match: "_ResultMatchConfig", *,
         frame_idx: Optional[int] = None, image_shape: Optional[tuple] = None,
     ) -> None:
-        """Judge confirmed Result single blobs with their own area range.
+        """Judge OBB foreground totals, then expand outliers with protection.
 
-        Ordinary area flags remain available as Outlier Extraction diagnostics.
-        A real blob with one OBB and sufficient coverage uses the Result bounds
-        for its final crossing status. Manual regions, multiple-OBB blobs and
-        insufficient matches retain ordinary classification. Unowned OBBs
-        become explicit outlier rectangles after matching original segments.
+        Only real segment masks seed classification. Generated rectangle pixels
+        never become evidence for another OBB or alter its measured area.
         """
         by_frame: dict[int, list[BlobMetrics]] = {}
         for b in blobs:
             by_frame.setdefault(int(b.frame), []).append(b)
         if frame_idx is not None:
             by_frame.setdefault(int(frame_idx), [])
+        output = []
         for frame_idx, frame_blobs in by_frame.items():
-            unmatched = _match_result_obbs_to_blobs(frame_blobs, frame_idx, result_match)
+            _match_result_obbs_to_blobs(frame_blobs, frame_idx, result_match)
+            obbs = result_match.obbs_by_frame.get(frame_idx)
+            if obbs is None or image_shape is None:
+                output.extend(frame_blobs)
+                continue
+            regions = [_result_obb_mask(poly, image_shape) for poly in obbs]
+            areas = _result_blob_pixel_areas(frame_blobs, obbs, image_shape)
+            owners = [[i for i, b in enumerate(frame_blobs) if ri in b.result_obb_indices] for ri in range(len(obbs))]
             for b in frame_blobs:
+                if b.result_obb_count == 1:
+                    b.result_blob_area = areas[b.result_obb_indices[0]]
                 if b.manual_outlier:
                     continue
                 if b.result_obb_count == 1 and b.result_obb_coverage >= result_match.min_coverage:
-                    b.result_area_outlier = not inside_bounds(b.area, result_match.area_bounds)
+                    b.result_area_outlier = not inside_bounds(b.result_blob_area, result_match.area_bounds)
                     b.result_single = b.area_outlier and not b.result_area_outlier
                     b.is_crossing = b.result_area_outlier
-            if image_shape is not None:
-                for poly in unmatched:
-                    missing = _missing_result_obb_blob(poly, frame_idx, len(blobs), image_shape)
-                    if missing is not None:
-                        blobs.append(missing)
+            targets = {ri for ri, area in enumerate(areas)
+                       if not owners[ri] or not inside_bounds(area, result_match.area_bounds)}
+            while True:
+                for ri in targets:
+                    for index in owners[ri]:
+                        frame_blobs[index].is_crossing = True
+                        frame_blobs[index].result_single = False
+                healthy = [b for b in frame_blobs if b.result_obb_indices and not b.is_crossing]
+                protected = _draw_blob_union_mask(image_shape, healthy)
+                rejected = _draw_blob_union_mask(image_shape, [b for b in frame_blobs if b.is_crossing])
+                # A trusted healthy mask wins conflicting duplicate/manual
+                # pixels. Promotion propagates only through real source masks.
+                seeds = rejected & cv2.bitwise_not(protected)
+                additions = set()
+                for ri, (x, y, mask) in enumerate(regions):
+                    h, w = mask.shape
+                    if mask.size and cv2.countNonZero(mask & seeds[y:y+h, x:x+w]):
+                        additions.add(ri)
+                if additions <= targets:
+                    break
+                targets |= additions
+
+            expanded = rejected.copy()
+            for ri in targets:
+                x, y, mask = regions[ri]
+                h, w = mask.shape
+                if mask.size:
+                    expanded[y:y+h, x:x+w] |= mask
+            for b in healthy:
+                b.result_protected = bool(cv2.countNonZero(_draw_blob_union_mask(image_shape, [b]) & expanded))
+            erased = expanded & cv2.bitwise_not(protected)
+            sources = tuple(replace(b, contour=b.contour.copy(), result_source_frame=None) for b in frame_blobs)
+            frame_output = []
+            for b in frame_blobs:
+                if not b.is_crossing and b.result_obb_indices:
+                    frame_output.append(b)
+                    continue
+                x, y, w, h = cv2.boundingRect(b.contour)
+                x0, y0, x1, y1 = max(0, x), max(0, y), min(image_shape[1], x+w), min(image_shape[0], y+h)
+                if x0 >= x1 or y0 >= y1:
+                    continue
+                mask = np.zeros((y1-y0, x1-x0), np.uint8)
+                cv2.drawContours(mask, [b.contour], -1, 255, cv2.FILLED, offset=(-x0, -y0))
+                exclusion = protected[y0:y1, x0:x1] if b.is_crossing else erased[y0:y1, x0:x1]
+                if not cv2.countNonZero(mask & exclusion):
+                    frame_output.append(b)
+                else:
+                    frame_output.extend(_solid_region_blobs(b, mask & cv2.bitwise_not(exclusion), x0, y0))
+            for ri in sorted(targets):
+                template = _missing_result_obb_blob(obbs[ri], frame_idx, len(frame_output), image_shape)
+                if template is None:
+                    continue
+                template.result_generated = True
+                template.result_missing = not owners[ri]
+                template.result_obb_indices = (ri,)
+                template.result_blob_area = areas[ri]
+                template.result_area_outlier = not inside_bounds(areas[ri], result_match.area_bounds)
+                x, y, mask = regions[ri]
+                h, w = mask.shape
+                exclusion = protected[y:y+h, x:x+w]
+                if not cv2.countNonZero(mask & exclusion):
+                    frame_output.append(template)
+                else:
+                    frame_output.extend(_solid_region_blobs(template, mask & cv2.bitwise_not(exclusion), x, y))
+            for b in frame_output:
+                b.result_source_frame = sources
+            output.extend(frame_output)
+        blobs[:] = output
 
     def _analysis_frame_indices(self) -> list[int]:
         if self.reader is None:
@@ -5413,7 +5584,7 @@ class CrossingReviewApp(ctk.CTk):
                 classified = self._classify_blobs(
                     classified, self.analysis_bounds, clone=False, frame_idx=self.current_frame)
                 mask = _draw_blob_union_mask(mask.shape, classified)
-            elif any(b.result_missing for b in classified):
+            elif any(b.result_generated for b in classified):
                 mask = _draw_blob_union_mask(mask.shape, classified)
             return mask, classified
         # Before analysis there are no fixed area bounds. Imported OBBs can
@@ -5481,10 +5652,10 @@ class CrossingReviewApp(ctk.CTk):
         kept = sum(1 for b in blobs if not b.is_crossing)
         outliers = sum(1 for b in blobs if b.is_crossing)
         rescued = sum(1 for b in blobs if b.result_single)
-        missing = sum(1 for b in blobs if b.result_missing)
+        missing = len({(b.frame, ri) for b in blobs if b.result_generated for ri in b.result_obb_indices})
 
         stale_text = " / stale" if self.analysis_is_stale and self.analysis_bounds else ""
-        result_text = f" / result-single {rescued} / unmatched OBBs {missing}" if self._result_match is not None else ""
+        result_text = f" / result-single {rescued} / outlier OBBs {missing}" if self._result_match is not None else ""
         self.preview_title_var.set(
             f"frame {self.current_frame} / blobs {len(blobs)} / kept {kept} / "
             f"outliers {outliers}{result_text}{stale_text}"
@@ -5615,6 +5786,8 @@ class CrossingReviewApp(ctk.CTk):
                 lines.append("IQR: 0")
         if self._result_match is not None:
             lines.append(f"Result OBBs: {blob.result_obb_count}")
+            if blob.result_blob_area is not None:
+                lines.append(f"Blob area inside OBB: {blob.result_blob_area} px")
             if blob.result_obb_count == 1 and not blob.manual_outlier:
                 lines.append(f"OBB coverage: {blob.result_obb_coverage * 100:.0f}%")
             if blob.result_area_outlier:
@@ -6345,7 +6518,10 @@ class CrossingReviewApp(ctk.CTk):
         for fid in range(self.frame_count):
             frame_blobs = []
             for b in source.get(fid, []):
-                frame_blobs.append(SimpleNamespace(contour=b.contour.astype(np.int32), is_outlier=bool(b.is_crossing)))
+                item = SimpleNamespace(contour=b.contour.astype(np.int32), is_outlier=bool(b.is_crossing))
+                if b.result_protected:
+                    item.result_protected = True
+                frame_blobs.append(item)
             blobs_in_video.append(frame_blobs)
         if metadata is None:
             metadata = {
