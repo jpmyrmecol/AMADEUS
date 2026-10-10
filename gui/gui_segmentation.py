@@ -65,6 +65,7 @@ from main.roi import (
     mask_region_overlap as _mask_region_overlap,
 )
 from main.video_frame_count import detect_seekable_frame_count
+from gui.preview_key_navigation import ArrowKeyHoldPlayback
 
 APP_TITLE = "AMADEUS: Segmentation"
 WINDOW_W = 1720
@@ -1438,6 +1439,15 @@ class CrossingReviewApp(ctk.CTk):
         self.playback_active = False
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
+        self._arrow_key_play = ArrowKeyHoldPlayback(
+            self,
+            current_frame=lambda: self.current_frame,
+            frame_bounds=lambda: (0, self.frame_count - 1) if self.reader is not None else (0, -1),
+            fps=self._playback_fps,
+            speed=lambda: self.playback_speed,
+            seek=lambda target: self.set_frame(target, from_playback=True),
+            pause=self.stop_playback,
+        )
         self.config_path: Optional[str] = None
         self.session_path: str = ""
         self.background_rebuild_job: Optional[str] = None
@@ -3358,8 +3368,10 @@ class CrossingReviewApp(ctk.CTk):
     def _bind_events(self):
         self.bind("<Configure>", self.on_window_configure)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.bind_all("<Left>", lambda _e: self._step_frame_stop_play(-1), add="+")
-        self.bind_all("<Right>", lambda _e: self._step_frame_stop_play(1), add="+")
+        for key in ("Left", "Right"):
+            self.bind_all(f"<KeyPress-{key}>", self._on_arrow_key_press, add="+")
+            self.bind_all(f"<KeyRelease-{key}>", self._on_arrow_key_release, add="+")
+        self.bind("<FocusOut>", self._stop_arrow_on_focus_out, add="+")
         self.bind_all("<space>", lambda _e: self._toggle_play_event(), add="+")
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
         self.canvas.bind("<Button-4>", self.on_mousewheel)
@@ -3621,6 +3633,7 @@ class CrossingReviewApp(ctk.CTk):
             except Exception:
                 pass
             self.background_rebuild_job = None
+        self._arrow_key_play.stop()
         self.stop_playback(update_button=False)
         self.playback_speed = 1.0
         self._update_play_button()
@@ -3734,6 +3747,7 @@ class CrossingReviewApp(ctk.CTk):
         if self._closing:
             return
         self._closing = True
+        self._arrow_key_play.stop()
         self.stop_playback(update_button=False)
         if self.background_rebuild_job is not None:
             try:
@@ -3780,9 +3794,35 @@ class CrossingReviewApp(ctk.CTk):
             return
         self.set_frame(int(round(float(value))))
 
-    def _step_frame_stop_play(self, delta: int):
-        self.stop_playback()
-        self.step_frame(delta)
+    @staticmethod
+    def _arrow_event_is_editing(event) -> bool:
+        widget = event.widget
+        try:
+            widget_class = widget.winfo_class()
+        except (AttributeError, tk.TclError):
+            return False
+        return isinstance(widget, (tk.Entry, tk.Spinbox, tk.Text)) or widget_class in {
+            "Entry", "TEntry", "Spinbox", "TSpinbox", "Text",
+        }
+
+    def _on_arrow_key_press(self, event):
+        if self._arrow_event_is_editing(event):
+            self._arrow_key_play.stop()
+            return None
+        if self.reader is None or self._closing:
+            return None
+        self._arrow_key_play.press(-1 if event.keysym == "Left" else 1)
+        return "break"
+
+    def _on_arrow_key_release(self, event):
+        if self._arrow_event_is_editing(event):
+            return None
+        self._arrow_key_play.release(-1 if event.keysym == "Left" else 1)
+        return "break"
+
+    def _stop_arrow_on_focus_out(self, event):
+        if event.widget is self:
+            self._arrow_key_play.stop()
 
     def step_frame(self, delta: int):
         if self.reader is None:
@@ -3824,7 +3864,7 @@ class CrossingReviewApp(ctk.CTk):
         self.frame_bgr_cache = frame_bgr
         self._draw_canvas(preserve_view=not reset_view)
         self._update_analysis_dependent_buttons()
-        if not self.playback_active:
+        if not self.playback_active and self._arrow_key_play.direction == 0:
             self._queue_prefetch(frame_idx)
         return True
 
