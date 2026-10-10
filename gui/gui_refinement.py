@@ -2473,24 +2473,29 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.set_playback_speed(speeds[(speeds.index(self.playback_speed) + 1) % len(speeds)])
 
     @staticmethod
+    def _playback_position_at(
+        now: float,
+        reader: VideoFrameReader,
+        timing: tuple[float, float, float],
+    ) -> float:
+        anchor_frame, anchor_time, speed = timing
+        return anchor_frame + max(0.0, now - anchor_time) * reader.fps * speed
+
     def _playback_frame_at(
+        self,
         now: float,
         reader: VideoFrameReader,
         timing: tuple[float, float, float],
     ) -> int:
-        anchor_frame, anchor_time, speed = timing
-        return min(
-            reader.frame_count - 1,
-            int(anchor_frame + max(0.0, now - anchor_time) * reader.fps * speed),
-        )
+        return min(self.frame_count - 1, int(self._playback_position_at(now, reader, timing)))
 
     def set_playback_speed(self, speed: float):
         if speed not in (1.0, 2.0, 4.0, 0.5, 0.25):
             raise ValueError("Playback speed must be 0.25, 0.5, 1, 2, or 4.")
         if self._playback_timing is not None and self.reader is not None:
             now = time.monotonic()
-            anchor = self._playback_frame_at(now, self.reader, self._playback_timing)
-            self._playback_timing = (float(anchor), now, speed)
+            anchor = self._playback_position_at(now, self.reader, self._playback_timing)
+            self._playback_timing = (anchor, now, speed)
         self.playback_speed = speed
         self._update_play_button()
         if self.playback_active:
