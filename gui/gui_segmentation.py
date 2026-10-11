@@ -248,6 +248,7 @@ class VideoFrameReader:
         self._prefetch_lock = threading.Lock()
         self._cap_pos: int = -1
         self._prefetch_pos: int = -1
+        self._closed = threading.Event()
 
     @staticmethod
     def _is_valid_frame(frame) -> bool:
@@ -321,6 +322,8 @@ class VideoFrameReader:
     def read_bgr_with_index(
         self, frame_idx: int, *, max_sequential_gap: int = 12,
     ) -> "tuple[np.ndarray, int]":
+        if self._closed.is_set():
+            raise RuntimeError("Video reader is closed.")
         frame_idx = self._clamp_frame_idx(frame_idx)
         with self._cache_lock:
             if frame_idx in self.cache:
@@ -341,7 +344,7 @@ class VideoFrameReader:
         return frame
 
     def prefetch(self, frame_idx: int):
-        if self.prefetch_cap is None:
+        if self._closed.is_set() or self.prefetch_cap is None:
             return
         frame_idx = int(frame_idx)
         if frame_idx < 0 or frame_idx >= self.frame_count:
@@ -362,9 +365,21 @@ class VideoFrameReader:
             self._cache_put(actual_idx, frame)
 
     def close(self):
-        self.cap.release()
-        if self.prefetch_cap is not None:
-            self.prefetch_cap.release()
+        """Release captures after outstanding decoder calls finish, off Tk."""
+        if self._closed.is_set():
+            return
+        self._closed.set()
+
+        def cleanup():
+            with self._cap_lock:
+                self.cap.release()
+            with self._prefetch_lock:
+                if self.prefetch_cap is not None:
+                    self.prefetch_cap.release()
+                    self.prefetch_cap = None
+
+        threading.Thread(target=cleanup, name="segmentation-video-cleanup",
+                         daemon=True).start()
 
     def clear_cache(self):
         """Release preview frames before a memory-intensive batch operation."""
@@ -3841,6 +3856,13 @@ class CrossingReviewApp(ctk.CTk):
         if self.reader is None or self._closing:
             return None
         self._arrow_key_play.press(-1 if event.keysym == "Left" else 1)
+        if event.keysym == "Left" and self._arrow_key_play.direction == -1:
+            # Warm the reverse window during the 220-ms hold-detection delay.
+            try:
+                pipeline = self._ensure_smooth_player()
+                pipeline.reverse_buffer.prepare(self.current_frame, self.playback_speed)
+            except Exception:
+                pass  # A single-frame arrow tap must still work.
         return "break"
 
     def _on_arrow_key_release(self, event):
