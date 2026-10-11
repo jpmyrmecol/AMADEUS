@@ -16,8 +16,10 @@ from PIL import Image, ImageTk
 
 try:
     from .project_paths import gui_asset
+    from .copyable_text import install_right_click_copy
 except ImportError:  # Preserve direct execution with: python gui/<script>.py
     from project_paths import gui_asset
+    from copyable_text import install_right_click_copy
 
 
 APP_USER_MODEL_ID = "AMADEUS.GUI"
@@ -101,6 +103,7 @@ def install_window_icon(window: tk.Misc) -> None:
     override this way already; WSLg's icon bridge needs the same retry even
     though CTk itself never overrides the icon on Linux.
     """
+    install_right_click_copy(window)
     set_window_icon(window)
     if os.name == "nt" or sys.platform.startswith("linux"):
         for delay_ms in WINDOW_ICON_REFRESH_DELAYS_MS:
