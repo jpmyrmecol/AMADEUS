@@ -4,6 +4,7 @@
 import math
 import os
 import queue
+from collections import deque
 import subprocess
 import sys
 import threading
@@ -163,10 +164,14 @@ def show_splash(root: ctk.CTk, reveal: bool = False) -> tk.Toplevel:
     return splash
 
 
-def launch_gui_script(name: str, *script_args: str) -> subprocess.Popen:
+def launch_gui_script(
+    name: str, *script_args: str, capture_errors: bool = False,
+) -> subprocess.Popen:
     kwargs = {"cwd": str(PROJECT_ROOT)}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+    if capture_errors:
+        kwargs.update(stderr=subprocess.PIPE, text=True, errors="replace")
     return subprocess.Popen(
         [sys.executable, "-u", str(gui_script(name)), *script_args], **kwargs
     )
@@ -601,24 +606,50 @@ def install_home_video_drop(
             try:
                 process = launch_gui_script(
                     target_script, "--dropped-video", os.path.abspath(path),
+                    capture_errors=True,
                 )
             except OSError as exc:
                 messagebox.showerror("Unable to open GUI", str(exc), parent=root)
                 return
 
-            # A child that crashes during GUI startup otherwise closes its
-            # console immediately, leaving the drop looking unresponsive.
+            # Read stderr continuously so a traceback cannot block the child,
+            # and report a real failure rather than just its numeric exit code.
+            error_lines: deque[str] = deque(maxlen=80)
+
+            def read_errors() -> None:
+                assert process.stderr is not None
+                with process.stderr:
+                    for line in process.stderr:
+                        error_lines.append(line)
+
+            error_reader = threading.Thread(
+                target=read_errors, name="AMADEUS GUI startup diagnostics",
+                daemon=True,
+            )
+            error_reader.start()
+
             def check_startup(remaining: int = 10) -> None:
                 status = process.poll()
                 if status is None and remaining > 0:
                     root.after(1000, lambda: check_startup(remaining - 1))
-                elif status is not None and status != 0:
-                    messagebox.showerror(
-                        "Unable to open GUI",
-                        f"{target_script} exited with code {status}. "
-                        "Check the child console for the error details.",
-                        parent=root,
-                    )
+                    return
+                if status is None or status == 0:
+                    return
+                if error_reader.is_alive():
+                    root.after(100, lambda: check_startup(0))
+                    return
+
+                traceback_text = "".join(error_lines).strip()
+                details = (
+                    f"\\n\\n{traceback_text[-3000:]}"
+                    if traceback_text else
+                    "\\n\\nThe child did not report an error message."
+                )
+                messagebox.showerror(
+                    "Unable to open GUI",
+                    f"{target_script} exited with code {status}.{details}",
+                    parent=root,
+                )
 
             root.after(1000, check_startup)
 
