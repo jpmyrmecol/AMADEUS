@@ -3022,6 +3022,9 @@ def main() -> None:
     if args.tracking_video_is_dir:
         app.path_mode["TRACKING_VIDEO_PATH_IS_DIR"].set(True)
     if args.dropped_video:
+        # A new window opened by a Home drop should be raised above Home.
+        app.after(100, app.lift)
+
         def open_home_video(path=args.dropped_video):
             prepared = prepare_analysis_video(
                 app, path, log=lambda message: print(f"[video] {message}", flush=True),
