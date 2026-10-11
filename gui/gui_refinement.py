@@ -4617,8 +4617,18 @@ class PoseConvertDialog(ctk.CTkToplevel):
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dropped-video", default="")
+    args = parser.parse_args()
+
     configure_taskbar_identity()
     app = UmaDirectionRefinementApp()
+    if args.dropped_video:
+        # Reuse Refinement's direct Video/CSV mode, just like a canvas drop.
+        # Video-only input opens the video; users may select tracking CSV later.
+        app.after(300, lambda path=args.dropped_video: app._handle_dropped_file(path))
     app.mainloop()
 
 
