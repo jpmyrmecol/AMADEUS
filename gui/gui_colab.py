@@ -383,10 +383,44 @@ class ColabSetupApp(ctk.CTk):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare an AMADEUS project for Google Colab.")
     parser.add_argument("--config", default="", help="Config path to load when the setup window opens.")
+    parser.add_argument("--dropped-video", default="")
     args = parser.parse_args()
     app = ColabSetupApp()
     if args.config:
         app.after(200, lambda path=args.config: app._load_config(path))
+    elif args.dropped_video:
+        def load_home_video_project(path=args.dropped_video):
+            # Colab is driven by config.yaml, not by a video alone. Reuse an
+            # existing project config only when it actually names this video.
+            video = Path(path).expanduser().resolve()
+            candidates = (
+                video.parent / f"amadeus_{video.stem}" / "config.yaml",
+                video.parent / "config.yaml",
+                video.parent.parent / "config.yaml",
+            )
+            video_id = str(video).casefold() if sys.platform == "win32" else str(video)
+            for candidate in dict.fromkeys(candidates):
+                if not candidate.is_file():
+                    continue
+                try:
+                    _cfg, summary = load_colab_config(candidate)
+                    existing = (summary.training_video_path, summary.tracking_video_path)
+                    if not any(
+                        (str(Path(p).expanduser().resolve()).casefold()
+                         if sys.platform == "win32" else str(Path(p).expanduser().resolve())) == video_id
+                        for p in existing if p
+                    ):
+                        continue
+                except (OSError, ValueError, RuntimeError):
+                    continue
+                app._load_config(str(candidate))
+                return
+            app._set_status(
+                "Video received: " + video.name + "\n"
+                "Google Colab requires an existing AMADEUS config.yaml. "
+                "Select it using Browse."
+            )
+        app.after(200, load_home_video_project)
     app.mainloop()
 
 
