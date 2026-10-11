@@ -41,7 +41,6 @@ show_version_status() {
 
     if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
        [[ ! "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "[AMADEUS] Latest release: unavailable (offline or update check failed)"
         return 0
     fi
 
@@ -52,13 +51,14 @@ show_version_status() {
           (latest_major == current_major && latest_minor == current_minor && latest_patch > current_patch) )); then
         echo "[AMADEUS] Update available: v$current -> v$latest"
     elif (( latest_major == current_major && latest_minor == current_minor && latest_patch == current_patch )); then
-        echo "[AMADEUS] Latest release: v$latest (up to date)"
+        :
     else
         echo "[AMADEUS] Latest release: v$latest (installed version is newer)"
     fi
 }
 
 show_version_status
+echo "[AMADEUS] Location: $SCRIPT_DIR"
 
 # Report unsupported hosts before downloading dependencies.
 case "$(uname -s)" in
@@ -172,8 +172,6 @@ if [ -z "$UV_EXE" ]; then
     exit 1
 fi
 
-echo "[AMADEUS] Using uv $UV_VERSION: $UV_EXE"
-
 # The bootstrap interpreter only runs setup; setup selects and checks the GUI Python.
 # AMADEUS_VENV explicitly selects an alternate environment. Do not infer it from activation.
 if [ "$(uname -s)" = Darwin ]; then
@@ -182,7 +180,7 @@ else
     setup_python=3.10
 fi
 # Setup may rebuild .venv; keep the bootstrap interpreter outside that environment.
-if ! "$UV_EXE" run --no-project --isolated --python "$setup_python" python tools/setup_environment.py --uv "$UV_EXE"; then
+if ! env -u VIRTUAL_ENV "$UV_EXE" --quiet run --no-project --isolated --python "$setup_python" python tools/setup_environment.py --uv "$UV_EXE"; then
     echo "[ERROR] AMADEUS environment setup failed. See the diagnostic above." >&2
     exit 1
 fi
@@ -235,7 +233,7 @@ ensure_posix_command_path() {
 }
 
 ensure_posix_command_path
-echo "[AMADEUS] Environment is ready. Starting the GUI..."
+"$AMADEUS_VENV/bin/python" tools/launch_summary.py
 set +e
 "$AMADEUS_VENV/bin/amadeus" "$@"
 status=$?
@@ -254,5 +252,4 @@ if (( status != 0 )); then
     exit "$status"
 fi
 
-echo "[AMADEUS] The GUI has closed."
-echo "[AMADEUS] Type \"amadeus\" or \"amade\" from any terminal to start AMADEUS directly next time."
+echo "[AMADEUS] GUI closed. Type \"amadeus\" or \"amade\" to reopen."
