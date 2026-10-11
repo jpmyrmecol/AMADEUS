@@ -113,6 +113,9 @@ TRACKING_DROP_SUFFIXES = frozenset({".csv", ".h5", ".hdf5"})
 FRAME_CACHE_SIZE = 128
 PREFETCH_FORWARD = 60
 PREFETCH_BACKWARD = 60
+# Decode backward lookahead as short, forward-decoded blocks closest first.
+REVERSE_PREFETCH_CHUNK = 12
+REVERSE_PREFETCH_STEP = 20
 SNAP_PIXELS = 12
 LABEL_HIT_RADIUS = 24
 ENDPOINT_HIT_RADIUS = 14
@@ -321,6 +324,9 @@ class VideoFrameReader:
 
         self.cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._cache_lock = threading.RLock()
+        # A reverse-playback cache favours frames behind the current playhead.
+        # Normal forward playback retains the existing LRU policy.
+        self._reverse_cache_center: int | None = None
         self._cap_lock = threading.Lock()
         self._prefetch_cap_lock = threading.Lock()
         self._cap_pos: int = 0
@@ -368,7 +374,27 @@ class VideoFrameReader:
 
     def _trim_cache_locked(self) -> None:
         while len(self.cache) > FRAME_CACHE_SIZE:
+            center = self._reverse_cache_center
+            if center is not None:
+                # In reverse playback, forward frames are already behind us
+                # in playback time. Evict these first to preserve the next
+                # 60 source frames, even while the prefetch worker is writing.
+                forward_frames = [index for index in self.cache if index > center]
+                if forward_frames:
+                    self.cache.pop(max(forward_frames))
+                    continue
+                far_backward = [
+                    index for index in self.cache if index < center - PREFETCH_BACKWARD
+                ]
+                if far_backward:
+                    self.cache.pop(min(far_backward))
+                    continue
             self.cache.popitem(last=False)
+
+    def set_reverse_cache_center(self, frame_idx: int | None) -> None:
+        """Prioritize the reverse lookahead while reverse playback is active."""
+        with self._cache_lock:
+            self._reverse_cache_center = None if frame_idx is None else int(frame_idx)
 
     def _store_cached(self, frame_idx: int, frame: np.ndarray) -> None:
         if self._closed.is_set():
@@ -487,10 +513,18 @@ class VideoFrameReader:
             self._prefetch_request = None
 
     def _prefetch_order(self, center: int, forward: int, backward: int) -> list[int]:
-        # Decode each side in ascending frame order. Interleaving -1,+1,
-        # -2,+2 repeatedly seeks within long-GOP compressed videos.
         lower = max(0, center - backward)
         upper = min(self.frame_count - 1, center + forward)
+        if backward > 0 and forward == 0:
+            # Reverse video still decodes FORWARD. Fill the nearest block
+            # first, then progressively older blocks, instead of reading
+            # the farthest frame first and starving the reverse playhead.
+            order: list[int] = []
+            for last in range(center - 1, lower - 1, -REVERSE_PREFETCH_CHUNK):
+                first = max(lower, last - REVERSE_PREFETCH_CHUNK + 1)
+                order.extend(range(first, last + 1))
+            return order
+        # Normal idle prefetch stays sequential, with no alternating seeks.
         return list(range(lower, center)) + list(range(center + 1, upper + 1))
 
     def _prefetch_loop(self) -> None:
@@ -614,6 +648,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._decode_gen: int = 0
         self._paused_decode_gen: int | None = None
         self._paused_decode_direction = 1
+        self._reverse_prefetch_center: int | None = None
         self._last_displayed_frame: int = -1
         self._frame_queue: queue.Queue = queue.Queue()
         self._decode_request_queue: queue.Queue = queue.Queue(maxsize=1)
@@ -969,6 +1004,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.playback_speed = 1.0
         self._playback_timing = None
         self._paused_decode_direction = 1
+        self._reverse_prefetch_center = None
         self._update_play_button()
         self.current_frame = 0
         self.requested_frame = 0
@@ -2294,6 +2330,19 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.update_info_panel()
         self._last_displayed_frame = frame_idx
         if self.playback_active:
+            if timing is not None and timing[2] < 0:
+                reader.set_reverse_cache_center(frame_idx)
+                if (
+                    self._reverse_prefetch_center is not None
+                    and frame_idx <= self._reverse_prefetch_center - REVERSE_PREFETCH_STEP
+                ):
+                    # Keep supplying frames in the playback direction on the
+                    # separate prefetch capture. Decoder stalls must not force
+                    # the main reader to refill a 24-frame block every time.
+                    reader.request_prefetch(
+                        frame_idx, forward=0, backward=PREFETCH_BACKWARD
+                    )
+                    self._reverse_prefetch_center = frame_idx
             self._schedule_playback(delay_ms=1)
         elif generation != self._paused_decode_gen and not self._arrow_key_play.direction:
             # Prefetching while holding an arrow fights the demand decoder and
@@ -2641,6 +2690,17 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.reader.cancel_prefetch()
         self._paused_decode_gen = None
         self._paused_decode_direction = direction
+        if direction < 0:
+            self._reverse_prefetch_center = anchor
+            self.reader.set_reverse_cache_center(anchor)
+            # Fill 60 preceding frames while the same Play scheduler runs.
+            # The reverse prefetch worker reads small forward-decoded blocks.
+            self.reader.request_prefetch(
+                anchor, forward=0, backward=PREFETCH_BACKWARD
+            )
+        else:
+            self._reverse_prefetch_center = None
+            self.reader.set_reverse_cache_center(None)
         self._playback_timing = (float(anchor), time.perf_counter(), direction * self.playback_speed)
         self.playback_active = True
         self._update_play_button()
@@ -2652,6 +2712,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self._paused_decode_direction = (
                 -1 if self._playback_timing is not None and self._playback_timing[2] < 0 else 1
             )
+            if self._paused_decode_direction < 0 and self.reader is not None:
+                self.reader.cancel_prefetch()
+                self.reader.set_reverse_cache_center(None)
+                self._reverse_prefetch_center = None
         self.playback_active = False
         self._playback_timing = None
         if self.playback_job is not None:
