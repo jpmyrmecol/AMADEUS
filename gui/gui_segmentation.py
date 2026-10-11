@@ -93,9 +93,12 @@ ZOOM_OUT_FACTOR = 1.0 / ZOOM_IN_FACTOR
 MIN_ZOOM = 0.2
 MAX_ZOOM = 20.0
 
-FRAME_CACHE_SIZE = 20
-PREFETCH_FORWARD = 10
-PREFETCH_BACKWARD = 4
+FRAME_CACHE_SIZE = 128
+# Segmentation keeps larger temporary masks and background stacks than the
+# other GUIs. Bound the improved preview history independently of those jobs.
+FRAME_CACHE_BYTES = 384 * 1024 * 1024
+PREFETCH_FORWARD = 60
+PREFETCH_BACKWARD = 60
 FRAME_SEEK_BACKTRACK = 64
 
 # Parallel export: one OpenCV thread per Python thread avoids internal contention.
@@ -233,7 +236,7 @@ class VideoFrameReader:
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         frame_bytes = max(1, self.width * self.height * 3)
-        self.cache_capacity = max(2, min(FRAME_CACHE_SIZE, (128 * 1024 * 1024) // frame_bytes))
+        self.cache_capacity = max(2, min(FRAME_CACHE_SIZE, FRAME_CACHE_BYTES // frame_bytes))
         fps = float(self.cap.get(cv2.CAP_PROP_FPS))
         self.fps = fps if fps > 0 else 0.0
 
@@ -1452,6 +1455,7 @@ class CrossingReviewApp(ctk.CTk):
         self._result_match: Optional[_ResultMatchConfig] = None
 
         self.tk_image = None
+        self._canvas_image_id: int | None = None
         self.bg_preview_button = None
         self.frame_ranges_button = None
         self.screenshot_button = None
@@ -1472,14 +1476,20 @@ class CrossingReviewApp(ctk.CTk):
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
         self._smooth_player: SmoothPreviewPlayback | None = None
+        self._requested_arrow_frame: int | None = None
+        self._space_key_down = False
+        self._space_release_job: str | None = None
         self._preview_pacer = AdaptivePreviewPacer()
         self._arrow_key_play = ArrowKeyHoldPlayback(
             self,
-            current_frame=lambda: self.current_frame,
+            current_frame=lambda: (
+                self._requested_arrow_frame if self._requested_arrow_frame is not None
+                else self.current_frame
+            ),
             frame_bounds=lambda: (0, self.frame_count - 1) if self.reader is not None else (0, -1),
             fps=self._playback_fps,
             speed=lambda: self.playback_speed,
-            seek=lambda target: self.set_frame(target, from_playback=True),
+            seek=self._queue_arrow_step,
             pause=self.stop_playback,
             pacer=lambda: self._preview_pacer,
             hold_start=lambda direction: self.start_playback(direction),
@@ -3409,7 +3419,8 @@ class CrossingReviewApp(ctk.CTk):
             self.bind_all(f"<KeyPress-{key}>", self._on_arrow_key_press, add="+")
             self.bind_all(f"<KeyRelease-{key}>", self._on_arrow_key_release, add="+")
         self.bind("<FocusOut>", self._stop_arrow_on_focus_out, add="+")
-        self.bind_all("<space>", lambda _e: self._toggle_play_event(), add="+")
+        self.bind_all("<KeyPress-space>", self._on_space_press, add="+")
+        self.bind_all("<KeyRelease-space>", self._on_space_release, add="+")
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
         self.canvas.bind("<Button-4>", self.on_mousewheel)
         self.canvas.bind("<Button-5>", self.on_mousewheel)
@@ -3672,6 +3683,11 @@ class CrossingReviewApp(ctk.CTk):
             self.background_rebuild_job = None
         self._arrow_key_play.stop()
         self.stop_playback(update_button=False)
+        self._requested_arrow_frame = None
+        self._space_key_down = False
+        if self._space_release_job is not None:
+            self.after_cancel(self._space_release_job)
+            self._space_release_job = None
         self.playback_speed = 1.0
         self._update_play_button()
         if self._smooth_player is not None:
@@ -3680,6 +3696,9 @@ class CrossingReviewApp(ctk.CTk):
         if self.reader is not None:
             self.reader.close()
         self.reader = reader
+        self._canvas_image_id = None
+        self.tk_image = None
+        self.canvas.delete("all")
         self._preview_pacer.reset()
         self._area_reference_frame = None
         self._area_reference_blobs = []
@@ -3782,12 +3801,17 @@ class CrossingReviewApp(ctk.CTk):
             f"background={'cached' if cache_ready else ('ready' if selected_ready else 'unavailable')} / "
             f"output={self._default_output_dir()}"
         )
+        self.after_idle(lambda loaded=reader: self._prime_preview_decoder(loaded))
         _start_maximized(self)
 
     def on_close(self):
         if self._closing:
             return
         self._closing = True
+        if self._space_release_job is not None:
+            self.after_cancel(self._space_release_job)
+            self._space_release_job = None
+        self._space_key_down = False
         self._arrow_key_play.stop()
         self.stop_playback(update_button=False)
         if self.background_rebuild_job is not None:
@@ -3849,31 +3873,132 @@ class CrossingReviewApp(ctk.CTk):
             "Entry", "TEntry", "Spinbox", "TSpinbox", "Text",
         }
 
+    def _on_space_press(self, event):
+        # Editing fields retain their normal text/space handling.
+        if self._arrow_event_is_editing(event):
+            return None
+        if self.reader is None or self._closing:
+            return None
+        if self._space_release_job is not None:
+            self.after_cancel(self._space_release_job)
+            self._space_release_job = None
+        if not self._space_key_down:
+            self._space_key_down = True
+            self.toggle_playback()
+        return "break"
+
+    def _on_space_release(self, event):
+        if self._arrow_event_is_editing(event):
+            return None
+        if self._space_release_job is not None:
+            self.after_cancel(self._space_release_job)
+        # X11 can synthesize release/press pairs while Space is held.
+        self._space_release_job = self.after(35, self._finish_space_release)
+        return "break"
+
+    def _finish_space_release(self):
+        self._space_release_job = None
+        self._space_key_down = False
+
+    def _queue_arrow_step(self, frame_idx: int) -> bool:
+        """One-frame navigation must not seek/decode on the Tk event loop."""
+        reader = self.reader
+        if reader is None or self._closing:
+            return False
+        index = max(0, min(self.frame_count - 1, int(frame_idx)))
+        self._prefetch_cancel.set()
+        if self.prefetch_after_id is not None:
+            self.after_cancel(self.prefetch_after_id)
+            self.prefetch_after_id = None
+        try:
+            if not self._ensure_smooth_player().request_frame(index):
+                return False
+        except Exception as exc:
+            self.set_status(f"Arrow-key decoder unavailable: {exc}")
+            return False
+        self._requested_arrow_frame = index
+        return True
+
+    def _prime_preview_decoder(self, reader: VideoFrameReader):
+        if reader is not self.reader or self._closing:
+            return
+        try:
+            self._ensure_smooth_player()
+        except Exception as exc:
+            # A failed speculative decoder does not block ordinary navigation.
+            self.set_status(f"PyAV preview initialization unavailable: {exc}")
+
+    @staticmethod
+    def _windows_arrow_down(direction: int) -> bool:
+        """Read actual key state without waiting for queued Tk autorepeats."""
+        if sys.platform != "win32":
+            return True
+        try:
+            import ctypes
+            code = 0x25 if direction < 0 else 0x27
+            return bool(ctypes.windll.user32.GetAsyncKeyState(code) & 0x8000)
+        except (AttributeError, OSError):
+            return True
+
+    def _held_arrow_is_physically_down(self) -> bool:
+        if not self.playback_active or not self._arrow_key_play.repeating:
+            return True
+        direction = self._arrow_key_play.direction
+        timing = self._playback_timing
+        if direction not in (-1, 1) or timing is None or timing[2] * direction <= 0:
+            return True
+        return self._windows_arrow_down(direction)
+
+    def _finish_physically_released_arrow(self):
+        if self._arrow_key_play.direction:
+            self._arrow_key_play.stop()
+        elif self.playback_active:
+            self.stop_playback()
+
     def _on_arrow_key_press(self, event):
         if self._arrow_event_is_editing(event):
             self._arrow_key_play.stop()
             return None
         if self.reader is None or self._closing:
             return None
-        self._arrow_key_play.press(-1 if event.keysym == "Left" else 1)
-        if event.keysym == "Left" and self._arrow_key_play.direction == -1:
-            # Warm the reverse window during the 220-ms hold-detection delay.
+        delta = -1 if event.keysym == "Left" else 1
+        if not self._windows_arrow_down(delta):
+            # A delayed native KeyPress must not restart a released key hold.
+            if self._arrow_key_play.direction == delta:
+                self._arrow_key_play.stop()
+            return "break"
+        new_press = self._arrow_key_play.direction != delta
+        self._arrow_key_play.press(delta)
+        if new_press and delta < 0 and self._arrow_key_play.direction == -1:
             try:
                 pipeline = self._ensure_smooth_player()
-                pipeline.reverse_buffer.prepare(self.current_frame, self.playback_speed)
+                center = (self._requested_arrow_frame
+                          if self._requested_arrow_frame is not None
+                          else self.current_frame)
+                pipeline.reverse_buffer.prepare(center, self.playback_speed, warm_blocks=2)
             except Exception:
-                pass  # A single-frame arrow tap must still work.
+                pass  # Single-frame navigation remains available.
         return "break"
 
     def _on_arrow_key_release(self, event):
         if self._arrow_event_is_editing(event):
             return None
-        self._arrow_key_play.release(-1 if event.keysym == "Left" else 1)
+        direction = -1 if event.keysym == "Left" else 1
+        if sys.platform == "linux":
+            # X11 key autorepeat may include synthetic KeyRelease events.
+            self._arrow_key_play.release(direction)
+        else:
+            # A physical release ends the held session immediately.
+            self._arrow_key_play.stop()
         return "break"
 
     def _stop_arrow_on_focus_out(self, event):
         if event.widget is self:
             self._arrow_key_play.stop()
+            if self._space_release_job is not None:
+                self.after_cancel(self._space_release_job)
+                self._space_release_job = None
+            self._space_key_down = False
 
     def step_frame(self, delta: int):
         if self.reader is None:
@@ -3892,6 +4017,8 @@ class CrossingReviewApp(ctk.CTk):
             self.stop_playback()
         if not self.playback_active and self._smooth_player is not None:
             self._smooth_player.invalidate()
+        if not from_playback:
+            self._requested_arrow_frame = None
         if self._roi_drag_mode is not None:
             self.on_canvas_release()
         if self.reader.frame_count != self.frame_count:
@@ -3926,6 +4053,7 @@ class CrossingReviewApp(ctk.CTk):
         frame_idx = max(0, min(self.frame_count - 1, int(frame_idx)))
         self.reader._cache_put(frame_idx, frame_bgr)
         self.current_frame = frame_idx
+        self._requested_arrow_frame = None
         self.frame_var.set(frame_idx)
         self.frame_scale.set(frame_idx)
         self.frame_bgr_cache = frame_bgr
@@ -3951,16 +4079,15 @@ class CrossingReviewApp(ctk.CTk):
             if (cancel.is_set() or reader is not self.reader or self.playback_active
                     or self._arrow_key_play.direction):
                 return
+            # Decode each direction sequentially, rather than alternately
+            # seeking forwards and backwards across long-GOP videos.
             budget = max(1, reader.cache_capacity - 1)
-            forward = min(5, budget)
-            backward = min(2, max(0, budget - forward))
-            frames = [
-                fid for d in range(1, max(forward, backward) + 1)
-                for fid in (center_frame + d, center_frame - d)
-                if ((fid > center_frame and d <= forward)
-                    or (fid < center_frame and d <= backward))
-                and 0 <= fid < self.frame_count
-            ]
+            backward = min(PREFETCH_BACKWARD, max(1, budget // 2), center_frame)
+            forward = min(PREFETCH_FORWARD, max(0, budget - backward),
+                          self.frame_count - center_frame - 1)
+            frames = list(range(center_frame - backward, center_frame)) + list(
+                range(center_frame + 1, center_frame + forward + 1)
+            )
 
             def worker():
                 for fid in frames:
@@ -4008,6 +4135,8 @@ class CrossingReviewApp(ctk.CTk):
         src_y1 = min(float(img_h), (can_h - self.offset_y) / scale)
         if src_x1 <= src_x0 or src_y1 <= src_y0:
             self.canvas.delete("all")
+            self._canvas_image_id = None
+            self.tk_image = None
             return
         ix0, iy0 = int(src_x0), int(src_y0)
         ix1 = min(img_w, int(np.ceil(src_x1)))
@@ -4022,9 +4151,18 @@ class CrossingReviewApp(ctk.CTk):
         dst_x = int(max(0.0, self.offset_x + ix0 * scale))
         dst_y = int(max(0.0, self.offset_y + iy0 * scale))
         image = Image.fromarray(resized)
-        self.tk_image = ImageTk.PhotoImage(image)
-        self.canvas.delete("all")
-        self.canvas.create_image(dst_x, dst_y, anchor="nw", image=self.tk_image)
+        if (self.tk_image is None or self.tk_image.width() != dst_w
+                or self.tk_image.height() != dst_h):
+            self.tk_image = ImageTk.PhotoImage(image)
+        else:
+            self.tk_image.paste(image)
+        if self._canvas_image_id is None or not self.canvas.type(self._canvas_image_id):
+            self._canvas_image_id = self.canvas.create_image(
+                dst_x, dst_y, anchor="nw", image=self.tk_image
+            )
+        else:
+            self.canvas.coords(self._canvas_image_id, dst_x, dst_y)
+            self.canvas.itemconfigure(self._canvas_image_id, image=self.tk_image)
 
     def _render_canvas_view_rgb(self) -> np.ndarray:
         # Build the annotated frame at the video's native resolution, then crop
@@ -6099,6 +6237,8 @@ class CrossingReviewApp(ctk.CTk):
             render=lambda image, index: self._present_decoded_frame(image, index),
             on_error=self._smooth_playback_failed,
             on_boundary=self.stop_playback,
+            hold_is_active=self._held_arrow_is_physically_down,
+            on_hold_released=self._finish_physically_released_arrow,
         )
         return self._smooth_player
 
@@ -6138,10 +6278,11 @@ class CrossingReviewApp(ctk.CTk):
 
     def stop_playback(self, update_button: bool = True):
         was_active = self.playback_active
+        reversing = bool(self._playback_timing and self._playback_timing[2] < 0)
         self.playback_active = False
         self._playback_timing = None
         if self._smooth_player is not None:
-            self._smooth_player.stop()
+            self._smooth_player.stop(discard_pending=reversing)
         if self.playback_job is not None:
             self.after_cancel(self.playback_job)
             self.playback_job = None
