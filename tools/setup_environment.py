@@ -277,6 +277,8 @@ def sync_environment(uv_executable: str, profile: str, python: str) -> None:
         "torchvision",
     ]
     environment = os.environ.copy()
+    # The bootstrap interpreter uses a temporary uv environment, not this project venv.
+    environment.pop("VIRTUAL_ENV", None)
     environment["UV_PROJECT_ENVIRONMENT"] = str(ENVIRONMENT_ROOT)
     subprocess.run(command, cwd=PROJECT_ROOT, env=environment, check=True)
 
