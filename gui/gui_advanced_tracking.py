@@ -34,7 +34,7 @@ try:
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from .advanced_tracking_layout import partition_category_items
     from .config_path_recovery import prepare_config_for_gui
-    from .video_input import ask_open_analysis_video
+    from .video_input import ask_open_analysis_video, prepare_analysis_video
 except ImportError:  # Preserve direct execution with: python gui/gui_advanced_tracking.py
     from project_paths import (
         PROJECT_ROOT,
@@ -49,7 +49,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_advanced_t
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from advanced_tracking_layout import partition_category_items
     from config_path_recovery import prepare_config_for_gui
-    from video_input import ask_open_analysis_video
+    from video_input import ask_open_analysis_video, prepare_analysis_video
 
 ensure_import_paths(MAIN_DIR)
 from checkpoint_utils import checkpoint_spec_for_config
@@ -3003,6 +3003,7 @@ def _parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", default="")
     parser.add_argument("--training-video", dest="training_video", default="")
+    parser.add_argument("--dropped-video", default="")
     parser.add_argument("--tracking-video", dest="tracking_video", default="")
     parser.add_argument("--tracking-video-is-dir", type=int, choices=(0, 1), default=0)
     parser.add_argument("--load-config", dest="load_config", default="")
@@ -3020,6 +3021,19 @@ def main() -> None:
     )
     if args.tracking_video_is_dir:
         app.path_mode["TRACKING_VIDEO_PATH_IS_DIR"].set(True)
+    if args.dropped_video:
+        def open_home_video(path=args.dropped_video):
+            prepared = prepare_analysis_video(
+                app, path, log=lambda message: print(f"[video] {message}", flush=True),
+            )
+            if prepared is None:
+                return
+            app._prefill_training_video_path = prepared.path
+            app._prefill_tracking_video_path = prepared.path
+            app._prefill_session_path = app._default_segmentation_project_dir(prepared.path)
+            app._apply_prefill_paths()
+            app._on_training_video_path_committed()
+        app.after(300, open_home_video)
     if args.load_config and os.path.isfile(args.load_config):
         app.after(400, lambda p=args.load_config: app._do_load_yaml(p, show_msg=False))
     if args.without_direction_estimation is not None:
