@@ -614,6 +614,25 @@ class SmoothPreviewPlayback:
             self._waiting_reverse = not self.reverse_buffer.ready(center)
         self._schedule(1)
 
+    def request_frame(self, index: int) -> bool:
+        """Queue a single arrow-key step without decoding on the Tk thread.
+
+        A newer step supersedes an older one; the decoder worker itself is
+        single-threaded, so late results cannot overwrite the current image.
+        """
+        if self._closed:
+            return False
+        if self._active:
+            self.stop(discard_pending=True)
+        self.invalidate()
+        self._queue_frame(index)
+        self._schedule(1)
+        return True
+
+    @property
+    def pending(self) -> bool:
+        return self._pending
+
     def invalidate(self):
         """Invalidate stale decoder results after manual seeking."""
         with self._cond:
@@ -639,6 +658,12 @@ class SmoothPreviewPlayback:
             if self._direction < 0:
                 self.reverse_buffer.advance(frame_idx)
             if self._resume_clock:
+                # A held arrow may begin while its initial one-frame tap is
+                # still decoding. Anchor reverse prefetch and the playback
+                # clock to the frame actually displayed, not the stale origin.
+                if self._direction < 0:
+                    self.reverse_buffer.start(frame_idx, self._speed)
+                    self._waiting_reverse = not self.reverse_buffer.ready(frame_idx)
                 self._timing = (float(frame_idx), time.perf_counter(),
                                 self._direction * self._speed)
                 self._resume_clock = False
