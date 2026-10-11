@@ -108,9 +108,12 @@ MAX_ZOOM = 20.0
 VIDEO_EXTS = VIDEO_FILETYPES
 CSV_EXTS = [("CSV files", "*.csv"), ("All files", "*.*")]
 TRACKING_DROP_SUFFIXES = frozenset({".csv", ".h5", ".hdf5"})
-FRAME_CACHE_SIZE = 96
-PREFETCH_FORWARD = 16
-PREFETCH_BACKWARD = 24
+# Enough cache slots for the current frame and 120 frames in each direction.
+# Decoded RGB frames use substantial RAM at high video resolutions.
+FRAME_CACHE_SIZE = 256
+PREFETCH_FORWARD = 120
+PREFETCH_BACKWARD = 120
+KEY_PREFETCH_STEP = 30
 SNAP_PIXELS = 12
 LABEL_HIT_RADIUS = 24
 ENDPOINT_HIT_RADIUS = 14
@@ -485,19 +488,11 @@ class VideoFrameReader:
             self._prefetch_request = None
 
     def _prefetch_order(self, center: int, forward: int, backward: int) -> list[int]:
-        # Nearest frames first on both sides.  Direction reversal therefore has
-        # an adjacent cached frame without launching a dedicated extra thread.
-        order: list[int] = []
-        for distance in range(1, max(forward, backward) + 1):
-            if distance <= backward:
-                fid = center - distance
-                if 0 <= fid < self.frame_count:
-                    order.append(fid)
-            if distance <= forward:
-                fid = center + distance
-                if 0 <= fid < self.frame_count:
-                    order.append(fid)
-        return order
+        # Decode each side in ascending frame order. Interleaving -1,+1,
+        # -2,+2 repeatedly seeks within long-GOP compressed videos.
+        lower = max(0, center - backward)
+        upper = min(self.frame_count - 1, center + forward)
+        return list(range(lower, center)) + list(range(center + 1, upper + 1))
 
     def _prefetch_loop(self) -> None:
         while not self._closed.is_set():
@@ -531,6 +526,7 @@ class VideoFrameReader:
                             self.prefetch_cap,
                             frame_idx,
                             self._prefetch_pos,
+                            max_sequential_gap=max(12, forward + backward),
                         )
                     self._store_cached(frame_idx, frame)
                 except Exception:
@@ -681,6 +677,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._left_pane_visible: bool = True
 
         self._key_play_delta: int = 0
+        self._key_prefetch_center: int | None = None
         self._arrow_key_play = ArrowKeyHoldPlayback(
             self,
             current_frame=lambda: self.current_frame,
@@ -2293,6 +2290,20 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._last_displayed_frame = frame_idx
         if self._arrow_key_play.repeating:
             self._arrow_key_play.frame_rendered()
+            direction = self._arrow_key_play.direction
+            if (
+                direction
+                and self._key_prefetch_center is not None
+                and abs(frame_idx - self._key_prefetch_center) >= KEY_PREFETCH_STEP
+            ):
+                # Refill the upcoming 120-frame window before the key hold
+                # reaches the cache edge. Prefetch uses a separate capture.
+                reader.request_prefetch(
+                    frame_idx,
+                    forward=PREFETCH_FORWARD if direction > 0 else 0,
+                    backward=PREFETCH_BACKWARD if direction < 0 else 0,
+                )
+                self._key_prefetch_center = frame_idx
         if self.playback_active:
             self._schedule_playback(delay_ms=1)
         elif generation != self._paused_decode_gen and not self._arrow_key_play.direction:
@@ -2713,6 +2724,14 @@ class UmaDirectionRefinementApp(ctk.CTk):
             return
         if self.reader is not None and self._arrow_key_play.direction != delta:
             self.reader.cancel_prefetch()
+            self._key_prefetch_center = self.current_frame
+            # Build the directional cache immediately, including the frames
+            # behind the playhead for reverse hold from a manual seek.
+            self.reader.request_prefetch(
+                self.current_frame,
+                forward=PREFETCH_FORWARD if delta > 0 else 0,
+                backward=PREFETCH_BACKWARD if delta < 0 else 0,
+            )
         self._arrow_key_play.press(delta)
 
     def _key_play_step(self):
