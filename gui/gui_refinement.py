@@ -321,8 +321,8 @@ class VideoFrameReader:
         self._cache_lock = threading.RLock()
         self._cap_lock = threading.Lock()
         self._prefetch_cap_lock = threading.Lock()
-        self._cap_pos: int = -1
-        self._prefetch_pos: int = -1
+        self._cap_pos: int = 0
+        self._prefetch_pos: int = 0
         self._closed = threading.Event()
 
         # A single prefetch worker handles only the newest center-frame request.
@@ -345,17 +345,19 @@ class VideoFrameReader:
         cap: cv2.VideoCapture,
         frame_idx: int,
         current_pos: int,
+        *,
+        max_sequential_gap: int = 12,
     ) -> tuple[np.ndarray, int]:
         if self._closed.is_set():
             raise RuntimeError("Video reader is closed.")
         gap = frame_idx - current_pos
-        if 0 < gap <= 12:
+        if current_pos >= 0 and 0 < gap <= max_sequential_gap:
             # Skipped frames only need a grab, not conversion and GUI rendering.
             # For nearby frames this also avoids repeated random seeks in compressed video.
             for _ in range(gap):
                 if not cap.grab():
                     raise RuntimeError(f"Failed to skip to frame {frame_idx} in {self.video_path}")
-        elif current_pos != frame_idx:
+        elif current_pos < 0 or current_pos != frame_idx:
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
         ok, frame = cap.read()
         if not ok or frame is None:
@@ -369,22 +371,23 @@ class VideoFrameReader:
     def _store_cached(self, frame_idx: int, frame: np.ndarray) -> None:
         if self._closed.is_set():
             return
+        frame.setflags(write=False)
         with self._cache_lock:
             self.cache[frame_idx] = frame
             self.cache.move_to_end(frame_idx)
             self._trim_cache_locked()
 
     def get_cached(self, frame_idx: int) -> np.ndarray | None:
-        """Return a copy of a cached frame without ever blocking on decoding."""
+        """Return an immutable cached frame without blocking on decoding."""
         frame_idx = int(frame_idx)
         with self._cache_lock:
             frame = self.cache.get(frame_idx)
             if frame is None:
                 return None
             self.cache.move_to_end(frame_idx)
-            return frame.copy()
+            return frame
 
-    def read(self, frame_idx: int) -> np.ndarray:
+    def read(self, frame_idx: int, *, max_sequential_gap: int = 12) -> np.ndarray:
         """Decode one demanded frame. Safe to call from one background worker."""
         frame_idx = int(frame_idx)
         if frame_idx < 0 or frame_idx >= self.frame_count:
@@ -400,9 +403,16 @@ class VideoFrameReader:
             cached = self.get_cached(frame_idx)
             if cached is not None:
                 return cached
-            frame, self._cap_pos = self._decode(self.cap, frame_idx, self._cap_pos)
+            try:
+                frame, self._cap_pos = self._decode(
+                    self.cap, frame_idx, self._cap_pos,
+                    max_sequential_gap=max_sequential_gap,
+                )
+            except Exception:
+                self._cap_pos = -1
+                raise
             self._store_cached(frame_idx, frame)
-            return frame.copy()
+            return frame
 
     def request_prefetch(
         self,
@@ -546,6 +556,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.current_id = 0
         self.frame_cache_rgb: Optional[np.ndarray] = None
         self.tk_image = None
+        self._canvas_image_id: int | None = None
         self.edited_keys: set[tuple[int, int]] = set()
         self.position_edited_keys: set[tuple[int, int]] = set()
         self.direction_reversed_keys: set[tuple[int, int]] = set()
@@ -562,6 +573,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._companion_save_messages: queue.Queue = queue.Queue()
         self.prefetch_after_id: Optional[str] = None
         self._decode_gen: int = 0
+        self._paused_decode_gen: int | None = None
         self._last_displayed_frame: int = -1
         self._frame_queue: queue.Queue = queue.Queue()
         self._decode_request_queue: queue.Queue = queue.Queue(maxsize=1)
@@ -642,9 +654,6 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
         self._preview_pacer = AdaptivePreviewPacer()
-        # Learned playback request interval survives Stop/Start but not a new video.
-        # Independent of the arrow-key navigation pacer.
-        self._playback_pacer = AdaptivePreviewPacer()
         self.playback_job: Optional[str] = None
         self.play_button: Optional[ctk.CTkButton] = None
         self.speed_button: Optional[ctk.CTkButton] = None
@@ -923,6 +932,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.current_id = 0
         self.frame_cache_rgb = None
         self.tk_image = None
+        self._canvas_image_id = None
         self.last_save_path = None
         self.save_count = 0
         self.edited_keys.clear()
@@ -2013,9 +2023,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
         self.reader = reader
         self._preview_pacer.reset()
-        self._playback_pacer.reset()
         self.frame_cache_rgb = None
         self._last_displayed_frame = -1
+        self._canvas_image_id = None
         try:
             self.canvas.delete("all")
         except Exception:
@@ -2190,11 +2200,18 @@ class UmaDirectionRefinementApp(ctk.CTk):
             # Decode the newest source-video frame rather than an obsolete frame.
             timing = self._playback_timing
             if timing is not None and generation == self._decode_gen and reader is self.reader:
-                frame_idx = max(frame_idx, self._playback_frame_at(time.monotonic(), reader, timing))
+                frame_idx = max(frame_idx, self._playback_frame_at(time.perf_counter(), reader, timing))
             frame = None
             error: Exception | None = None
             try:
-                frame = reader.read(frame_idx)
+                # Playback catches up by decoding forward from the current
+                # position. A long-GOP seek for every skipped frame can create
+                # a cycle of slower reads and increasingly distant targets.
+                max_gap = (
+                    12 if timing is None
+                    else max(12, int(reader.fps * max(1.0, timing[2]) * 2))
+                )
+                frame = reader.read(frame_idx, max_sequential_gap=max_gap)
             except Exception as exc:
                 error = exc
             self._frame_queue.put(
@@ -2212,10 +2229,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if (
             generation != self._decode_gen
             or reader is not self.reader
-            or (
-                frame_idx != self.requested_frame
-                and (not self.playback_active or frame_idx < self.requested_frame)
-            )
+            or frame_idx < self.requested_frame
         ):
             return
         self.current_frame = frame_idx
@@ -2226,17 +2240,11 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._draw_canvas(frame, preserve_view=not reset_view)
         self.update_info_panel()
         self._last_displayed_frame = frame_idx
-        # Learn the effective decode-and-render duration. Keep the estimate
-        # across pauses; a new playback session only resets the request clock.
-        if self.playback_active and self._playback_pacer.last_request_time is not None:
-            self._playback_pacer.observe_frame(
-                time.monotonic() - self._playback_pacer.last_request_time
-            )
-        # Preserve post-v1.1.13 arrow-key hold timing without changing
-        # the v1.1.13 Play/Stop state machine.
         if self._arrow_key_play.repeating:
             self._arrow_key_play.frame_rendered()
-        if not self.playback_active:
+        if self.playback_active:
+            self._schedule_playback(delay_ms=1)
+        elif generation != self._paused_decode_gen:
             self._queue_prefetch(frame_idx)
 
     def _handle_frame_decode_error(
@@ -2268,25 +2276,6 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
     def _navigation_base_frame(self) -> int:
         return self.requested_frame if self._has_pending_frame_request() else self.current_frame
-
-    def _cancel_pending_frame_request(self) -> None:
-        if self.frame_render_job is not None:
-            try:
-                self.after_cancel(self.frame_render_job)
-            except Exception:
-                pass
-            self.frame_render_job = None
-        if not self._has_pending_frame_request():
-            return
-        self._invalidate_decode_requests()
-        fallback = self.current_frame
-        if self._last_displayed_frame >= 0:
-            fallback = self._last_displayed_frame
-        fallback = max(0, min(max(0, self.frame_count - 1), int(fallback)))
-        self.current_frame = fallback
-        self.requested_frame = fallback
-        self.frame_var.set(fallback)
-        self.frame_scale.set(fallback)
 
     def _pump_frame_queue(self):
         if self._closing:
@@ -2323,7 +2312,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         except queue.Empty:
             pass
         if not self._closing:
-            self.after(8, self._pump_frame_queue)
+            self.after(1 if self.playback_active else 8, self._pump_frame_queue)
 
     def set_status(self, text: str, auto_clear: bool = True):
         if self.status_clear_job is not None:
@@ -2561,7 +2550,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if speed not in (1.0, 2.0, 4.0, 0.5, 0.25):
             raise ValueError("Playback speed must be 0.25, 0.5, 1, 2, or 4.")
         if self._playback_timing is not None and self.reader is not None:
-            now = time.monotonic()
+            now = time.perf_counter()
             anchor = self._playback_position_at(now, self.reader, self._playback_timing)
             self._playback_timing = (anchor, now, speed)
         self.playback_speed = speed
@@ -2581,26 +2570,30 @@ class UmaDirectionRefinementApp(ctk.CTk):
     def start_playback(self):
         if self.reader is None or self.frame_count <= 1 or self.playback_active:
             return
-        if self._has_pending_frame_request():
-            self._cancel_pending_frame_request()
         if self.current_frame >= self.frame_count - 1:
             return
         self.reader.cancel_prefetch()
-        self._playback_pacer.resume()
-        self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
+        self._paused_decode_gen = None
+        # Keep a pending frame across a rapid Stop/Start so the capture and
+        # displayed position agree when that frame finishes.
+        anchor = max(self.current_frame, self.requested_frame)
+        self._playback_timing = (float(anchor), time.perf_counter(), self.playback_speed)
         self.playback_active = True
         self._update_play_button()
         self._schedule_playback(delay_ms=1)
 
     def stop_playback(self, update_button: bool = True):
-        was_active = self.playback_active
+        if self.playback_active:
+            self._paused_decode_gen = self._decode_gen
         self.playback_active = False
         self._playback_timing = None
         if self.playback_job is not None:
             self.after_cancel(self.playback_job)
             self.playback_job = None
-        if was_active:
-            self._cancel_pending_frame_request()
+        # The single pending decode finishes and renders once. Discarding it
+        # would leave the capture ahead of the stopped display and force a
+        # backward seek on the next Start. Its completion does not launch a
+        # navigation prefetch that would compete with an immediate restart.
         if update_button:
             self._update_play_button()
 
@@ -2630,30 +2623,23 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.stop_playback()
             return
 
-        now = time.monotonic()
+        now = time.perf_counter()
         target = self._playback_frame_at(now, reader, timing)
         if self._has_pending_frame_request():
             # One decode is already running or pending. The worker will use the
             # newest wall-clock target when it actually begins decoding.
             self._schedule_playback(delay_ms=8)
         elif target > self.current_frame:
-            # Reuse the learned decoding/rendering interval after Stop/Start.
-            # The source-video position still follows the v1.1.13 wall clock.
-            pacing_delay = self._playback_pacer.delay_ms(
-                now, reader.fps * self.playback_speed
-            )
-            if pacing_delay > 0:
-                self._schedule_playback(delay_ms=pacing_delay)
-                return
-            self._playback_pacer.begin_frame(time.monotonic())
+            # One pending request already limits decoding to the sustainable
+            # rate. Request the next frame as soon as the previous one renders.
             self.request_frame(target, reset_view=False, immediate=True)
-            self._schedule_playback(delay_ms=8)
+            if self._has_pending_frame_request():
+                self._schedule_playback(delay_ms=8)
         else:
             anchor_frame, anchor_time, speed = timing
             next_due = anchor_time + (self.current_frame + 1 - anchor_frame) / (reader.fps * speed)
             self._schedule_playback(delay_ms=max(
                 1, int((next_due - now) * 1000),
-                self._playback_pacer.delay_ms(now, reader.fps * speed),
             ))
 
     def step_id(self, delta: int):
@@ -3427,6 +3413,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
         if src_x1 <= src_x0 or src_y1 <= src_y0:
             self.canvas.delete("all")
+            self._canvas_image_id = None
             return
 
         ix0, iy0 = int(src_x0), int(src_y0)
@@ -3442,9 +3429,21 @@ class UmaDirectionRefinementApp(ctk.CTk):
         dst_x = int(max(0.0, self.offset_x + ix0 * scale))
         dst_y = int(max(0.0, self.offset_y + iy0 * scale))
         img = Image.fromarray(resized)
-        self.tk_image = ImageTk.PhotoImage(img)
-        self.canvas.delete("all")
-        self.canvas.create_image(dst_x, dst_y, anchor="nw", image=self.tk_image)
+        if (
+            self.tk_image is None
+            or self.tk_image.width() != dst_w
+            or self.tk_image.height() != dst_h
+        ):
+            self.tk_image = ImageTk.PhotoImage(img)
+        else:
+            self.tk_image.paste(img)
+        if self._canvas_image_id is None:
+            self._canvas_image_id = self.canvas.create_image(
+                dst_x, dst_y, anchor="nw", image=self.tk_image
+            )
+        else:
+            self.canvas.coords(self._canvas_image_id, dst_x, dst_y)
+            self.canvas.itemconfigure(self._canvas_image_id, image=self.tk_image)
 
     def _queue_prefetch(self, center_frame: int):
         reader = self.reader
