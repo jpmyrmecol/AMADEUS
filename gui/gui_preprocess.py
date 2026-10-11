@@ -647,6 +647,7 @@ class PreprocessApp(ctk.CTk):
         self.drag_state: dict[str, object] | None = None
         self.cursor_position = None
 
+        self._closing = False
         self.playback_active = False
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
@@ -3397,6 +3398,7 @@ class PreprocessApp(ctk.CTk):
             while self.export_thread is not None and self.export_thread.is_alive() and time.time() < deadline:
                 self.update()
                 time.sleep(0.03)
+        self._closing = True
         self._arrow_key_play.stop()
         self.stop_playback(update_button=False)
         self._cancel_preview_prefetch()
