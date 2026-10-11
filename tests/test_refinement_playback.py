@@ -24,6 +24,7 @@ from gui.gui_refinement import (
     VideoFrameReader,
 )
 from gui.preview_playback_timing import AdaptivePreviewPacer
+from gui.preview_key_navigation import ArrowKeyHoldPlayback
 
 
 class Value:
@@ -107,6 +108,7 @@ class NavigationReader:
 
 class ArrowKeys:
     repeating = False
+    direction = 0
 
     def stop(self):
         pass
@@ -345,6 +347,68 @@ class RefinementPlaybackTests(unittest.TestCase):
         self.assertEqual(result[2], 300)
         self.assertEqual(capture.grabs, 0)
         self.assertEqual(capture.seeks, [300])
+
+
+    def test_reverse_key_hold_decodes_windows_instead_of_per_frame_seeks(self):
+        reader, capture = self.make_reader()
+        reader.read(50)
+        app = HeadlessApp(reader=reader, current=50)
+        app._arrow_key_play.repeating = True
+        app._arrow_key_play.direction = -1
+        app.request_frame(49, immediate=True)
+        result = self.decode_one_request(app)
+        self.assertEqual(result[2], 49)
+        # One seek per backward window, then the remaining frames are cached.
+        self.assertEqual(capture.seeks, [26])
+        self.assertEqual(capture.reads[1:], list(range(26, 50)))
+        for frame in range(48, 26, -1):
+            expected = reader.read_reverse(frame)
+            self.assertEqual(int(expected[0, 0, 2]), frame)
+        self.assertEqual(capture.seeks, [26])
+        reader.read_reverse(25)
+        self.assertEqual(capture.seeks, [26, 2])
+        self.assertEqual(capture.reads[-1], 25)
+
+    def test_held_navigation_does_not_schedule_prefetch(self):
+        app = HeadlessApp()
+        app._arrow_key_play.direction = -1
+        app._arrow_key_play.repeating = True
+        app.requested_frame = 5
+        app._finish_frame_render(0, app.reader, 5, False, np.zeros((1, 1, 3)))
+        self.assertEqual(app.reader.prefetches, [])
+        app._arrow_key_play.direction = 0
+        app.requested_frame = 4
+        app._finish_frame_render(0, app.reader, 4, False, np.zeros((1, 1, 3)))
+        self.assertEqual(app.reader.prefetches, [4])
+
+    def test_key_hold_follows_render_completion_without_extra_pacer(self):
+        app = HeadlessApp()
+        app._preview_pacer.observe_frame(0.20)
+        app._arrow_key_play = ArrowKeyHoldPlayback(
+            app,
+            current_frame=lambda: app.current_frame,
+            frame_bounds=lambda: (0, app.frame_count - 1),
+            fps=lambda: app.reader.fps,
+            speed=lambda: app.playback_speed,
+            seek=lambda frame: app.request_frame(frame, immediate=True),
+            busy=app._has_pending_frame_request,
+            pause=app.stop_playback,
+            async_seek=True,
+            render_driven=True,
+        )
+        controller = app._arrow_key_play
+        controller.press(-1)
+        self.assertEqual(app.requested_frame, 9)
+        self.assertEqual(app._decode_request_queue.qsize(), 1)
+        # The first frame has not decoded when the hold repeat begins.
+        controller._begin_repeat()
+        self.assertIsNone(controller._timer)
+        # Deliver it; frame completion should schedule the next tick at once.
+        app._finish_frame_render(app._decode_gen, app.reader, 9, False,
+                                 np.zeros((1, 1, 3)))
+        self.assertEqual(app.jobs[controller._timer][0], 1)
+        self.assertEqual(app.reader.prefetches, [])
+        controller.stop()
 
     def test_cache_is_shared_immutable_and_overlay_keeps_source_pixels(self):
         reader, capture = self.make_reader()

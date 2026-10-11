@@ -414,6 +414,50 @@ class VideoFrameReader:
             self._store_cached(frame_idx, frame)
             return frame
 
+    def read_reverse(self, frame_idx: int, *, window: int = 24) -> np.ndarray:
+        """Cache a short backward window with one seek and forward decoding.
+
+        Compressed video is normally decoded in presentation order: repeatedly
+        seeking one frame backward can decode the same GOP over and over.
+        Keep the bounded main cache and fill only a small window on demand.
+        This is used only for continuous reverse-key playback; manual seeks
+        retain the exact-frame reader behavior.
+        """
+        frame_idx = int(frame_idx)
+        if frame_idx < 0 or frame_idx >= self.frame_count:
+            raise IndexError(f"Frame index out of range: {frame_idx}")
+        cached = self.get_cached(frame_idx)
+        if cached is not None:
+            return cached
+
+        with self._cap_lock:
+            if self._closed.is_set():
+                raise RuntimeError("Video reader is closed.")
+            cached = self.get_cached(frame_idx)
+            if cached is not None:
+                return cached
+
+            first = max(0, frame_idx - max(1, min(window, FRAME_CACHE_SIZE // 2)) + 1)
+            try:
+                # Decode consecutively from the window start through the target.
+                # Only frames within this short window are retained in RAM.
+                result = None
+                for index in range(first, frame_idx + 1):
+                    if index != frame_idx and self.get_cached(index) is not None:
+                        continue
+                    result, self._cap_pos = self._decode(
+                        self.cap, index, self._cap_pos,
+                        max_sequential_gap=max(12, window),
+                    )
+                    self._store_cached(index, result)
+                frame = self.get_cached(frame_idx)
+                if frame is None:
+                    raise RuntimeError(f"Reverse frame {frame_idx} was not cached")
+                return frame
+            except Exception:
+                self._cap_pos = -1
+                raise
+
     def request_prefetch(
         self,
         center_frame: int,
@@ -646,8 +690,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
             seek=lambda target: self.request_frame(target, reset_view=False, immediate=True),
             busy=self._has_pending_frame_request,
             pause=self.stop_playback,
-            pacer=lambda: self._preview_pacer,
+            # Key holds use Play's render-completion-driven pacing. A separate
+            # adaptive limiter would delay requests that the worker can handle.
             async_seek=True,
+            render_driven=True,
         )
 
         self.playback_active = False
@@ -2211,7 +2257,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
                     12 if timing is None
                     else max(12, int(reader.fps * max(1.0, timing[2]) * 2))
                 )
-                frame = reader.read(frame_idx, max_sequential_gap=max_gap)
+                if self._arrow_key_play.repeating and self._arrow_key_play.direction < 0:
+                    frame = reader.read_reverse(frame_idx)
+                else:
+                    frame = reader.read(frame_idx, max_sequential_gap=max_gap)
             except Exception as exc:
                 error = exc
             self._frame_queue.put(
@@ -2244,7 +2293,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self._arrow_key_play.frame_rendered()
         if self.playback_active:
             self._schedule_playback(delay_ms=1)
-        elif generation != self._paused_decode_gen:
+        elif generation != self._paused_decode_gen and not self._arrow_key_play.direction:
+            # Prefetching while holding an arrow fights the demand decoder and
+            # repeatedly evicts the backward window from the shared cache.
             self._queue_prefetch(frame_idx)
 
     def _handle_frame_decode_error(
@@ -2312,7 +2363,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         except queue.Empty:
             pass
         if not self._closing:
-            self.after(1 if self.playback_active else 8, self._pump_frame_queue)
+            self.after(1 if self.playback_active or self._arrow_key_play.direction else 8, self._pump_frame_queue)
 
     def set_status(self, text: str, auto_clear: bool = True):
         if self.status_clear_job is not None:
@@ -2658,6 +2709,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self._key_play_step()
             self._key_play_delta = 0
             return
+        if self.reader is not None and self._arrow_key_play.direction != delta:
+            self.reader.cancel_prefetch()
         self._arrow_key_play.press(delta)
 
     def _key_play_step(self):

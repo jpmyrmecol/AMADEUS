@@ -30,6 +30,7 @@ class ArrowKeyHoldPlayback:
         pause: Callable[[], None] = lambda: None,
         pacer: Callable[[], AdaptivePreviewPacer] | None = None,
         async_seek: bool = False,
+        render_driven: bool = False,
     ):
         self.owner = owner
         self.current_frame = current_frame
@@ -41,6 +42,7 @@ class ArrowKeyHoldPlayback:
         self.pause = pause
         self.pacer = pacer
         self.async_seek = async_seek
+        self.render_driven = render_driven
         self._async_started_at: float | None = None
         self.direction = 0
         self.repeating = False
@@ -144,6 +146,10 @@ class ArrowKeyHoldPlayback:
             return  # Stay held at the video boundary without polling.
 
         if self.busy():
+            if self.render_driven:
+                # The async frame completion wakes us immediately. Do not
+                # poll while the decoder is busy or accumulate extra requests.
+                return
             delay_ms = 8
         else:
             remaining = (math.floor(self._progress) + 1 - self._progress) / rate
@@ -158,3 +164,8 @@ class ArrowKeyHoldPlayback:
         self._async_started_at = None
         if started is not None and self.pacer is not None:
             self.pacer().observe_frame(time.monotonic() - started)
+        if self.render_driven and self.direction and self.repeating:
+            # Like Play, advance the timeline immediately after a frame
+            # actually renders rather than waiting for an 8-ms polling tick.
+            self._cancel("_timer")
+            self._timer = self.owner.after(1, self._tick)
