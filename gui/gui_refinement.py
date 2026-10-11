@@ -2799,7 +2799,19 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self._key_play_step()
             self._key_play_delta = 0
             return
+        new_press = self._arrow_key_play.direction != delta
         self._arrow_key_play.press(delta)
+        if (
+            new_press
+            and delta < 0
+            and self.reader is not None
+            and self._arrow_key_play.direction == -1
+        ):
+            # Warm the reverse buffer during the 220-ms hold-detection delay.
+            # A later confirmed hold uses the same Play engine and replenisher.
+            self.reader.request_prefetch(
+                self._navigation_base_frame(), forward=0, backward=PREFETCH_BACKWARD
+            )
 
     def _key_play_step(self):
         if self.reader is None:
