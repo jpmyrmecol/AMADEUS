@@ -47,6 +47,7 @@ from main.video_encoders import (
 from main.video_frame_count import detect_seekable_frame_count
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
 from gui.preview_playback_timing import AdaptivePreviewPacer
+from gui.reverse_playback_buffer import PreparedFrame, SmoothPreviewPlayback
 
 
 ctk.set_appearance_mode("dark")
@@ -641,6 +642,7 @@ class PreprocessApp(ctk.CTk):
         self.playback_active = False
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
+        self._smooth_player: SmoothPreviewPlayback | None = None
         self._preview_pacer = AdaptivePreviewPacer()
         self._arrow_key_play = ArrowKeyHoldPlayback(
             self,
@@ -651,6 +653,8 @@ class PreprocessApp(ctk.CTk):
             seek=lambda target: self.set_frame(target, from_playback=True),
             pause=self.stop_playback,
             pacer=lambda: self._preview_pacer,
+            hold_start=lambda direction: self.start_playback(direction, held=True),
+            hold_stop=self._stop_held_playback,
         )
         self._prefetch_after_id: str | None = None
         self._prefetch_cancel = threading.Event()
@@ -1806,6 +1810,9 @@ class PreprocessApp(ctk.CTk):
         self.stop_playback(update_button=False)
         self._cancel_preview_prefetch()
         self._dismiss_seek_edit()
+        if self._smooth_player is not None:
+            self._smooth_player.close()
+            self._smooth_player = None
         if self.reader is not None:
             self.reader.close()
         self.view_initialized = False
@@ -2149,6 +2156,8 @@ class PreprocessApp(ctk.CTk):
             return False
         if self.playback_active and not from_playback:
             self.stop_playback()
+        if not self.playback_active and self._smooth_player is not None:
+            self._smooth_player.invalidate()
         frame_idx = max(0, min(self._last_frame_index(), int(frame_idx)))
         try:
             # Sequentially decode nearby dropped frames instead of repeatedly seeking.
@@ -2158,6 +2167,13 @@ class PreprocessApp(ctk.CTk):
         except Exception as exc:
             self.set_status(f"Frame decode failed: {exc}", auto_clear=False)
             return False
+        return self._present_decoded_frame(frame, frame_idx)
+
+    def _present_decoded_frame(self, frame, frame_idx: int) -> bool:
+        if self.reader is None or self._closing:
+            return False
+        frame_idx = max(0, min(self._last_frame_index(), int(frame_idx)))
+        self.reader._cache_put(frame_idx, frame)
         self.current_frame = frame_idx
         self.frame_bgr_cache = frame
         self.frame_slider.set(frame_idx)
@@ -2207,15 +2223,12 @@ class PreprocessApp(ctk.CTk):
     def set_playback_speed(self, speed: float) -> None:
         if speed not in (1.0, 2.0, 4.0, 0.5, 0.25):
             raise ValueError("Playback speed must be 0.25, 0.5, 1, 2, or 4.")
-        if self._playback_timing is not None and self.reader is not None:
-            now = time.monotonic()
-            anchor_frame, anchor_time, previous_speed = self._playback_timing
-            position = anchor_frame + max(0.0, now - anchor_time) * self.reader.fps * previous_speed
-            self._playback_timing = (position, now, speed)
         self.playback_speed = speed
+        if self.playback_active and self._smooth_player is not None:
+            self._smooth_player.set_speed(speed)
+            direction = -1 if self._playback_timing is not None and self._playback_timing[2] < 0 else 1
+            self._playback_timing = (float(self.current_frame), time.monotonic(), direction * speed)
         self._update_playback_buttons()
-        if self.playback_active:
-            self._schedule_playback_step(delay_ms=1)
 
     def _on_canvas_speed_click(self, event, speed: float) -> str:
         if self.reader is None or self.export_running:
@@ -2229,58 +2242,80 @@ class PreprocessApp(ctk.CTk):
             self.start_playback()
         return "break"
 
-    def start_playback(self) -> None:
-        if self.reader is None or self.playback_active:
+    def _ensure_smooth_player(self):
+        reader = self.reader
+        if reader is None:
+            raise RuntimeError("No video is loaded.")
+        if self._smooth_player is not None and self._smooth_player.reader is reader:
+            return self._smooth_player
+        if self._smooth_player is not None:
+            self._smooth_player.close()
+
+        def seeded_frames(center):
+            with reader._cache_lock:
+                return {index: PreparedFrame(pixels=image)
+                        for index, image in reader.cache.items() if index < center}
+
+        self._smooth_player = SmoothPreviewPlayback(
+            self, reader=reader, fps=reader.fps, frame_count=reader.frame_count,
+            read_forward=lambda index, gap: (
+                reader.read_bgr(index, max_sequential_gap=gap), index),
+            cached_frames=seeded_frames,
+            rotation=reader.rotation_degrees or 0,
+            render=self._present_decoded_frame,
+            on_error=self._smooth_playback_failed,
+            on_boundary=self.stop_playback,
+        )
+        return self._smooth_player
+
+    def _smooth_playback_failed(self, error):
+        self.stop_playback()
+        self.set_status(f"Preview decode failed: {error}", auto_clear=False)
+
+    def _stop_held_playback(self, direction):
+        timing = self._playback_timing
+        if self.playback_active and timing is not None and timing[2] * direction > 0:
+            self.stop_playback()
+
+    def start_playback(self, direction: int = 1, *, held: bool = False) -> None:
+        if self.reader is None or self.playback_active or self.export_running:
             return
-        if self.current_frame >= self.out_frame:
-            if not self.set_frame(self.in_frame):
+        if direction not in (-1, 1):
+            raise ValueError("Playback direction must be -1 or 1.")
+        lower = 0 if held else self.in_frame
+        upper = self._last_frame_index() if held else self.out_frame
+        if direction > 0 and self.current_frame >= upper:
+            if held or not self.set_frame(lower):
                 return
+        elif direction < 0 and self.current_frame <= lower:
+            return
         self._cancel_preview_prefetch()
-        self._preview_pacer.resume()
+        try:
+            pipeline = self._ensure_smooth_player()
+            pipeline.lower_bound, pipeline.upper_bound = lower, upper
+            pipeline.start(direction, self.playback_speed)
+        except Exception as exc:
+            self.set_status(f"Preview playback initialization failed: {exc}", auto_clear=False)
+            return
         self.playback_active = True
-        self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
+        self._playback_timing = (float(self.current_frame), time.monotonic(),
+                                 direction * self.playback_speed)
         self._update_playback_buttons()
-        self._schedule_playback_step(delay_ms=1)
 
     def _schedule_playback_step(self, *, delay_ms: int = 8) -> None:
-        if self.reader is None or not self.playback_active:
-            return
-        if self.playback_job is not None:
-            self.after_cancel(self.playback_job)
-        self.playback_job = self.after(max(1, int(delay_ms)), self._playback_step)
+        if self.playback_active and self._smooth_player is not None:
+            self._smooth_player._schedule(delay_ms)
 
     def _playback_step(self) -> None:
-        self.playback_job = None
-        if self.reader is None or not self.playback_active or self._playback_timing is None:
-            return
-        now = time.monotonic()
-        anchor_frame, anchor_time, speed = self._playback_timing
-        rate = self.reader.fps * speed
-        frame_idx = min(self.out_frame, int(anchor_frame + max(0.0, now - anchor_time) * rate))
-        if frame_idx > self.current_frame:
-            wait_ms = self._preview_pacer.delay_ms(now, rate)
-            if wait_ms > 0:
-                self._schedule_playback_step(delay_ms=wait_ms)
-                return
-            started = time.monotonic()
-            self._preview_pacer.begin_frame(started)
-            rendered = self.set_frame(frame_idx, from_playback=True)
-            self._preview_pacer.observe_frame(time.monotonic() - started)
-            if not rendered:
-                self.stop_playback()
-                return
-        if self.current_frame >= self.out_frame:
-            self.stop_playback()
-            return
-        now = time.monotonic()
-        next_due = anchor_time + (self.current_frame + 1 - anchor_frame) / rate
-        timeline_wait = max(1, math.ceil((next_due - now) * 1000))
-        self._schedule_playback_step(delay_ms=max(timeline_wait, self._preview_pacer.delay_ms(now, rate)))
+        if self._smooth_player is not None:
+            self._smooth_player._tick()
 
     def stop_playback(self, update_button: bool = True) -> None:
         was_active = self.playback_active
         self.playback_active = False
         self._playback_timing = None
+        if self._smooth_player is not None:
+            self._smooth_player.stop()
         if self.playback_job is not None:
             try:
                 self.after_cancel(self.playback_job)
@@ -3361,6 +3396,9 @@ class PreprocessApp(ctk.CTk):
                 self.after_cancel(self.export_poll_job)
             except tk.TclError:
                 pass
+        if self._smooth_player is not None:
+            self._smooth_player.close()
+            self._smooth_player = None
         if self.reader is not None:
             self.reader.close()
         self.destroy()
