@@ -5,6 +5,7 @@ from multi_staged_association import *
 from multi_staged_association import _artifact_path, _worker_budget, _auto_num_workers
 import multi_staged_association as fixed
 from tracking_video_inputs import configured_tracking_video_files
+from variable_population import PopulationPolicy, load_population_policy
 import json
 
 
@@ -23,12 +24,16 @@ def save_final_result_csv(session_path, model_name, dataset_name, run_name,
 
 def track_from_detection_frames(detection_frames, num_objects, nms_iou, max_age,
                                 strong_iou, strong_dir_deg, tracking_cost=None,
-                                sharp_turn_accept_run=3):
-    """Associate only live tracks; an unmatched detection creates a new ID.
+                                sharp_turn_accept_run=3, population_policy=None,
+                                frame_size=None):
+    """Associate observed tracks and confirm location-dependent birth candidates.
 
-    NUM_OBJECTS is deliberately ignored. After MAX_AGE missing frames an ID
-    retires permanently. Missing rows remain NaN, including before birth and
-    after last observation. No backward pass, ungated recovery, or gap fill.
+    NUM_OBJECTS is ignored. Edge mode requires consecutive birth observations
+    and retains lost interior IDs longer. Confirmed rows are backdated to the
+    first real observation; missing rows remain NaN. Anywhere mode preserves
+    immediate births and uniform MAX_AGE retirement.
+    Supply actual (width, height) via frame_size for the default edge policy,
+    or pass an explicit PopulationPolicy for calibrated/custom behavior.
     """
     frames = sorted(detection_frames)
     if not frames:
@@ -36,6 +41,11 @@ def track_from_detection_frames(detection_frames, num_objects, nms_iou, max_age,
     max_age = int(max_age)
     if max_age < 1:
         raise ValueError('MAX_AGE must be at least 1.')
+    policy = population_policy or PopulationPolicy(
+        frame_size=frame_size, detection_frames=detection_frames, max_age=max_age,
+        interior_max_age=max(30, max_age))
+    association_max_age = (max_age if policy.mode == 'anywhere'
+                           else max(max_age, policy.interior_max_age))
     tc = dict(tracking_cost or {})
     names = ('pos', 'obb', 'class', 'score', 'assign_type', 'assign_type_history',
              'assign_val', 'assign_total', 'assign_iou_cost', 'assign_direction_cost',
@@ -44,6 +54,9 @@ def track_from_detection_frames(detection_frames, num_objects, nms_iou, max_age,
     buffers = {name + '_buf': {} for name in names}
     tracks = {}
     next_id = 0
+    next_track = 0
+    rejected_candidates = 0
+    births = {'edge': 0, 'interior': 0}
     previous_frame = frames[0] - 1
     for frame in tqdm_it(frames, desc='ID tracking (variable)', unit='frame'):
         obbs, scores, classes = detection_frames[frame]
@@ -60,8 +73,18 @@ def track_from_detection_frames(detection_frames, num_objects, nms_iou, max_age,
         directions = np.asarray([unit_vec_to_angle_deg(closest_long_axis_direction(
             obbs[i], float(classes[d]))) for i, d in enumerate(keep)])
         # Expire before association, also accounting for absent frame keys.
-        tracks = {tid: tr for tid, tr in tracks.items()
-                  if frame - tr['last_frame'] - 1 < max_age}
+        retained = {}
+        for tid, tr in tracks.items():
+            confirmed = tr['output_id'] is not None
+            # A missing frame resets a tentative candidate completely. Old
+            # intermittent false positives cannot accumulate confirmation hits.
+            alive = (frame - tr['last_frame'] - 1 < policy.max_age_for_track(tr['obb'])
+                     if confirmed else frame - tr['last_frame'] == 1)
+            if alive:
+                retained[tid] = tr
+            elif not confirmed:
+                rejected_candidates += 1
+        tracks = retained
         for tr in tracks.values():
             for _ in range(frame - previous_frame):
                 tr['kf'].predict()
@@ -69,48 +92,59 @@ def track_from_detection_frames(detection_frames, num_objects, nms_iou, max_age,
             tr['pred'] = tr['obb'] + shift
         assigned = {}
         used = set()
-        active = sorted(tracks)
-        for stage, strong, heading, mode in (
-            (ATYPE_S1, True, True, 'heading'), (ATYPE_S2, True, False, 'axis'),
-            (ATYPE_S3, False, True, 'heading'), (ATYPE_S4, False, False, 'axis')):
-            ids = [tid for tid in active if tid not in assigned]
+        # Confirmed animals have first claim through all association stages.
+        # Tentative false positives must not steal their observations.
+        active_groups = (
+            sorted(t for t in tracks if tracks[t]['output_id'] is not None),
+            sorted(t for t in tracks if tracks[t]['output_id'] is None),
+        )
+        for active in active_groups:
+            for stage, strong, heading, mode in (
+                (ATYPE_S1, True, True, 'heading'), (ATYPE_S2, True, False, 'axis'),
+                (ATYPE_S3, False, True, 'heading'), (ATYPE_S4, False, False, 'axis')):
+                ids = [tid for tid in active if tid not in assigned]
+                dets = [d for d in range(len(obbs)) if d not in used]
+                if not ids or not dets:
+                    continue
+                matches, costs = assign_ids_iou_mode(
+                    [tracks[t]['pred'] for t in ids], [tracks[t]['obb'] for t in ids],
+                    [frame-tracks[t]['last_frame']-1 for t in ids], obbs[dets],
+                    directions[dets], [tracks[t]['direction'] for t in ids],
+                    strong_iou, strong_dir_deg, association_max_age, require_iou_gate=strong,
+                    require_dir_gate=heading, direction_cost_mode=mode,
+                    iou_weight=float(tc.get('IOU_WEIGHT', 1)),
+                    direction_weight=float(tc.get('DIRECTION_WEIGHT', 1)),
+                    miss_weight=float(tc.get('MISS_WEIGHT', 1)))
+                for i, d in enumerate(matches):
+                    if d is not None:
+                        assigned[ids[i]] = (dets[d], stage, float(costs[i][1]))
+                        used.add(dets[d])
+            # Distance recovery is allowed only on consecutive observations, with
+            # the existing spatial/velocity gate. Missing tracks never use a
+            # distance gate that expands indefinitely with their age.
+            ids = [t for t in active if t not in assigned and frame-tracks[t]['last_frame']==1]
             dets = [d for d in range(len(obbs)) if d not in used]
-            if not ids or not dets:
-                continue
-            matches, costs = assign_ids_iou_mode(
-                [tracks[t]['pred'] for t in ids], [tracks[t]['obb'] for t in ids],
-                [frame-tracks[t]['last_frame']-1 for t in ids], obbs[dets],
-                directions[dets], [tracks[t]['direction'] for t in ids],
-                strong_iou, strong_dir_deg, max_age, require_iou_gate=strong,
-                require_dir_gate=heading, direction_cost_mode=mode,
-                iou_weight=float(tc.get('IOU_WEIGHT', 1)),
-                direction_weight=float(tc.get('DIRECTION_WEIGHT', 1)),
-                miss_weight=float(tc.get('MISS_WEIGHT', 1)))
-            for i, d in enumerate(matches):
-                if d is not None:
-                    assigned[ids[i]] = (dets[d], stage, float(costs[i][1]))
-                    used.add(dets[d])
-        # Distance recovery is allowed only on consecutive observations, with
-        # the existing spatial/velocity gate. Missing tracks never use a
-        # distance gate that expands indefinitely with their age.
-        ids = [t for t in active if t not in assigned and frame-tracks[t]['last_frame']==1]
-        dets = [d for d in range(len(obbs)) if d not in used]
-        if ids and dets:
-            matches, costs = assign_ids_gated_distance_mode(
-                [tracks[t]['pred'] for t in ids], [tracks[t]['obb'] for t in ids],
-                [float(np.linalg.norm(tracks[t]['kf'].x[2:4])) for t in ids],
-                [0]*len(ids), obbs[dets], max_age,
-                distance_weight=float(tc.get('DISTANCE_WEIGHT', 1)),
-                miss_weight=float(tc.get('MISS_WEIGHT', 1)))
-            for i, d in enumerate(matches):
-                if d is not None:
-                    assigned[ids[i]] = (dets[d], ATYPE_VEL_DIST, float(costs[i][1]))
-                    used.add(dets[d])
+            if ids and dets:
+                matches, costs = assign_ids_gated_distance_mode(
+                    [tracks[t]['pred'] for t in ids], [tracks[t]['obb'] for t in ids],
+                    [float(np.linalg.norm(tracks[t]['kf'].x[2:4])) for t in ids],
+                    [0]*len(ids), obbs[dets], max_age,
+                    distance_weight=float(tc.get('DISTANCE_WEIGHT', 1)),
+                    miss_weight=float(tc.get('MISS_WEIGHT', 1)))
+                for i, d in enumerate(matches):
+                    if d is not None:
+                        assigned[ids[i]] = (dets[d], ATYPE_VEL_DIST, float(costs[i][1]))
+                        used.add(dets[d])
         for d in range(len(obbs)):
             if d not in used:
-                tid = next_id
-                next_id += 1
-                tracks[tid] = {'kf': create_position_kf(*obb_center(obbs[d]))}
+                tid = next_track
+                next_track += 1
+                tracks[tid] = {
+                    'kf': create_position_kf(*obb_center(obbs[d])),
+                    'output_id': None, 'hits': 0, 'pending_rows': [],
+                    'required_hits': policy.threshold_for_birth(obbs[d]),
+                    'birth_zone': 'edge' if policy.is_edge(obbs[d]) else 'interior',
+                }
                 assigned[tid] = (d, ATYPE_INIT, np.nan)
         for tid, (d, stage, value) in assigned.items():
             tr = tracks[tid]
@@ -126,8 +160,20 @@ def track_from_detection_frames(detection_frames, num_objects, nms_iou, max_age,
                 assign_direction_cost=(np.nan,), assign_distance_cost=(np.nan,),
                 assign_score_cost=(np.nan,), obb_source=(OBB_SOURCE_DETECTED,),
                 obb_corrected=(0.,), direction_corrected=(0.,), switch_corrected=(0.,))
-            for name, val in row.items():
-                buffers[name+'_buf'].setdefault(tid, {})[frame] = val
+            tr['hits'] += 1
+            if tr['output_id'] is None:
+                tr['pending_rows'].append((frame, row))
+                if tr['hits'] < tr['required_hits']:
+                    continue
+                tr['output_id'] = next_id
+                next_id += 1
+                births[tr['birth_zone']] += 1
+                rows = tr.pop('pending_rows')
+            else:
+                rows = [(frame, row)]
+            for observed_frame, observed_row in rows:
+                for name, val in observed_row.items():
+                    buffers[name+'_buf'].setdefault(tr['output_id'], {})[observed_frame] = val
         previous_frame = frame
     # Boundary NaNs retain the complete video range without dense per-ID dicts.
     for tid in range(next_id):
@@ -139,6 +185,11 @@ def track_from_detection_frames(detection_frames, num_objects, nms_iou, max_age,
                     default = (0.,)
                 buffers[name+'_buf'].setdefault(tid, {}).setdefault(frame, default)
     buffers['variable_frame_range'] = (frames[0], frames[-1])
+    buffers['variable_population_stats'] = {
+        **policy.summary(), 'confirmed_births': births,
+        'rejected_candidates': rejected_candidates + sum(
+            tr['output_id'] is None for tr in tracks.values()),
+    }
     return buffers
 
 
@@ -196,6 +247,10 @@ def _run_single_tracking_job(spec: dict) -> None:
         strong_dir_deg=strong_dir_deg,
         tracking_cost=tracking_cost_cfg,
         sharp_turn_accept_run=sharp_turn_accept_run,
+        population_policy=load_population_policy(
+            spec['population_config'], session_root=session_path,
+            frame_size=(info['width'], info['height']),
+            detection_frames=detection_frames),
     )
 
     print(f"Running variable-population tracking. [{run_name}:{info['name']}]")
@@ -205,6 +260,9 @@ def _run_single_tracking_job(spec: dict) -> None:
     )
     num_objects = len(fwd_buffers['obb_buf'])
     os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, 'population_policy.json'), 'w', encoding='utf-8') as f:
+        json.dump(fwd_buffers['variable_population_stats'], f, indent=2)
+    print(f"Population policy: {fwd_buffers['variable_population_stats']}", flush=True)
     # Remove only stale derived files in this dedicated variable-mode directory.
     import glob
     stale_patterns = {
@@ -298,7 +356,8 @@ def main() -> None:
             f'[INFO] id_tracking video={video_name}, usable_frames={frame_info.usable_frame_count}, '
             f'frame_range={first_frame}-{last_frame}'
         )
-        video_infos.append({'path': video_path, 'name': video_name, 'first_frame': first_frame, 'last_frame': last_frame})
+        video_infos.append({'path': video_path, 'name': video_name, 'first_frame': first_frame, 'last_frame': last_frame,
+                            'width': frame_info.width, 'height': frame_info.height})
 
     specs = []
     for info in video_infos:
@@ -317,6 +376,7 @@ def main() -> None:
                 'max_age': max_age,
                 'tracking_cost_cfg': tracking_cost_cfg,
                 'sharp_turn_accept_run': sharp_turn_accept_run,
+                'population_config': {'analysis': dict(analysis)},
                 'export_final_result': bool(cfg.get('skip_refinement', False)),
             })
 
