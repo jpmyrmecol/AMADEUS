@@ -3744,11 +3744,19 @@ def main() -> None:
     parser.add_argument("--load-config", dest="load_config", default="")
     parser.add_argument("--without-direction-estimation", type=int, choices=(0, 1), default=None)
     parser.add_argument("--video", default="")
+    parser.add_argument("--dropped-video", default="")
     parser.add_argument("--session", default="")
     args = parser.parse_args()
     configure_taskbar_identity()
     app = EasyTrackingGUI()
-    if args.video or args.session:
+    if args.dropped_video:
+        # Reuse native Easy Tracking D&D: compatibility check, optional
+        # conversion, and automatic session-path derivation.
+        app.after(
+            300,
+            lambda path=args.dropped_video: app._handle_dropped_training_video(path),
+        )
+    elif args.video or args.session:
         app.after(200, lambda: app._apply_startup_paths(args.video, args.session))
     if args.load_config and os.path.isfile(args.load_config):
         app.after(400, lambda p=args.load_config: app._load_config_path(p))
