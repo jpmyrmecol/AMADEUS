@@ -437,11 +437,11 @@ class VideoFrameReader:
             return cv2.rotate(frame_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
         return frame_bgr
 
-    def _read_uncached(self, frame_idx: int) -> np.ndarray:
+    def _read_uncached(self, frame_idx: int, *, max_sequential_gap: int = 12) -> np.ndarray:
         frame_idx = max(0, min(max(0, self.frame_count - 1), int(frame_idx)))
         with self._lock:
             gap = frame_idx - self._cap_pos
-            if self._cap_pos >= 0 and 0 < gap <= 12:
+            if self._cap_pos >= 0 and 0 < gap <= max_sequential_gap:
                 for _ in range(gap):
                     if not self.cap.grab():
                         raise RuntimeError(f"Failed to skip to frame {frame_idx} in {self.video_path}")
@@ -462,14 +462,14 @@ class VideoFrameReader:
             while len(self.cache) > self.cache_capacity:
                 self.cache.popitem(last=False)
 
-    def read_bgr(self, frame_idx: int) -> np.ndarray:
+    def read_bgr(self, frame_idx: int, *, max_sequential_gap: int = 12) -> np.ndarray:
         frame_idx = max(0, min(max(0, self.frame_count - 1), int(frame_idx)))
         with self._cache_lock:
             cached = self.cache.get(frame_idx)
             if cached is not None:
                 self.cache.move_to_end(frame_idx)
                 return cached.copy()
-        frame = self._read_uncached(frame_idx)
+        frame = self._read_uncached(frame_idx, max_sequential_gap=max_sequential_gap)
         self._cache_put(frame_idx, frame)
         return frame.copy()
 
@@ -2151,7 +2151,10 @@ class PreprocessApp(ctk.CTk):
             self.stop_playback()
         frame_idx = max(0, min(self._last_frame_index(), int(frame_idx)))
         try:
-            frame = self.reader.read_bgr(frame_idx)
+            # Sequentially decode nearby dropped frames instead of repeatedly seeking.
+            gap_limit = (max(12, int(self.reader.fps * max(1.0, self.playback_speed) * 2))
+                         if from_playback else 12)
+            frame = self.reader.read_bgr(frame_idx, max_sequential_gap=gap_limit)
         except Exception as exc:
             self.set_status(f"Frame decode failed: {exc}", auto_clear=False)
             return False

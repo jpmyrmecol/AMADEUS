@@ -283,10 +283,11 @@ class VideoFrameReader:
         return None
 
     def _decode_bgr(
-        self, cap: cv2.VideoCapture, frame_idx: int, current_pos: int
+        self, cap: cv2.VideoCapture, frame_idx: int, current_pos: int,
+        *, max_sequential_gap: int = 12,
     ) -> "tuple[np.ndarray, int, int]":
         gap = frame_idx - current_pos
-        if current_pos >= 0 and 0 < gap <= 12:
+        if current_pos >= 0 and 0 < gap <= max_sequential_gap:
             for _ in range(gap):
                 if not cap.grab():
                     cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
@@ -316,7 +317,9 @@ class VideoFrameReader:
             frame_idx = max(0, min(self.frame_count - 1, frame_idx))
         return frame_idx
 
-    def read_bgr_with_index(self, frame_idx: int) -> "tuple[np.ndarray, int]":
+    def read_bgr_with_index(
+        self, frame_idx: int, *, max_sequential_gap: int = 12,
+    ) -> "tuple[np.ndarray, int]":
         frame_idx = self._clamp_frame_idx(frame_idx)
         with self._cache_lock:
             if frame_idx in self.cache:
@@ -327,12 +330,13 @@ class VideoFrameReader:
                 if frame_idx in self.cache:
                     self.cache.move_to_end(frame_idx)
                     return self.cache[frame_idx].copy(), frame_idx
-            frame, self._cap_pos, actual_idx = self._decode_bgr(self.cap, frame_idx, self._cap_pos)
+            frame, self._cap_pos, actual_idx = self._decode_bgr(self.cap, frame_idx, self._cap_pos,
+                                                                  max_sequential_gap=max_sequential_gap)
             self._cache_put(actual_idx, frame)
             return frame.copy(), actual_idx
 
-    def read_bgr(self, frame_idx: int) -> np.ndarray:
-        frame, _actual_idx = self.read_bgr_with_index(frame_idx)
+    def read_bgr(self, frame_idx: int, *, max_sequential_gap: int = 12) -> np.ndarray:
+        frame, _actual_idx = self.read_bgr_with_index(frame_idx, max_sequential_gap=max_sequential_gap)
         return frame
 
     def prefetch(self, frame_idx: int):
@@ -3862,7 +3866,11 @@ class CrossingReviewApp(ctk.CTk):
             self.frame_scale.configure(from_=0, to=max(0, self.frame_count - 1))
         frame_idx = max(0, min(self.frame_count - 1, int(frame_idx)))
         try:
-            frame_bgr, actual_idx = self.reader.read_bgr_with_index(frame_idx)
+            # Keep playback gaps sequential to avoid unnecessary long-GOP seeks.
+            gap_limit = (max(12, int(self._playback_fps() * max(1.0, self.playback_speed) * 2))
+                         if from_playback else 12)
+            frame_bgr, actual_idx = self.reader.read_bgr_with_index(
+                frame_idx, max_sequential_gap=gap_limit)
         except Exception as exc:
             self.frame_var.set(self.current_frame)
             self.frame_scale.set(self.current_frame)
