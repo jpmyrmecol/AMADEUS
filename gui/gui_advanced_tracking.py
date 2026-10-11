@@ -480,6 +480,7 @@ class ConfigGUI(ctk.CTk):
         btn_bar = _layout_frame(self._content_host.content)
         btn_bar.pack(fill="x", padx=10, pady=(5, 0))
         self.sections = {}
+        self._sections_ready = False
         self.default_value_markers = {}
         self._parameter_rows = {}
         # Last-measured AUTO_PARAMS values (from Adjust Parameters or a loaded
@@ -822,6 +823,7 @@ class ConfigGUI(ctk.CTk):
             "write", self._refresh_skip_dependent_states
         )
         self.variable_count.trace_add("write", lambda *_: self._toggle_variable_count())
+        self._sections_ready = True
         self._refresh_skip_dependent_states()
 
         self._apply_prefill_paths()
@@ -1272,7 +1274,7 @@ class ConfigGUI(ctk.CTk):
         Skip variables never change one another. A parameter is disabled only
         when every stage that consumes it is skipped.
         """
-        if not getattr(self, "sections", None):
+        if not self._sections_ready:
             return
 
         def set_keys(section: str, keys, enabled: bool) -> None:
