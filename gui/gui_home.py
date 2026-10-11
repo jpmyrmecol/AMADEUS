@@ -589,10 +589,11 @@ def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
 def install_home_video_drop(
     root: ctk.CTk, targets: tuple[tuple[tk.Canvas, str], ...],
 ) -> None:
-    """Drop a video on a panel to open *that panel's* GUI.
+    """Route one native Home drop by its screen position to the owning panel.
 
-    Multi Config Batch deliberately remains click-only. The same drop parser
-    and validation used elsewhere handles paths containing spaces or Unicode.
+    Register the top-level window once with tkdnd. Registering several sibling
+    canvases separately can leave some panels without native drop events.
+    Multi Config Batch has no matching target and remains drop-disabled.
     """
     if not root.winfo_exists():
         return
@@ -600,24 +601,26 @@ def install_home_video_drop(
     def show_rejection(message: str) -> None:
         messagebox.showwarning("Video drop", message, parent=root)
 
-    for canvas, script in targets:
-        def on_video(path: str, target_script: str = script) -> None:
+    def on_video(path: str) -> None:
+        x_root, y_root = root.winfo_pointerxy()
+        for canvas, script in targets:
+            x0, y0 = canvas.winfo_rootx(), canvas.winfo_rooty()
+            if not (x0 <= x_root < x0 + canvas.winfo_width()
+                    and y0 <= y_root < y0 + canvas.winfo_height()):
+                continue
             try:
-                launch_gui_script(
-                    target_script, "--dropped-video", os.path.abspath(path),
-                )
+                launch_gui_script(script, "--dropped-video", os.path.abspath(path))
             except OSError as exc:
-                messagebox.showerror(
-                    "Unable to open GUI", str(exc), parent=root,
-                )
+                messagebox.showerror("Unable to open GUI", str(exc), parent=root)
+            return
 
-        install_canvas_file_drop(
-            root, canvas,
-            allowed_suffixes=VIDEO_DROP_SUFFIXES,
-            on_path=on_video,
-            status_callback=show_rejection,
-            label="video",
-        )
+    install_canvas_file_drop(
+        root, root,
+        allowed_suffixes=VIDEO_DROP_SUFFIXES,
+        on_path=on_video,
+        status_callback=show_rejection,
+        label="video",
+    )
 
 
 def main() -> int:
