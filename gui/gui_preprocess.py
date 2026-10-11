@@ -648,6 +648,8 @@ class PreprocessApp(ctk.CTk):
         self.cursor_position = None
 
         self._closing = False
+        self._space_key_down = False
+        self._space_release_job: str | None = None
         self.playback_active = False
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
@@ -1347,6 +1349,8 @@ class PreprocessApp(ctk.CTk):
         for key in ("Left", "Right"):
             self.bind_all(f"<KeyPress-{key}>", self._on_frame_navigation_key, add="+")
             self.bind_all(f"<KeyRelease-{key}>", self._on_frame_navigation_key_release, add="+")
+        self.bind_all("<KeyPress-space>", self._on_space_press, add="+")
+        self.bind_all("<KeyRelease-space>", self._on_space_release, add="+")
         self.bind("<FocusOut>", self._on_arrow_focus_out, add="+")
 
     def _last_frame_index(self) -> int:
@@ -2092,6 +2096,42 @@ class PreprocessApp(ctk.CTk):
             return
         self.set_frame(int(round(float(value))))
 
+    @staticmethod
+    def _is_keyboard_text_input(widget) -> bool:
+        try:
+            widget_class = widget.winfo_class()
+        except (AttributeError, tk.TclError):
+            return False
+        return isinstance(widget, (tk.Entry, tk.Spinbox, tk.Text)) or widget_class in {
+            "Entry", "TEntry", "Spinbox", "TSpinbox", "Text", "TCombobox",
+        }
+
+    def _on_space_press(self, event) -> str | None:
+        if self._is_keyboard_text_input(event.widget):
+            return None  # Space must still work in editable fields.
+        if self.reader is None or self.export_running or self._closing:
+            return None
+        if self._space_release_job is not None:
+            self.after_cancel(self._space_release_job)
+            self._space_release_job = None
+        if not self._space_key_down:
+            self._space_key_down = True
+            self.toggle_playback()
+        return "break"
+
+    def _on_space_release(self, event) -> str | None:
+        if self._is_keyboard_text_input(event.widget):
+            return None
+        if self._space_release_job is not None:
+            self.after_cancel(self._space_release_job)
+        # Distinguish real release from synthetic release/press autorepeat on X11.
+        self._space_release_job = self.after(35, self._release_space_guard)
+        return "break"
+
+    def _release_space_guard(self) -> None:
+        self._space_release_job = None
+        self._space_key_down = False
+
     def _on_frame_navigation_key(self, event) -> str | None:
         if self.reader is None or self.export_running:
             return None
@@ -2113,14 +2153,18 @@ class PreprocessApp(ctk.CTk):
         delta = {"Left": -1, "Right": 1}.get(str(getattr(event, "keysym", "")))
         if delta is None:
             return None
+        new_press = self._arrow_key_play.direction != delta
         self._arrow_key_play.press(delta)
-        if delta < 0 and self._arrow_key_play.direction == -1:
-            # Reuse the hold-detection interval to warm the reverse buffer.
+        if new_press and delta < 0 and self._arrow_key_play.direction == -1:
+            # Exactly one speculative warm-up per physical hold. Native key
+            # autorepeat must not restart decoding every few milliseconds.
             try:
                 pipeline = self._ensure_smooth_player()
-                pipeline.reverse_buffer.prepare(self.current_frame, self.playback_speed)
+                pipeline.reverse_buffer.prepare(
+                    self.current_frame, self.playback_speed, warm_blocks=2
+                )
             except Exception:
-                pass  # Preserve single-frame stepping if reverse setup fails.
+                pass  # A tap must still step even if PyAV cannot initialize.
         return "break"
 
     def _on_frame_navigation_key_release(self, event) -> str | None:
@@ -2137,13 +2181,22 @@ class PreprocessApp(ctk.CTk):
             return None
         delta = {"Left": -1, "Right": 1}.get(str(getattr(event, "keysym", "")))
         if delta is not None:
-            self._arrow_key_play.release(delta)
+            if sys.platform == "linux":
+                # X11 may deliver synthetic release/press pairs on autorepeat.
+                self._arrow_key_play.release(delta)
+            else:
+                # Windows/macOS release is physical: end held playback now.
+                self._arrow_key_play.stop()
             return "break"
         return None
 
     def _on_arrow_focus_out(self, event) -> None:
         if event.widget is self:
             self._arrow_key_play.stop()
+            if self._space_release_job is not None:
+                self.after_cancel(self._space_release_job)
+                self._space_release_job = None
+            self._space_key_down = False
 
     def _on_frame_slider_double_click(self, _event=None) -> None:
         if self.reader is None or self.export_running:
@@ -2328,10 +2381,14 @@ class PreprocessApp(ctk.CTk):
 
     def stop_playback(self, update_button: bool = True) -> None:
         was_active = self.playback_active
+        reverse_was_active = (
+            self._playback_timing is not None and self._playback_timing[2] < 0
+        )
         self.playback_active = False
         self._playback_timing = None
         if self._smooth_player is not None:
-            self._smooth_player.stop()
+            # A delayed reverse decode must not move the playhead after release.
+            self._smooth_player.stop(discard_pending=reverse_was_active)
         if self.playback_job is not None:
             try:
                 self.after_cancel(self.playback_job)
@@ -3399,6 +3456,10 @@ class PreprocessApp(ctk.CTk):
                 self.update()
                 time.sleep(0.03)
         self._closing = True
+        if self._space_release_job is not None:
+            self.after_cancel(self._space_release_job)
+            self._space_release_job = None
+        self._space_key_down = False
         self._arrow_key_play.stop()
         self.stop_playback(update_button=False)
         self._cancel_preview_prefetch()
