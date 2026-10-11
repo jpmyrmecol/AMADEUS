@@ -123,6 +123,5 @@ if (-not $uv) {
     exit 1
 }
 
-Write-Status "[AMADEUS] Using uv ${required}: $uv"
 Write-Output $uv
 exit 0
