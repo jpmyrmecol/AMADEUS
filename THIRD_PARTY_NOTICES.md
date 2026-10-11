@@ -29,13 +29,62 @@ SOFTWARE.
 
 ## PyAV (reverse playback)
 
-Refinement uses `av==16.0.1` (PyAV) to decode compressed video into a
-bounded reverse-playback buffer. PyAV's Python bindings are BSD-3-Clause
-licensed. Its binary wheels bundle FFmpeg libraries and codecs with additional
-licensing requirements, including possible GPL components.
-For sources and licensing details, see
-[PyAV](https://github.com/PyAV-Org/PyAV) and
-[FFmpeg licensing](https://ffmpeg.org/legal.html).
+Refinement uses the pinned `av==16.0.1` (PyAV) package for access to
+FFmpeg video decoding and for retaining decoded frames in its reverse-playback
+buffer. AMADEUS installs PyAV as a Python dependency; PyAV binary wheels
+are not checked into this repository.
+
+PyAV's own source code is licensed under the BSD 3-Clause License.
+The following copyright and license notice is reproduced from
+[PyAV v16.0.1 LICENSE.txt](https://github.com/PyAV-Org/PyAV/blob/v16.0.1/LICENSE.txt):
+
+### PyAV BSD 3-Clause License
+
+Copyright retained by original committers. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of the project nor the names of its contributors may be
+      used to endorse or promote products derived from this software without
+      specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY DIRECT,
+INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+### FFmpeg and codecs in PyAV wheels
+
+The official PyAV binary wheels include FFmpeg libraries and other codec
+dependencies built for PyAV. These are **separate** from the FFmpeg executable
+that AMADEUS manages for video inspection and export, described below.
+
+The BSD 3-Clause License above covers PyAV's own code; it does not replace
+the licenses of the FFmpeg libraries or other components in those wheels.
+FFmpeg is generally LGPL-2.1-or-later, but an FFmpeg build that enables
+GPL-covered components is subject to GPL terms. Other bundled libraries may
+have their own license and source-distribution requirements. The applicable
+terms depend on the precise wheel and platform-specific build configuration;
+this notice does not assert a single license for every PyAV wheel.
+
+When redistributing PyAV wheels or packaging them into a standalone AMADEUS
+distribution, review the corresponding build's license notices, component
+licenses, and any applicable source-availability obligations. References:
+
+- [PyAV v16.0.1 source and license](https://github.com/PyAV-Org/PyAV/tree/v16.0.1)
+- [PyAV FFmpeg binary build sources](https://github.com/PyAV-Org/pyav-ffmpeg)
+- [FFmpeg licensing and compliance guidance](https://ffmpeg.org/legal.html)
 
 ## FFmpeg
 
