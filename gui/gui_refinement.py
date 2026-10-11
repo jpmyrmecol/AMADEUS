@@ -340,6 +340,7 @@ class VideoFrameReader:
         self._prefetch_cond = threading.Condition()
         self._prefetch_request: tuple[int, int, int, int] | None = None
         self._prefetch_generation = 0
+        self._reverse_prefetch_active_center: int | None = None
         self._prefetch_thread: threading.Thread | None = None
         if self.prefetch_cap is not None:
             self._prefetch_thread = threading.Thread(
@@ -504,13 +505,21 @@ class VideoFrameReader:
         if self.prefetch_cap is None or self._closed.is_set():
             return
         center_frame = int(center_frame)
+        forward = max(0, int(forward))
+        backward = max(0, int(backward))
         with self._prefetch_cond:
+            # Key-press warming and the subsequent long-hold start commonly
+            # request the same reverse window. Keep the work already in
+            # progress instead of discarding and decoding it again.
+            if forward == 0 and backward > 0:
+                if self._reverse_prefetch_active_center == center_frame:
+                    return
+                self._reverse_prefetch_active_center = center_frame
+            else:
+                self._reverse_prefetch_active_center = None
             self._prefetch_generation += 1
             self._prefetch_request = (
-                self._prefetch_generation,
-                center_frame,
-                max(0, int(forward)),
-                max(0, int(backward)),
+                self._prefetch_generation, center_frame, forward, backward,
             )
             self._prefetch_cond.notify()
 
@@ -519,6 +528,7 @@ class VideoFrameReader:
         with self._prefetch_cond:
             self._prefetch_generation += 1
             self._prefetch_request = None
+            self._reverse_prefetch_active_center = None
 
     def _prefetch_order(self, center: int, forward: int, backward: int) -> list[int]:
         lower = max(0, center - backward)
@@ -583,6 +593,10 @@ class VideoFrameReader:
                     self._prefetch_pos = -1
                     # A bad seek/read must not terminate the worker permanently.
                     continue
+
+            with self._prefetch_cond:
+                if generation == self._prefetch_generation:
+                    self._reverse_prefetch_active_center = None
 
     def close(self) -> None:
         """Stop new work immediately and release captures without blocking Tk."""
@@ -2783,6 +2797,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
             # A pending tap or manual seek completes before playback proceeds.
             self._schedule_playback(delay_ms=8)
             return
+        cached_reverse_frame = None
         if direction < 0 and reader.prefetch_cap is not None:
             if self._reverse_waiting_for_cache:
                 # Do not run the playback clock while waiting for the
@@ -2796,7 +2811,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
                 self._reverse_waiting_for_cache = False
 
             target = self._playback_frame_at(now, reader, timing)
-            if target < self.current_frame and reader.get_cached(target) is None:
+            if target < self.current_frame:
+                cached_reverse_frame = reader.get_cached(target)
+            if target < self.current_frame and cached_reverse_frame is None:
                 # Reverse playback never decodes a 24-frame block on demand.
                 # Wait for the separate prefetch capture and reanchor the clock
                 # when enough consecutive frames become available.
@@ -2815,9 +2832,18 @@ class UmaDirectionRefinementApp(ctk.CTk):
         elif (target - self.current_frame) * direction > 0:
             # One pending request already limits decoding to the sustainable
             # rate. Request the next frame as soon as the previous one renders.
-            self.request_frame(target, reset_view=False, immediate=True)
-            if self._has_pending_frame_request():
-                self._schedule_playback(delay_ms=8)
+            if direction < 0 and cached_reverse_frame is not None:
+                # Display the prefetched frame directly. In particular, never
+                # enqueue a 24-frame read_reverse() batch in the demand worker.
+                self.requested_frame = target
+                self._decode_gen += 1
+                self._finish_frame_render(
+                    self._decode_gen, reader, target, False, cached_reverse_frame
+                )
+            else:
+                self.request_frame(target, reset_view=False, immediate=True)
+                if self._has_pending_frame_request():
+                    self._schedule_playback(delay_ms=8)
         else:
             anchor_frame, anchor_time, speed = timing
             next_frame = self.current_frame + direction
