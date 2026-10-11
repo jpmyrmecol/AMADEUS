@@ -2253,13 +2253,15 @@ class UmaDirectionRefinementApp(ctk.CTk):
                 # Playback catches up by decoding forward from the current
                 # position. A long-GOP seek for every skipped frame can create
                 # a cycle of slower reads and increasingly distant targets.
-                max_gap = (
-                    12 if timing is None
-                    else max(12, int(reader.fps * max(1.0, timing[2]) * 2))
-                )
-                if self._arrow_key_play.repeating and self._arrow_key_play.direction < 0:
+                key_direction = self._arrow_key_play.direction if self._arrow_key_play.repeating else 0
+                if key_direction < 0:
                     frame = reader.read_reverse(frame_idx)
                 else:
+                    speed = timing[2] if timing is not None else (
+                        self.playback_speed if key_direction > 0 else 0.0
+                    )
+                    max_gap = (12 if speed <= 0 else
+                               max(12, int(reader.fps * max(1.0, speed) * 2)))
                     frame = reader.read(frame_idx, max_sequential_gap=max_gap)
             except Exception as exc:
                 error = exc
