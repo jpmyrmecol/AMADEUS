@@ -110,7 +110,10 @@ def install_canvas_file_drop(
     def log(message: str) -> None:
         entry = f"[DND] {message}"
         state.diagnostics.append(entry)
-        print(entry, flush=True)
+        # Keep routine D&D diagnostics available in memory without filling CUI.
+        # Registration failures remain visible because D&D is unavailable.
+        if message.startswith("initialization failed"):
+            print(entry, flush=True)
 
     def reject(message: str) -> str:
         log(f"rejected: {message}")
