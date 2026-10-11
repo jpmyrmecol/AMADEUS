@@ -184,11 +184,6 @@ def launch_segmentation() -> None:
     launch_gui_script("gui_segmentation.py")
 
 
-def launch_segmentation_with_video(video_path: str) -> None:
-    """Forward a dropped file to Segmentation's normal video preparation."""
-    launch_gui_script("gui_segmentation.py", "--dropped-video", os.path.abspath(video_path))
-
-
 def launch_multi_config_batch() -> None:
     launch_gui_script("gui_multi_config_batch.py")
 
@@ -348,7 +343,7 @@ def open_manual(language: str) -> None:
         messagebox.showinfo("Open manual", f"Open this page in your browser:\n{url}")
 
 
-def build_home(root: ctk.CTk) -> tuple[tk.Canvas, ...]:
+def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
     root.grid_rowconfigure(0, weight=9, minsize=EASY_PANEL_H)
     root.grid_rowconfigure(1, weight=2, minsize=BOTTOM_PANEL_H)
     for col in range(6):
@@ -363,7 +358,7 @@ def build_home(root: ctk.CTk) -> tuple[tk.Canvas, ...]:
         hover_strength=0.9,
     )
     easy_panel.grid(row=0, column=0, columnspan=6, sticky="nsew")
-    drop_targets = [easy_panel]
+    drop_targets = [(easy_panel, "gui_easy_tracking.py")]
 
     corner_buttons = {
         "uninstall": {
@@ -573,45 +568,49 @@ def build_home(root: ctk.CTk) -> tuple[tk.Canvas, ...]:
     root.bind("<F1>", lambda e: open_manual("EN"))
 
     lower_panels = (
-        ("Cropping\n&\nTrimming", launch_preprocess),
-        ("Segmentation", launch_segmentation),
-        ("Advanced Tracking", launch_advanced_tracking),
-        ("Multi Config Batch", launch_multi_config_batch),
-        ("Refinement", launch_refinement),
+        ("Cropping\n&\nTrimming", launch_preprocess, "gui_preprocess.py"),
+        ("Segmentation", launch_segmentation, "gui_segmentation.py"),
+        ("Advanced Tracking", launch_advanced_tracking, "gui_advanced_tracking.py"),
+        ("Multi Config Batch", launch_multi_config_batch, None),
+        ("Refinement", launch_refinement, "gui_refinement.py"),
         (
             "Colab (beta)" if sys.platform.startswith("linux") else "Colab（beta）",
-            launch_colab,
+            launch_colab, "gui_colab.py",
         ),
     )
-    for col, (text, command) in enumerate(lower_panels):
+    for col, (text, command, drop_script) in enumerate(lower_panels):
         panel = make_panel(root, root, text, command, font_size=18)
         panel.grid(row=1, column=col, sticky="nsew")
-        drop_targets.append(panel)
+        if drop_script is not None:
+            drop_targets.append((panel, drop_script))
     return tuple(drop_targets)
 
 
-def install_home_video_drop(root: ctk.CTk, targets: tuple[tk.Canvas, ...]) -> None:
-    """Accept one video anywhere on Home and open it in Segmentation.
+def install_home_video_drop(
+    root: ctk.CTk, targets: tuple[tuple[tk.Canvas, str], ...],
+) -> None:
+    """Drop a video on a panel to open *that panel's* GUI.
 
-    Each Home tile is its own Canvas, so each is registered as a drop target.
-    The shared handler keeps native Tcl-list parsing, Unicode paths, and file
-    type filtering consistent with the other GUIs.
+    Multi Config Batch deliberately remains click-only. The same drop parser
+    and validation used elsewhere handles paths containing spaces or Unicode.
     """
     if not root.winfo_exists():
         return
 
-    def on_video(path: str) -> None:
-        try:
-            launch_segmentation_with_video(path)
-        except OSError as exc:
-            messagebox.showerror(
-                "Unable to open Segmentation", str(exc), parent=root,
-            )
-
     def show_rejection(message: str) -> None:
         messagebox.showwarning("Video drop", message, parent=root)
 
-    for canvas in targets:
+    for canvas, script in targets:
+        def on_video(path: str, target_script: str = script) -> None:
+            try:
+                launch_gui_script(
+                    target_script, "--dropped-video", os.path.abspath(path),
+                )
+            except OSError as exc:
+                messagebox.showerror(
+                    "Unable to open GUI", str(exc), parent=root,
+                )
+
         install_canvas_file_drop(
             root, canvas,
             allowed_suffixes=VIDEO_DROP_SUFFIXES,
