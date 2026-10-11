@@ -163,11 +163,11 @@ def show_splash(root: ctk.CTk, reveal: bool = False) -> tk.Toplevel:
     return splash
 
 
-def launch_gui_script(name: str, *script_args: str) -> None:
+def launch_gui_script(name: str, *script_args: str) -> subprocess.Popen:
     kwargs = {"cwd": str(PROJECT_ROOT)}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-    subprocess.Popen(
+    return subprocess.Popen(
         [sys.executable, "-u", str(gui_script(name)), *script_args], **kwargs
     )
 
@@ -589,38 +589,46 @@ def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
 def install_home_video_drop(
     root: ctk.CTk, targets: tuple[tuple[tk.Canvas, str], ...],
 ) -> None:
-    """Route one native Home drop by its screen position to the owning panel.
-
-    Register the top-level window once with tkdnd. Registering several sibling
-    canvases separately can leave some panels without native drop events.
-    Multi Config Batch has no matching target and remains drop-disabled.
-    """
+    """Open the GUI belonging to the canvas that receives the video drop."""
     if not root.winfo_exists():
         return
 
     def show_rejection(message: str) -> None:
         messagebox.showwarning("Video drop", message, parent=root)
 
-    def on_video(path: str) -> None:
-        x_root, y_root = root.winfo_pointerxy()
-        for canvas, script in targets:
-            x0, y0 = canvas.winfo_rootx(), canvas.winfo_rooty()
-            if not (x0 <= x_root < x0 + canvas.winfo_width()
-                    and y0 <= y_root < y0 + canvas.winfo_height()):
-                continue
+    for canvas, script in targets:
+        def on_video(path: str, target_script: str = script) -> None:
             try:
-                launch_gui_script(script, "--dropped-video", os.path.abspath(path))
+                process = launch_gui_script(
+                    target_script, "--dropped-video", os.path.abspath(path),
+                )
             except OSError as exc:
                 messagebox.showerror("Unable to open GUI", str(exc), parent=root)
-            return
+                return
 
-    install_canvas_file_drop(
-        root, root,
-        allowed_suffixes=VIDEO_DROP_SUFFIXES,
-        on_path=on_video,
-        status_callback=show_rejection,
-        label="video",
-    )
+            # A child that crashes during GUI startup otherwise closes its
+            # console immediately, leaving the drop looking unresponsive.
+            def check_startup(remaining: int = 10) -> None:
+                status = process.poll()
+                if status is None and remaining > 0:
+                    root.after(1000, lambda: check_startup(remaining - 1))
+                elif status is not None and status != 0:
+                    messagebox.showerror(
+                        "Unable to open GUI",
+                        f"{target_script} exited with code {status}. "
+                        "Check the child console for the error details.",
+                        parent=root,
+                    )
+
+            root.after(1000, check_startup)
+
+        install_canvas_file_drop(
+            root, canvas,
+            allowed_suffixes=VIDEO_DROP_SUFFIXES,
+            on_path=on_video,
+            status_callback=show_rejection,
+            label="video",
+        )
 
 
 def main() -> int:
