@@ -1244,6 +1244,28 @@ class ConfigGUI(ctk.CTk):
             else:
                 w.configure(state=state)
 
+
+    def _set_category_visible(self, section_title: str, category: str, visible: bool) -> None:
+        categories = self.sections[section_title]["category_parents"]
+        group = categories[category]
+        header, body = group["header"], group["body"]
+        if not visible:
+            header.pack_forget()
+            body.pack_forget()
+            return
+        if header.winfo_manager() == "pack":
+            return
+        following = list(categories)
+        next_header = next(
+            (categories[name]["header"]
+             for name in following[following.index(category) + 1:]
+             if categories[name]["header"].winfo_manager() == "pack"),
+            None,
+        )
+        placement = {"before": next_header} if next_header is not None else {}
+        header.pack(fill="x", pady=(8, 2), **placement)
+        body.pack(fill="x", pady=2, padx=25, **placement)
+
     def _refresh_skip_dependent_states(self, *_):
         """Synchronize Advanced Tracking controls with independent stage skips.
 
@@ -1494,6 +1516,7 @@ class ConfigGUI(ctk.CTk):
             id_tracking_active,
         )
 
+        self._set_category_visible("Analysis", "Variable population", bool(self.variable_count.get()))
         variable_active = bool(self.variable_count.get() and id_tracking_active)
         analysis_widgets = self.sections.get("Analysis", {}).get("widgets", {})
         population_mode = analysis_widgets.get("VARIABLE_POPULATION_MODE")
@@ -1609,21 +1632,10 @@ class ConfigGUI(ctk.CTk):
                 )
             category_body.pack(fill="x", pady=2, padx=25)
 
-            if (title, category) == ("Analysis", "Variable population"):
-                help_text = (
-                    "edge: confirm arrivals near the frame boundary; require longer persistence inside. "
-                    "The boundary margin uses animal size and speed from Initial Tracking.\n"
-                    "anywhere: legacy special mode allowing appearance and disappearance anywhere. "
-                    "Interior confirmation must exceed edge confirmation; interior max age must be at least Max Age."
-                )
-                ctk.CTkLabel(
-                    category_body, text=help_text, anchor="w", justify="left",
-                    wraplength=950, text_color=("gray35", "gray70"),
-                ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 2))
-
             category_parents[category] = {
                 "column_count": 3,
                 "columns": column_items,
+                "header": row,
                 "body": category_body,
                 "frame": frame,
             }

@@ -132,6 +132,50 @@ class VariablePopulationGUI(unittest.TestCase):
         self.assertEqual(mode.cget("state"), "readonly")
         self.assertEqual(threshold.cget("state"), "normal")
 
+
+    def test_variable_population_category_visibility_follows_checkbox(self):
+        categories = self.app.sections["Analysis"]["category_parents"]
+        group = categories["Variable population"]
+        header, body = group["header"], group["body"]
+        analysis_frame = self.app.sections["Analysis"]["frame"]
+
+        # The entire category, including its heading, is initially hidden.
+        self.assertEqual(header.winfo_manager(), "")
+        self.assertEqual(body.winfo_manager(), "")
+
+        self.app.variable_count.set(True)
+        self.assertEqual(header.winfo_manager(), "pack")
+        self.assertEqual(body.winfo_manager(), "pack")
+        packed = analysis_frame.pack_slaves()
+        self.assertEqual(packed[packed.index(header) + 1], body)
+        self.assertLess(packed.index(body), packed.index(categories["Embedding"]["header"]))
+
+        # Skipping ID tracking disables controls but does not hide the category.
+        self.app.skip_id_tracking.set(True)
+        self.assertEqual(header.winfo_manager(), "pack")
+        self.assertEqual(body.winfo_manager(), "pack")
+        self.assertEqual(self.widgets["VARIABLE_POPULATION_MODE"].cget("state"), "disabled")
+
+        self.app.variable_count.set(False)
+        self.assertEqual(header.winfo_manager(), "")
+        self.assertEqual(body.winfo_manager(), "")
+
+        self.app.skip_id_tracking.set(False)
+        self.app.variable_count.set(True)
+        self.assertEqual(header.winfo_manager(), "pack")
+        self.assertEqual(body.winfo_manager(), "pack")
+        self.assertEqual(self.widgets["VARIABLE_POPULATION_MODE"].cget("state"), "readonly")
+
+        # Loading a fixed-population config hides the category without erasing parameters.
+        self.load({"VARIABLE_POPULATION_MODE": "anywhere"}, variable=False)
+        self.assertEqual(header.winfo_manager(), "")
+        self.assertEqual(body.winfo_manager(), "")
+        self.assertEqual(self.widgets["VARIABLE_POPULATION_MODE"].get(), "anywhere")
+        self.load({"VARIABLE_POPULATION_MODE": "anywhere"}, variable=True)
+        self.assertEqual(header.winfo_manager(), "pack")
+        self.assertEqual(body.winfo_manager(), "pack")
+        self.assertEqual(self.widgets["VARIABLE_POPULATION_MODE"].get(), "anywhere")
+
     def test_invalid_edge_settings_are_rejected_before_writing(self):
         for key, value in (
             ("VARIABLE_EDGE_CONFIRM_FRAMES", 1),
