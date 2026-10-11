@@ -655,14 +655,18 @@ class PreprocessApp(ctk.CTk):
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
         self._smooth_player: SmoothPreviewPlayback | None = None
+        self._requested_arrow_frame: int | None = None
         self._preview_pacer = AdaptivePreviewPacer()
         self._arrow_key_play = ArrowKeyHoldPlayback(
             self,
-            current_frame=lambda: self.current_frame,
+            current_frame=lambda: (
+                self._requested_arrow_frame if self._requested_arrow_frame is not None
+                else self.current_frame
+            ),
             frame_bounds=lambda: (0, self._last_frame_index()) if self.reader is not None else (0, -1),
             fps=lambda: self.reader.fps if self.reader is not None else 30.0,
             speed=lambda: self.playback_speed,
-            seek=lambda target: self.set_frame(target, from_playback=True),
+            seek=self._queue_arrow_step,
             pause=self.stop_playback,
             pacer=lambda: self._preview_pacer,
             hold_start=lambda direction: self.start_playback(direction, held=True),
@@ -1822,6 +1826,7 @@ class PreprocessApp(ctk.CTk):
 
         self._arrow_key_play.stop()
         self.stop_playback(update_button=False)
+        self._requested_arrow_frame = None
         self._cancel_preview_prefetch()
         self._dismiss_seek_edit()
         if self._smooth_player is not None:
@@ -1871,6 +1876,9 @@ class PreprocessApp(ctk.CTk):
             )
         self._flush_crop_trimming_config_save(log_success=True)
         self.set_status(f"Loaded: {os.path.basename(path)}")
+        # Match Refinement's eager PyAV setup while leaving ordinary source
+        # inspection and video selection responsive.
+        self.after_idle(lambda loaded=reader: self._prime_preview_decoder(loaded))
         _start_maximized(self)
 
     def _update_meta_label(self) -> None:
@@ -2133,6 +2141,32 @@ class PreprocessApp(ctk.CTk):
         self._space_release_job = None
         self._space_key_down = False
 
+    def _queue_arrow_step(self, frame_idx: int) -> bool:
+        """Single arrow taps never perform a long-GOP seek on the Tk thread."""
+        if self.reader is None or self.export_running or self._closing:
+            return False
+        target = max(0, min(self._last_frame_index(), int(frame_idx)))
+        self._cancel_preview_prefetch()
+        try:
+            pipeline = self._ensure_smooth_player()
+            if not pipeline.request_frame(target):
+                return False
+        except Exception as exc:
+            self.set_status(f"Arrow-key decoder unavailable: {exc}", auto_clear=False)
+            return False
+        self._requested_arrow_frame = target
+        return True
+
+    def _prime_preview_decoder(self, reader: VideoFrameReader) -> None:
+        """Open PyAV once after loading, not on the first left-arrow press."""
+        if reader is not self.reader or self._closing:
+            return
+        try:
+            self._ensure_smooth_player()
+        except Exception as exc:
+            # The normal preview remains usable; the next start can retry.
+            self._log(f"PyAV preview initialization unavailable: {exc}")
+
     def _on_frame_navigation_key(self, event) -> str | None:
         if self.reader is None or self.export_running:
             return None
@@ -2228,6 +2262,8 @@ class PreprocessApp(ctk.CTk):
             self.stop_playback()
         if not self.playback_active and self._smooth_player is not None:
             self._smooth_player.invalidate()
+        if not from_playback:
+            self._requested_arrow_frame = None
         frame_idx = max(0, min(self._last_frame_index(), int(frame_idx)))
         try:
             # Sequentially decode nearby dropped frames instead of repeatedly seeking.
@@ -2245,6 +2281,7 @@ class PreprocessApp(ctk.CTk):
         frame_idx = max(0, min(self._last_frame_index(), int(frame_idx)))
         self.reader._cache_put(frame_idx, frame)
         self.current_frame = frame_idx
+        self._requested_arrow_frame = None
         self.frame_bgr_cache = frame
         self.frame_slider.set(frame_idx)
         self._update_timeline_labels()
