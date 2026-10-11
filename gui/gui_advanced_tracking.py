@@ -723,6 +723,12 @@ class ConfigGUI(ctk.CTk):
                 ("MISS_WEIGHT", "Miss Weight", 1.0),
                 ("DISTANCE_WEIGHT", "Distance Weight", 1.0),
             ],
+            "Variable population": [
+                ("VARIABLE_POPULATION_MODE", "Population Mode", "edge"),
+                ("VARIABLE_EDGE_CONFIRM_FRAMES", "Edge Confirm (frames)", 2),
+                ("VARIABLE_INTERIOR_CONFIRM_FRAMES", "Interior Confirm (frames)", 10),
+                ("VARIABLE_INTERIOR_MAX_AGE", "Interior Max Age (frames)", 30),
+            ],
             "Embedding": [
                 ("ENABLE", "Enable", False),
                 # Internal widget key only: keep it distinct from analysis.DEVICE.
@@ -741,6 +747,7 @@ class ConfigGUI(ctk.CTk):
                 (self.skip_refinement, "Skip Refinement"),
             ],
         )
+        self._bind_combo("VARIABLE_POPULATION_MODE", self._refresh_skip_dependent_states)
         # Create Video
         create_video_fields = {
             "Draw Elements": [
@@ -814,6 +821,7 @@ class ConfigGUI(ctk.CTk):
         self.sections["Create dataset"]["widgets"]["LOCALIZED"].trace_add(
             "write", self._refresh_skip_dependent_states
         )
+        self.variable_count.trace_add("write", lambda *_: self._toggle_variable_count())
         self._refresh_skip_dependent_states()
 
         self._apply_prefill_paths()
@@ -1486,6 +1494,17 @@ class ConfigGUI(ctk.CTk):
             id_tracking_active,
         )
 
+        variable_active = bool(self.variable_count.get() and id_tracking_active)
+        analysis_widgets = self.sections.get("Analysis", {}).get("widgets", {})
+        population_mode = analysis_widgets.get("VARIABLE_POPULATION_MODE")
+        edge_mode = population_mode is not None and population_mode.get() == "edge"
+        set_keys("Analysis", ["VARIABLE_POPULATION_MODE"], variable_active)
+        set_keys(
+            "Analysis",
+            ["VARIABLE_EDGE_CONFIRM_FRAMES", "VARIABLE_INTERIOR_CONFIRM_FRAMES", "VARIABLE_INTERIOR_MAX_AGE"],
+            variable_active and edge_mode,
+        )
+
         # Refinement-only correction controls.
         set_keys(
             "Analysis",
@@ -1590,6 +1609,18 @@ class ConfigGUI(ctk.CTk):
                 )
             category_body.pack(fill="x", pady=2, padx=25)
 
+            if (title, category) == ("Analysis", "Variable population"):
+                help_text = (
+                    "edge: confirm arrivals near the frame boundary; require longer persistence inside. "
+                    "The boundary margin uses animal size and speed from Initial Tracking.\n"
+                    "anywhere: legacy special mode allowing appearance and disappearance anywhere. "
+                    "Interior confirmation must exceed edge confirmation; interior max age must be at least Max Age."
+                )
+                ctk.CTkLabel(
+                    category_body, text=help_text, anchor="w", justify="left",
+                    wraplength=950, text_color=("gray35", "gray70"),
+                ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 2))
+
             category_parents[category] = {
                 "column_count": 3,
                 "columns": column_items,
@@ -1639,7 +1670,14 @@ class ConfigGUI(ctk.CTk):
                         )
                         _created_widget = None
 
-                        if key == "CROSSING_MODE":
+                        if key == "VARIABLE_POPULATION_MODE":
+                            combo = ctk.CTkComboBox(cell, values=["edge", "anywhere"], state="readonly", width=130,
+                                                    command=lambda _, k=key: self._on_combo_selected(k))
+                            combo.set(str(default))
+                            combo.grid(row=0, column=1, sticky="w")
+                            widgets[key] = combo
+                            _created_widget = combo
+                        elif key == "CROSSING_MODE":
                             combo = ctk.CTkComboBox(cell, values=["pickle", "area", "hybrid"], state="readonly", width=130,
                                                     command=lambda _, k=key: self._on_combo_selected(k))
                             combo.set(str(default))
@@ -1906,6 +1944,14 @@ class ConfigGUI(ctk.CTk):
             _set_widget_value(self.training_range["end"], train_cfg["LAST_FRAME"])
 
         ana_cfg = dict(cfg.get("analysis", {}) or {})
+        ana_cfg.setdefault("VARIABLE_POPULATION_MODE", "edge")
+        ana_cfg.setdefault("VARIABLE_EDGE_CONFIRM_FRAMES", 2)
+        ana_cfg.setdefault("VARIABLE_INTERIOR_CONFIRM_FRAMES", 10)
+        try:
+            population_max_age = max(30, _strict_int(ana_cfg.get("MAX_AGE", 10)))
+        except (TypeError, ValueError):
+            population_max_age = 30
+        ana_cfg.setdefault("VARIABLE_INTERIOR_MAX_AGE", population_max_age)
         _tc_flat = dict(ana_cfg.pop("TRACKING_COST", {}) or {})
         ana_cfg.update(_tc_flat)
         for k, w in self.sections["Analysis"]["widgets"].items():
@@ -1972,6 +2018,7 @@ class ConfigGUI(ctk.CTk):
     def _toggle_variable_count(self):
         self.basic_entries["NUM_OBJECTS"].configure(
             state="disabled" if self.variable_count.get() else "normal")
+        self._refresh_skip_dependent_states()
 
     def save_yaml(self, print_msg=True) -> bool:
         cfg = copy.deepcopy(self._loaded_cfg)
@@ -2182,6 +2229,32 @@ class ConfigGUI(ctk.CTk):
             messagebox.showerror("Error", str(exc))
             return False
         cfg["analysis"] = analysis_cfg
+        population_mode = analysis_cfg.get("VARIABLE_POPULATION_MODE")
+        if population_mode not in {"edge", "anywhere"}:
+            messagebox.showerror("Error", "Population Mode must be 'edge' or 'anywhere'.")
+            return False
+        if self.variable_count.get() and population_mode == "edge":
+            try:
+                edge_confirm = _strict_int(analysis_cfg["VARIABLE_EDGE_CONFIRM_FRAMES"])
+                interior_confirm = _strict_int(analysis_cfg["VARIABLE_INTERIOR_CONFIRM_FRAMES"])
+                interior_max_age = _strict_int(analysis_cfg["VARIABLE_INTERIOR_MAX_AGE"])
+                max_age = _strict_int(analysis_cfg["MAX_AGE"])
+            except (KeyError, TypeError, ValueError):
+                messagebox.showerror("Error", "Variable population frame settings must be integers.")
+                return False
+            if edge_confirm < 2 or interior_confirm < 2 or interior_confirm <= edge_confirm:
+                messagebox.showerror(
+                    "Error", "Edge Confirm must be at least 2 frames, and Interior Confirm must exceed Edge Confirm."
+                )
+                return False
+            if max_age < 1 or interior_max_age < max_age:
+                messagebox.showerror("Error", "Interior Max Age must be at least Max Age, and Max Age must be positive.")
+                return False
+            analysis_cfg.update({
+                "VARIABLE_EDGE_CONFIRM_FRAMES": edge_confirm,
+                "VARIABLE_INTERIOR_CONFIRM_FRAMES": interior_confirm,
+                "VARIABLE_INTERIOR_MAX_AGE": interior_max_age,
+            })
         if not self.skip_refinement.get():
             try:
                 flip_duration_sec = float(cfg["analysis"]["FLIP_SEC"])
@@ -2805,6 +2878,9 @@ class ConfigGUI(ctk.CTk):
             "NUM_CROPS",
             "FRAME_INTERVAL",
             "MAX_AGE",
+            "VARIABLE_EDGE_CONFIRM_FRAMES",
+            "VARIABLE_INTERIOR_CONFIRM_FRAMES",
+            "VARIABLE_INTERIOR_MAX_AGE",
             "FRAME_STEP",
             "ARROW_WIDTH",
             "LABEL_THICKNESS",

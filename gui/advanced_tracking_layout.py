@@ -94,6 +94,11 @@ CATEGORY_COLUMN_LAYOUT: dict[tuple[str, str], tuple[tuple[str, ...], ...]] = {
         ("FLIP_SEC", "INTERACT_IOU", "IOU_WEIGHT"),
         ("DIRECTION_WEIGHT", "MISS_WEIGHT", "DISTANCE_WEIGHT"),
     ),
+    ("Analysis", "Variable population"): (
+        ("VARIABLE_POPULATION_MODE", "VARIABLE_EDGE_CONFIRM_FRAMES"),
+        ("VARIABLE_INTERIOR_CONFIRM_FRAMES",),
+        ("VARIABLE_INTERIOR_MAX_AGE",),
+    ),
     ("Analysis", "Embedding"): (
         ("ENABLE", "IMG_SIZE"),
         ("EMBED_DEVICE",),

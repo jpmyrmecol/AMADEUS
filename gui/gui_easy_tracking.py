@@ -2995,6 +2995,10 @@ class EasyTrackingGUI(ctk.CTk):
             "FIRST_FRAME":       meta_training_start,
             "LAST_FRAME":        meta_training_end,
         }
+        try:
+            variable_interior_max_age = max(30, int((cfg.get("analysis", {}) or {}).get("MAX_AGE", 10)))
+        except (TypeError, ValueError):
+            variable_interior_max_age = 30
         default_cfg["analysis"] = {
             "DEVICE":                    "auto",
             "BATCH_SIZE":                "auto",
@@ -3006,6 +3010,10 @@ class EasyTrackingGUI(ctk.CTk):
             "MATCH_ANGLE":               90.0,
             "MAX_AXIS_ERR":              45.0,
             "MAX_AGE":                   10,
+            "VARIABLE_POPULATION_MODE":  "edge",
+            "VARIABLE_EDGE_CONFIRM_FRAMES": 2,
+            "VARIABLE_INTERIOR_CONFIRM_FRAMES": 10,
+            "VARIABLE_INTERIOR_MAX_AGE": variable_interior_max_age,
             "FLIP_SEC":                  5.0,
             "TRACKING_COST": {
                 "IOU_WEIGHT":            1.0,
