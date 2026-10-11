@@ -641,9 +641,9 @@ def install_home_video_drop(
 
                 traceback_text = "".join(error_lines).strip()
                 details = (
-                    f"\\n\\n{traceback_text[-3000:]}"
+                    f"\n\n{traceback_text[-3000:]}"
                     if traceback_text else
-                    "\\n\\nThe child did not report an error message."
+                    "\n\nThe child did not report an error message."
                 )
                 messagebox.showerror(
                     "Unable to open GUI",
