@@ -22,6 +22,8 @@ try:
     from .app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
     from .app_update import probe_update_status, start_update_check
     from .project_paths import PROJECT_ROOT, gui_asset, gui_script
+    from .canvas_file_drop import install_canvas_file_drop
+    from .video_input import VIDEO_DROP_SUFFIXES
     from .splash_ipc import (
         TOKEN_ENV_VAR,
         external_closed,
@@ -35,6 +37,8 @@ except ImportError:  # Preserve direct execution with: python gui/gui_home.py
     from app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
     from app_update import probe_update_status, start_update_check
     from project_paths import PROJECT_ROOT, gui_asset, gui_script
+    from canvas_file_drop import install_canvas_file_drop
+    from video_input import VIDEO_DROP_SUFFIXES
     from splash_ipc import (
         TOKEN_ENV_VAR,
         external_closed,
@@ -159,11 +163,13 @@ def show_splash(root: ctk.CTk, reveal: bool = False) -> tk.Toplevel:
     return splash
 
 
-def launch_gui_script(name: str) -> None:
+def launch_gui_script(name: str, *script_args: str) -> None:
     kwargs = {"cwd": str(PROJECT_ROOT)}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-    subprocess.Popen([sys.executable, "-u", str(gui_script(name))], **kwargs)
+    subprocess.Popen(
+        [sys.executable, "-u", str(gui_script(name)), *script_args], **kwargs
+    )
 
 
 def launch_advanced_tracking() -> None:
@@ -176,6 +182,11 @@ def launch_refinement() -> None:
 
 def launch_segmentation() -> None:
     launch_gui_script("gui_segmentation.py")
+
+
+def launch_segmentation_with_video(video_path: str) -> None:
+    """Forward a dropped file to Segmentation's normal video preparation."""
+    launch_gui_script("gui_segmentation.py", "--dropped-video", os.path.abspath(video_path))
 
 
 def launch_multi_config_batch() -> None:
@@ -337,7 +348,7 @@ def open_manual(language: str) -> None:
         messagebox.showinfo("Open manual", f"Open this page in your browser:\n{url}")
 
 
-def build_home(root: ctk.CTk) -> None:
+def build_home(root: ctk.CTk) -> tuple[tk.Canvas, ...]:
     root.grid_rowconfigure(0, weight=9, minsize=EASY_PANEL_H)
     root.grid_rowconfigure(1, weight=2, minsize=BOTTOM_PANEL_H)
     for col in range(6):
@@ -352,6 +363,7 @@ def build_home(root: ctk.CTk) -> None:
         hover_strength=0.9,
     )
     easy_panel.grid(row=0, column=0, columnspan=6, sticky="nsew")
+    drop_targets = [easy_panel]
 
     corner_buttons = {
         "uninstall": {
@@ -574,6 +586,39 @@ def build_home(root: ctk.CTk) -> None:
     for col, (text, command) in enumerate(lower_panels):
         panel = make_panel(root, root, text, command, font_size=18)
         panel.grid(row=1, column=col, sticky="nsew")
+        drop_targets.append(panel)
+    return tuple(drop_targets)
+
+
+def install_home_video_drop(root: ctk.CTk, targets: tuple[tk.Canvas, ...]) -> None:
+    """Accept one video anywhere on Home and open it in Segmentation.
+
+    Each Home tile is its own Canvas, so each is registered as a drop target.
+    The shared handler keeps native Tcl-list parsing, Unicode paths, and file
+    type filtering consistent with the other GUIs.
+    """
+    if not root.winfo_exists():
+        return
+
+    def on_video(path: str) -> None:
+        try:
+            launch_segmentation_with_video(path)
+        except OSError as exc:
+            messagebox.showerror(
+                "Unable to open Segmentation", str(exc), parent=root,
+            )
+
+    def show_rejection(message: str) -> None:
+        messagebox.showwarning("Video drop", message, parent=root)
+
+    for canvas in targets:
+        install_canvas_file_drop(
+            root, canvas,
+            allowed_suffixes=VIDEO_DROP_SUFFIXES,
+            on_path=on_video,
+            status_callback=show_rejection,
+            label="video",
+        )
 
 
 def main() -> int:
@@ -599,7 +644,7 @@ def main() -> int:
     root.resizable(False, False)
     install_window_icon(root)
 
-    build_home(root)
+    home_drop_targets = build_home(root)
 
     external_start = external_started_at() if has_external_splash else None
     if external_start is None:
@@ -622,6 +667,9 @@ def main() -> int:
         close_poll_job = None
         root.deiconify()
         install_window_icon(root)
+        # Initialize tkdnd after the Home window is visible, without delaying
+        # the splash reveal or altering the existing panel click actions.
+        root.after(100, lambda: install_home_video_drop(root, home_drop_targets))
         if os.name == "nt":
             # Windows can leave the owner window stuck with the topmost style
             # inherited from its topmost splash child; force-clear it.
