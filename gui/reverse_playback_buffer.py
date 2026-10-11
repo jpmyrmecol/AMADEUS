@@ -184,7 +184,10 @@ class ReversePlaybackBuffer:
         self._bytes += frame.nbytes
         return True
 
-    def prepare(self, center: int, speed: float = 1.0, continuous: bool = False) -> None:
+    def prepare(
+        self, center: int, speed: float = 1.0,
+        continuous: bool = False, warm_blocks: int = 1,
+    ) -> None:
         center = min(self.frame_count - 1, max(0, int(center)))
         configuration = self._configuration(float(speed))
         seeds = self._seed_frames(center) if self._seed_frames is not None else {}
@@ -244,7 +247,9 @@ class ReversePlaybackBuffer:
                 self._active = True
                 self._warm_blocks = 0
             elif not self._active and not reuse:
-                self._warm_blocks = 1
+                # Allow a longer speculative warm-up while a key hold is
+                # being distinguished from a single-frame tap.
+                self._warm_blocks = max(1, int(warm_blocks))
             self._cond.notify_all()
 
     def start(self, center: int, speed: float = 1.0) -> None:
@@ -575,12 +580,26 @@ class SmoothPreviewPlayback:
             self._waiting_reverse = False
         self._schedule(1)
 
-    def stop(self):
+    def stop(self, *, discard_pending: bool = False):
+        """Stop playback; optionally discard a delayed, not-yet-rendered frame.
+
+        Reverse key holds must stop at the visible frame when the key is
+        released, even if the decoder is still converting the next one.
+        Ordinary Play/Stop preserves the previous pending-frame behavior.
+        """
         self._active = False
         self._timing = None
         self.reverse_buffer.stop()
         self._waiting_reverse = False
-        self._schedule(8)  # Complete one pending frame even if paused.
+        self._resume_clock = False
+        if discard_pending:
+            with self._cond:
+                self._generation += 1
+                self._request = None
+                self._result = None
+                self._pending = False
+                self._cond.notify_all()
+        self._schedule(8)  # Flush an accepted frame unless discarded.
 
     def set_speed(self, speed):
         self._speed = float(speed)
