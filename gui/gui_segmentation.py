@@ -7452,6 +7452,10 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--video", default="")
+    parser.add_argument(
+        "--dropped-video", default="",
+        help="Open a video dropped onto Home using the normal compatibility check.",
+    )
     parser.add_argument("--session", default="")
     parser.add_argument("--no-launch-tracking", action="store_true")
     parser.add_argument("--return-to-easy", action="store_true")
@@ -7460,7 +7464,11 @@ def main():
     configure_taskbar_identity()
     app = CrossingReviewApp(no_launch_tracking=args.no_launch_tracking or args.return_to_easy)
     app.session_path = str(args.session or "").strip()
-    if args.video and os.path.isfile(args.video):
+    if args.dropped_video:
+        # Home drops follow the same validation, optional conversion, and
+        # existing-config recovery path as selecting a video inside this GUI.
+        app.after(300, lambda path=args.dropped_video: app._handle_selected_video(path))
+    elif args.video and os.path.isfile(args.video):
         def _load_video_or_existing_config():
             found = app._find_existing_config_for_video(args.video, args.session)
             if found:
