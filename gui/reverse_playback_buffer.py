@@ -449,12 +449,17 @@ class SmoothPreviewPlayback:
 
     def __init__(self, owner, *, reader, fps, frame_count, read_forward,
                  cached_frames, render, on_error, on_boundary,
-                 lower_bound=0, upper_bound=None, rotation=0):
+                 lower_bound=0, upper_bound=None, rotation=0,
+                 hold_is_active=None, on_hold_released=None):
         self.owner, self.reader = owner, reader
         self.fps = float(fps)
         self.frame_count = int(frame_count)
         self.read_forward, self.render = read_forward, render
         self.on_error, self.on_boundary = on_error, on_boundary
+        # Optionally reject a stale held-key session before drawing another
+        # frame, rather than relying exclusively on queued Tk KeyRelease events.
+        self.hold_is_active = hold_is_active
+        self.on_hold_released = on_hold_released
         self.lower_bound = int(lower_bound)
         self.upper_bound = self.frame_count - 1 if upper_bound is None else int(upper_bound)
         self.rotation = int(rotation) % 360
@@ -681,6 +686,17 @@ class SmoothPreviewPlayback:
     def _tick(self):
         self._timer = None
         if self._closed:
+            return
+        if (self._active and self.hold_is_active is not None
+                and not self.hold_is_active()):
+            # On Windows, native auto-repeat can queue KeyPress events ahead
+            # of KeyRelease while the canvas is being redrawn. Query the
+            # physical state before *every* playback render, and let the GUI
+            # tear down the key-held session immediately.
+            if self.on_hold_released is not None:
+                self.on_hold_released()
+            else:
+                self.stop(discard_pending=True)
             return
         self._receive()
         if not self._active or self._timing is None:
