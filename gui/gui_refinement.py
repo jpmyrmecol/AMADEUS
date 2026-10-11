@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 import json
+import math
 import os
 import pickle
 import queue
@@ -113,7 +114,6 @@ TRACKING_DROP_SUFFIXES = frozenset({".csv", ".h5", ".hdf5"})
 FRAME_CACHE_SIZE = 256
 PREFETCH_FORWARD = 120
 PREFETCH_BACKWARD = 120
-KEY_PREFETCH_STEP = 30
 SNAP_PIXELS = 12
 LABEL_HIT_RADIUS = 24
 ENDPOINT_HIT_RADIUS = 14
@@ -614,6 +614,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.prefetch_after_id: Optional[str] = None
         self._decode_gen: int = 0
         self._paused_decode_gen: int | None = None
+        self._paused_decode_direction = 1
         self._last_displayed_frame: int = -1
         self._frame_queue: queue.Queue = queue.Queue()
         self._decode_request_queue: queue.Queue = queue.Queue(maxsize=1)
@@ -677,7 +678,6 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._left_pane_visible: bool = True
 
         self._key_play_delta: int = 0
-        self._key_prefetch_center: int | None = None
         self._arrow_key_play = ArrowKeyHoldPlayback(
             self,
             current_frame=lambda: self.current_frame,
@@ -687,10 +687,11 @@ class UmaDirectionRefinementApp(ctk.CTk):
             seek=lambda target: self.request_frame(target, reset_view=False, immediate=True),
             busy=self._has_pending_frame_request,
             pause=self.stop_playback,
-            # Key holds use Play's render-completion-driven pacing. A separate
-            # adaptive limiter would delay requests that the worker can handle.
-            async_seek=True,
-            render_driven=True,
+            # A tap steps once. A confirmed hold runs the exact Play/Stop
+            # controller with a signed direction instead of an independent
+            # arrow-key frame scheduler.
+            hold_start=lambda direction: self.start_playback(direction=direction),
+            hold_stop=self._stop_held_playback,
         )
 
         self.playback_active = False
@@ -968,6 +969,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.num_ids = 0
         self.playback_speed = 1.0
         self._playback_timing = None
+        self._paused_decode_direction = 1
         self._update_play_button()
         self.current_frame = 0
         self.requested_frame = 0
@@ -2243,20 +2245,19 @@ class UmaDirectionRefinementApp(ctk.CTk):
             # Decode the newest source-video frame rather than an obsolete frame.
             timing = self._playback_timing
             if timing is not None and generation == self._decode_gen and reader is self.reader:
-                frame_idx = max(frame_idx, self._playback_frame_at(time.perf_counter(), reader, timing))
+                clock_target = self._playback_frame_at(time.perf_counter(), reader, timing)
+                frame_idx = (max(frame_idx, clock_target) if timing[2] > 0
+                             else min(frame_idx, clock_target))
             frame = None
             error: Exception | None = None
             try:
                 # Playback catches up by decoding forward from the current
                 # position. A long-GOP seek for every skipped frame can create
                 # a cycle of slower reads and increasingly distant targets.
-                key_direction = self._arrow_key_play.direction if self._arrow_key_play.repeating else 0
-                if key_direction < 0:
+                if timing is not None and timing[2] < 0:
                     frame = reader.read_reverse(frame_idx)
                 else:
-                    speed = timing[2] if timing is not None else (
-                        self.playback_speed if key_direction > 0 else 0.0
-                    )
+                    speed = abs(timing[2]) if timing is not None else 0.0
                     max_gap = (12 if speed <= 0 else
                                max(12, int(reader.fps * max(1.0, speed) * 2)))
                     frame = reader.read(frame_idx, max_sequential_gap=max_gap)
@@ -2274,10 +2275,15 @@ class UmaDirectionRefinementApp(ctk.CTk):
         reset_view: bool,
         frame: np.ndarray,
     ) -> None:
+        timing = self._playback_timing
+        direction = (
+            -1 if timing is not None and timing[2] < 0
+            else self._paused_decode_direction if generation == self._paused_decode_gen else 1
+        )
         if (
             generation != self._decode_gen
             or reader is not self.reader
-            or frame_idx < self.requested_frame
+            or (frame_idx - self.requested_frame) * direction < 0
         ):
             return
         self.current_frame = frame_idx
@@ -2288,22 +2294,6 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._draw_canvas(frame, preserve_view=not reset_view)
         self.update_info_panel()
         self._last_displayed_frame = frame_idx
-        if self._arrow_key_play.repeating:
-            self._arrow_key_play.frame_rendered()
-            direction = self._arrow_key_play.direction
-            if (
-                direction
-                and self._key_prefetch_center is not None
-                and abs(frame_idx - self._key_prefetch_center) >= KEY_PREFETCH_STEP
-            ):
-                # Refill the upcoming 120-frame window before the key hold
-                # reaches the cache edge. Prefetch uses a separate capture.
-                reader.request_prefetch(
-                    frame_idx,
-                    forward=PREFETCH_FORWARD if direction > 0 else 0,
-                    backward=PREFETCH_BACKWARD if direction < 0 else 0,
-                )
-                self._key_prefetch_center = frame_idx
         if self.playback_active:
             self._schedule_playback(delay_ms=1)
         elif generation != self._paused_decode_gen and not self._arrow_key_play.direction:
@@ -2608,7 +2598,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
         reader: VideoFrameReader,
         timing: tuple[float, float, float],
     ) -> int:
-        return min(self.frame_count - 1, int(self._playback_position_at(now, reader, timing)))
+        position = self._playback_position_at(now, reader, timing)
+        if timing[2] < 0:
+            return max(0, math.ceil(position))
+        return min(self.frame_count - 1, int(position))
 
     def set_playback_speed(self, speed: float):
         if speed not in (1.0, 2.0, 4.0, 0.5, 0.25):
@@ -2616,7 +2609,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if self._playback_timing is not None and self.reader is not None:
             now = time.perf_counter()
             anchor = self._playback_position_at(now, self.reader, self._playback_timing)
-            self._playback_timing = (anchor, now, speed)
+            direction = -1 if self._playback_timing[2] < 0 else 1
+            self._playback_timing = (anchor, now, speed * direction)
         self.playback_speed = speed
         self._update_play_button()
         if self.playback_active:
@@ -2631,17 +2625,24 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.start_playback()
         return "break"
 
-    def start_playback(self):
+    def start_playback(self, direction: int = 1):
+        if direction not in (-1, 1):
+            raise ValueError("Playback direction must be -1 or 1.")
         if self.reader is None or self.frame_count <= 1 or self.playback_active:
             return
-        if self.current_frame >= self.frame_count - 1:
+        # Keep a pending frame across a rapid Stop/Start so the capture and
+        # displayed position agree when that frame finishes. Reverse playback
+        # anchors to the earliest outstanding frame instead of the latest.
+        anchor = (max(self.current_frame, self.requested_frame) if direction > 0
+                  else min(self.current_frame, self.requested_frame))
+        if (direction > 0 and anchor >= self.frame_count - 1) or (
+            direction < 0 and anchor <= 0
+        ):
             return
         self.reader.cancel_prefetch()
         self._paused_decode_gen = None
-        # Keep a pending frame across a rapid Stop/Start so the capture and
-        # displayed position agree when that frame finishes.
-        anchor = max(self.current_frame, self.requested_frame)
-        self._playback_timing = (float(anchor), time.perf_counter(), self.playback_speed)
+        self._paused_decode_direction = direction
+        self._playback_timing = (float(anchor), time.perf_counter(), direction * self.playback_speed)
         self.playback_active = True
         self._update_play_button()
         self._schedule_playback(delay_ms=1)
@@ -2649,6 +2650,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
     def stop_playback(self, update_button: bool = True):
         if self.playback_active:
             self._paused_decode_gen = self._decode_gen
+            self._paused_decode_direction = (
+                -1 if self._playback_timing is not None and self._playback_timing[2] < 0 else 1
+            )
         self.playback_active = False
         self._playback_timing = None
         if self.playback_job is not None:
@@ -2683,7 +2687,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if reader is None or timing is None:
             self.stop_playback()
             return
-        if self.current_frame >= self.frame_count - 1:
+        direction = -1 if timing[2] < 0 else 1
+        end_frame = 0 if direction < 0 else self.frame_count - 1
+        if (self.current_frame - end_frame) * direction >= 0:
             self.stop_playback()
             return
 
@@ -2693,7 +2699,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
             # One decode is already running or pending. The worker will use the
             # newest wall-clock target when it actually begins decoding.
             self._schedule_playback(delay_ms=8)
-        elif target > self.current_frame:
+        elif (target - self.current_frame) * direction > 0:
             # One pending request already limits decoding to the sustainable
             # rate. Request the next frame as soon as the previous one renders.
             self.request_frame(target, reset_view=False, immediate=True)
@@ -2701,7 +2707,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
                 self._schedule_playback(delay_ms=8)
         else:
             anchor_frame, anchor_time, speed = timing
-            next_due = anchor_time + (self.current_frame + 1 - anchor_frame) / (reader.fps * speed)
+            next_frame = self.current_frame + direction
+            next_due = anchor_time + (next_frame - anchor_frame) / (reader.fps * speed)
             self._schedule_playback(delay_ms=max(
                 1, int((next_due - now) * 1000),
             ))
@@ -2714,6 +2721,13 @@ class UmaDirectionRefinementApp(ctk.CTk):
     def _stop_key_play(self):
         self._arrow_key_play.stop()
 
+    def _stop_held_playback(self, direction: int):
+        # Only stop the playback session started by this key hold. Do not
+        # accidentally stop a new, separately started Play-button session.
+        timing = self._playback_timing
+        if self.playback_active and timing is not None and timing[2] * direction > 0:
+            self.stop_playback()
+
     def _start_key_play(self, delta: int):
         if self.left_button_down and self.drag_mode is not None:
             # Keep exact per-keypress stepping while an arrow is being edited.
@@ -2722,16 +2736,6 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self._key_play_step()
             self._key_play_delta = 0
             return
-        if self.reader is not None and self._arrow_key_play.direction != delta:
-            self.reader.cancel_prefetch()
-            self._key_prefetch_center = self.current_frame
-            # Build the directional cache immediately, including the frames
-            # behind the playhead for reverse hold from a manual seek.
-            self.reader.request_prefetch(
-                self.current_frame,
-                forward=PREFETCH_FORWARD if delta > 0 else 0,
-                backward=PREFETCH_BACKWARD if delta < 0 else 0,
-            )
         self._arrow_key_play.press(delta)
 
     def _key_play_step(self):

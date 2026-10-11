@@ -31,6 +31,8 @@ class ArrowKeyHoldPlayback:
         pacer: Callable[[], AdaptivePreviewPacer] | None = None,
         async_seek: bool = False,
         render_driven: bool = False,
+        hold_start: Callable[[int], None] | None = None,
+        hold_stop: Callable[[int], None] | None = None,
     ):
         self.owner = owner
         self.current_frame = current_frame
@@ -43,6 +45,9 @@ class ArrowKeyHoldPlayback:
         self.pacer = pacer
         self.async_seek = async_seek
         self.render_driven = render_driven
+        self.hold_start = hold_start
+        self.hold_stop = hold_stop
+        self._hold_started = False
         self._async_started_at: float | None = None
         self.direction = 0
         self.repeating = False
@@ -64,10 +69,15 @@ class ArrowKeyHoldPlayback:
     def stop(self) -> None:
         self._cancel("_timer")
         self._cancel("_release_timer")
+        direction = self.direction
+        held = self._hold_started
         self.direction = 0
         self.repeating = False
+        self._hold_started = False
         self._async_started_at = None
         self._progress = 0.0
+        if held and self.hold_stop is not None:
+            self.hold_stop(direction)
 
     def press(self, direction: int) -> None:
         if direction not in (-1, 1):
@@ -103,6 +113,12 @@ class ArrowKeyHoldPlayback:
         if not self.direction:
             return
         self.repeating = True
+        if self.hold_start is not None:
+            # Refinement delegates sustained key holds to the *same* playback
+            # controller as the Play button. Other GUIs keep the legacy ticker.
+            self._hold_started = True
+            self.hold_start(self.direction)
+            return
         self._progress = 0.0
         if self.pacer is not None:
             self.pacer().resume()
