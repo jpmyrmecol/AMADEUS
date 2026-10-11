@@ -11,6 +11,7 @@ requires-python = ">=3.10,<3.13"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 dependencies = [
+    "av==16.0.1",
     "customtkinter==5.2.2",
     "filterpy==1.4.5",
     "h5py==3.16.0",

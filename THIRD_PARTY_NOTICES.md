@@ -27,6 +27,16 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## PyAV (reverse playback)
+
+Refinement uses `av==16.0.1` (PyAV) to decode compressed video into a
+bounded reverse-playback buffer. PyAV's Python bindings are BSD-3-Clause
+licensed. Its binary wheels bundle FFmpeg libraries and codecs with additional
+licensing requirements, including possible GPL components.
+For sources and licensing details, see
+[PyAV](https://github.com/PyAV-Org/PyAV) and
+[FFmpeg licensing](https://ffmpeg.org/legal.html).
+
 ## FFmpeg
 
 AMADEUS uses one fixed FFmpeg executable per operating system for video

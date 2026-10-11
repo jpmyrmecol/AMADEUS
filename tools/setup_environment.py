@@ -417,10 +417,12 @@ import sys
 import tkinter as tk
 import customtkinter as ctk
 import cv2
+import av
 from gui.tk_compat import apply_tk_compatibility
 apply_tk_compatibility()
 print('[AMADEUS] Python:', sys.version, sys.executable)
 print('[AMADEUS] Tcl/Tk:', tk.TclVersion, tk.TkVersion)
+print('[AMADEUS] PyAV:', av.__version__)
 if sys.platform == 'darwin' and (tk.TclVersion != 8.6 or tk.TkVersion != 8.6):
     raise RuntimeError('macOS requires Tcl/Tk 8.6 with CustomTkinter 5.2.2')
 app = ctk.CTk()
