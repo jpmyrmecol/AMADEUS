@@ -2196,7 +2196,10 @@ class PreprocessApp(ctk.CTk):
             try:
                 pipeline = self._ensure_smooth_player()
                 pipeline.reverse_buffer.prepare(
-                    self.current_frame, self.playback_speed, warm_blocks=2
+                    self._requested_arrow_frame
+                    if self._requested_arrow_frame is not None
+                    else self.current_frame,
+                    self.playback_speed, warm_blocks=2,
                 )
             except Exception:
                 pass  # A tap must still step even if PyAV cannot initialize.
