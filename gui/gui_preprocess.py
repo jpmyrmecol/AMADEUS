@@ -3592,11 +3592,15 @@ class PreprocessApp(ctk.CTk):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--video", default="")
+    parser.add_argument("--dropped-video", default="")
     args = parser.parse_args()
 
     configure_taskbar_identity()
     app = PreprocessApp()
-    if args.video and os.path.isfile(args.video):
+    if args.dropped_video:
+        # The same compatibility/normalization prompts as canvas drop.
+        app.after(300, lambda path=args.dropped_video: app.select_video(path))
+    elif args.video and os.path.isfile(args.video):
         app.after(300, lambda: app.load_video(args.video))
     app.mainloop()
 
