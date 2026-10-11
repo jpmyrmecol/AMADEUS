@@ -2167,6 +2167,41 @@ class PreprocessApp(ctk.CTk):
             # The normal preview remains usable; the next start can retry.
             self._log(f"PyAV preview initialization unavailable: {exc}")
 
+    @staticmethod
+    def _windows_arrow_down(direction: int) -> bool:
+        """Physical arrow-key state, independent of Tk's queued auto-repeat.
+
+        Tk KeyRelease can be delayed behind many KeyPress events when a
+        long-running canvas redraw prevents immediate event delivery.
+        """
+        if sys.platform != "win32":
+            return True
+        try:
+            import ctypes
+            virtual_key = 0x25 if direction < 0 else 0x27
+            return bool(ctypes.windll.user32.GetAsyncKeyState(virtual_key) & 0x8000)
+        except (AttributeError, OSError):
+            # A missing native API should not disable keyboard navigation.
+            return True
+
+    def _held_arrow_is_physically_down(self) -> bool:
+        if not self.playback_active or not self._arrow_key_play.repeating:
+            return True
+        direction = self._arrow_key_play.direction
+        if direction not in (-1, 1) or self._playback_timing is None:
+            return True
+        # Only inspect the active arrow hold; ordinary Space/Play sessions
+        # are not tied to keyboard state.
+        if self._playback_timing[2] * direction <= 0:
+            return True
+        return self._windows_arrow_down(direction)
+
+    def _finish_physically_released_arrow(self) -> None:
+        if self._arrow_key_play.direction:
+            self._arrow_key_play.stop()
+        elif self.playback_active:
+            self.stop_playback()
+
     def _on_frame_navigation_key(self, event) -> str | None:
         if self.reader is None or self.export_running:
             return None
@@ -2188,6 +2223,12 @@ class PreprocessApp(ctk.CTk):
         delta = {"Left": -1, "Right": 1}.get(str(getattr(event, "keysym", "")))
         if delta is None:
             return None
+        if not self._windows_arrow_down(delta):
+            # Drop late native auto-repeat presses after the *physical*
+            # release. Otherwise they can restart an apparently stuck hold.
+            if self._arrow_key_play.direction == delta:
+                self._arrow_key_play.stop()
+            return "break"
         new_press = self._arrow_key_play.direction != delta
         self._arrow_key_play.press(delta)
         if new_press and delta < 0 and self._arrow_key_play.direction == -1:
@@ -2375,6 +2416,8 @@ class PreprocessApp(ctk.CTk):
             render=self._present_decoded_frame,
             on_error=self._smooth_playback_failed,
             on_boundary=self.stop_playback,
+            hold_is_active=self._held_arrow_is_physically_down,
+            on_hold_released=self._finish_physically_released_arrow,
         )
         return self._smooth_player
 
