@@ -263,6 +263,7 @@ def sync_environment(uv_executable: str, profile: str, python: str) -> None:
     command = [
         uv_executable,
         "sync",
+        "--quiet",
         "--locked",
         "--inexact",
         "--python",
@@ -567,6 +568,7 @@ def install_exact_pytorch_profile(uv_executable: str, profile: str) -> None:
         uv_executable,
         "pip",
         "install",
+        "--quiet",
         "--python",
         str(python),
     ]
@@ -675,7 +677,10 @@ def install_amadeus_command() -> Path:
             'cd /d "%AMADEUS_ROOT%"\n'
             'call "%AMADEUS_ROOT%\\.venv\\Scripts\\activate.bat"\n'
             "if errorlevel 1 exit /b 1\n"
-            'if defined CUDA_VISIBLE_DEVICES "%AMADEUS_ROOT%\\.venv\\Scripts\\python.exe" -c "from main.compute_telemetry import print_device_summary; print_device_summary()"\n'
+            'set /p AMADEUS_INSTALLED_VERSION=<"%AMADEUS_ROOT%\\VERSION"\n'
+            'echo [AMADEUS] Version: v%AMADEUS_INSTALLED_VERSION%\n'
+            'echo [AMADEUS] Location: %AMADEUS_ROOT%\n'
+            '"%AMADEUS_ROOT%\\.venv\\Scripts\\python.exe" tools\\launch_summary.py\n'
             'set "AMADEUS_SPLASH_TOKEN=%RANDOM%%RANDOM%%RANDOM%"\n'
             'start "AMADEUS Splash" /min "%AMADEUS_ROOT%\\.venv\\Scripts\\python.exe" "%AMADEUS_ROOT%\\gui\\splash_standalone.py" "%AMADEUS_SPLASH_TOKEN%" "4"\n'
             '"%AMADEUS_ROOT%\\.venv\\Scripts\\amadeus.exe" %*\n'
@@ -709,6 +714,9 @@ def install_amadeus_command() -> Path:
     command_path.write_text(
         "#!/usr/bin/env sh\n"
         f"cd {shlex.quote(str(PROJECT_ROOT))}\n"
+        'printf "[AMADEUS] Version: v%s\\n" "$(tr -d \'[:space:]\' < VERSION)"\n'
+        'echo "[AMADEUS] Location: $PWD"\n'
+        f"{shlex.quote(str(ENVIRONMENT_ROOT / 'bin' / 'python'))} tools/launch_summary.py\n"
         f"{shlex.quote(str(ENVIRONMENT_ROOT / 'bin' / 'amadeus'))} \"$@\"\n"
         "status=$?\n"
         "if [ \"$status\" -eq 42 ] || [ \"$status\" -eq 43 ]; then\n"
@@ -881,9 +889,8 @@ def main() -> int:
         return 0 if environment_ready() else 1
     if not args.uv:
         raise RuntimeError("--uv is required for setup")
-    profiles, explanation = select_torch_profiles()
-    print(f"[AMADEUS] {explanation}", flush=True)
-    print("[AMADEUS] Preparing the locked Python environment...", flush=True)
+    profiles, _explanation = select_torch_profiles()
+    print("[AMADEUS] Preparing the Python environment...", flush=True)
 
     try:
         if os.name == "nt" and ENVIRONMENT_ROOT != PROJECT_ROOT / ".venv":
@@ -892,8 +899,7 @@ def main() -> int:
         # AMADEUS.bat uses this marker for its fast path. Remove it before making
         # any changes so an interrupted or failed setup is fully checked next time.
         READY_MARKER.unlink(missing_ok=True)
-        uv_version_in_use = check_uv_version(args.uv)
-        print(f"[AMADEUS] Using uv {uv_version_in_use}: {args.uv}", flush=True)
+        check_uv_version(args.uv)
 
         profile = ""
         last_error: Exception | None = None
@@ -933,16 +939,14 @@ def main() -> int:
 
         verify_gui_environment()
         prepare_ffmpeg()
-        command_path = install_amadeus_command()
+        install_amadeus_command()
         READY_MARKER.write_text(json.dumps(ready_identity(profile)), encoding="utf-8")
     except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         signal_stop()
         return getattr(exc, "returncode", 1) or 1
 
-    print(f"[AMADEUS] Command installed: {command_path}", flush=True)
-    print('[AMADEUS] Open a new terminal and type: amadeus (or the short alias: amade)', flush=True)
-    print("[AMADEUS] Environment is ready. Starting the GUI...", flush=True)
+    print("[AMADEUS] Environment ready.", flush=True)
     return 0
 
 
