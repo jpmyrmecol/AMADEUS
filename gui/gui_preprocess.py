@@ -69,7 +69,8 @@ OUTPUT_SPEED_MAX = 100.0
 MIN_CROP_SIZE = 16
 HANDLE_HIT_PX = 8
 HANDLE_DRAW_PX = 7
-FRAME_CACHE_SIZE = 12
+FRAME_CACHE_SIZE = 128
+FRAME_CACHE_BYTES = 1024 * 1024 * 1024  # At most 1 GiB of paused/forward history
 VERIFY_MAD_THRESHOLD = 3.0
 GRAYSCALE_MEAN_SPREAD_THRESHOLD = 1.0
 GRAYSCALE_P99_SPREAD_THRESHOLD = 3.0
@@ -377,7 +378,7 @@ class VideoFrameReader:
         self.raw_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         self.raw_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         frame_bytes = max(1, self.raw_width * self.raw_height * 3)
-        self.cache_capacity = max(2, min(FRAME_CACHE_SIZE, (96 * 1024 * 1024) // frame_bytes))
+        self.cache_capacity = max(2, min(FRAME_CACHE_SIZE, FRAME_CACHE_BYTES // frame_bytes))
         self.reported_frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         self.frame_count = detect_seekable_frame_count(video_path, self.reported_frame_count)
         self.fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
@@ -2418,15 +2419,17 @@ class PreprocessApp(ctk.CTk):
             self._prefetch_after_id = None
             if cancel.is_set() or self.playback_active or self._arrow_key_play.direction or reader is not self.reader:
                 return
+            # Match Refinement's wider local history. Decode the backward
+            # window in ascending order: the FFmpeg backend can then proceed
+            # sequentially instead of seeking once per preceding frame.
             budget = max(1, reader.cache_capacity - 1)
-            forward = min(4, budget)
-            backward = min(2, max(0, budget - forward))
+            backward = min(60, max(1, budget // 2), center_frame)
+            forward = min(60, max(0, budget - backward),
+                          reader.frame_count - center_frame - 1)
             frames = [
-                center_frame + d for d in range(1, forward + 1)
-                if center_frame + d < reader.frame_count
+                fid for fid in range(center_frame - backward, center_frame)
             ] + [
-                center_frame - d for d in range(1, backward + 1)
-                if center_frame - d >= 0
+                fid for fid in range(center_frame + 1, center_frame + forward + 1)
             ]
 
             def worker():
