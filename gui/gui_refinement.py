@@ -109,11 +109,10 @@ MAX_ZOOM = 20.0
 VIDEO_EXTS = VIDEO_FILETYPES
 CSV_EXTS = [("CSV files", "*.csv"), ("All files", "*.*")]
 TRACKING_DROP_SUFFIXES = frozenset({".csv", ".h5", ".hdf5"})
-# Enough cache slots for the current frame and 120 frames in each direction.
-# Decoded RGB frames use substantial RAM at high video resolutions.
-FRAME_CACHE_SIZE = 256
-PREFETCH_FORWARD = 120
-PREFETCH_BACKWARD = 120
+# Bounded decoded RGB cache: 44 frames on either side plus the current frame.
+FRAME_CACHE_SIZE = 90
+PREFETCH_FORWARD = 44
+PREFETCH_BACKWARD = 44
 SNAP_PIXELS = 12
 LABEL_HIT_RADIUS = 24
 ENDPOINT_HIT_RADIUS = 14
