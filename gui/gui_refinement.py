@@ -2793,8 +2793,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
             return
 
         now = time.perf_counter()
-        if self._has_pending_frame_request():
-            # A pending tap or manual seek completes before playback proceeds.
+        if direction < 0 and self._has_pending_frame_request():
+            # A pending tap or manual seek completes before reverse playback.
+            # The forward Play path retains its existing request scheduling.
             self._schedule_playback(delay_ms=8)
             return
         cached_reverse_frame = None
