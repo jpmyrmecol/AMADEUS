@@ -67,6 +67,7 @@ from main.roi import (
 from main.video_frame_count import detect_seekable_frame_count
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
 from gui.preview_playback_timing import AdaptivePreviewPacer
+from gui.reverse_playback_buffer import PreparedFrame, SmoothPreviewPlayback
 
 APP_TITLE = "AMADEUS: Segmentation"
 WINDOW_W = 1720
@@ -1455,6 +1456,7 @@ class CrossingReviewApp(ctk.CTk):
         self.playback_active = False
         self.playback_speed = 1.0
         self._playback_timing: tuple[float, float, float] | None = None
+        self._smooth_player: SmoothPreviewPlayback | None = None
         self._preview_pacer = AdaptivePreviewPacer()
         self._arrow_key_play = ArrowKeyHoldPlayback(
             self,
@@ -1465,6 +1467,8 @@ class CrossingReviewApp(ctk.CTk):
             seek=lambda target: self.set_frame(target, from_playback=True),
             pause=self.stop_playback,
             pacer=lambda: self._preview_pacer,
+            hold_start=lambda direction: self.start_playback(direction),
+            hold_stop=self._stop_held_playback,
         )
         self.config_path: Optional[str] = None
         self.session_path: str = ""
@@ -3655,6 +3659,9 @@ class CrossingReviewApp(ctk.CTk):
         self.stop_playback(update_button=False)
         self.playback_speed = 1.0
         self._update_play_button()
+        if self._smooth_player is not None:
+            self._smooth_player.close()
+            self._smooth_player = None
         if self.reader is not None:
             self.reader.close()
         self.reader = reader
@@ -3778,6 +3785,9 @@ class CrossingReviewApp(ctk.CTk):
             self.after_cancel(self.prefetch_after_id)
         if self.status_clear_job is not None:
             self.after_cancel(self.status_clear_job)
+        if self._smooth_player is not None:
+            self._smooth_player.close()
+            self._smooth_player = None
         if self.reader is not None:
             self.reader.close()
         self._close_progress_popup()
@@ -3858,6 +3868,8 @@ class CrossingReviewApp(ctk.CTk):
             return False
         if self.playback_active and not from_playback:
             self.stop_playback()
+        if not self.playback_active and self._smooth_player is not None:
+            self._smooth_player.invalidate()
         if self._roi_drag_mode is not None:
             self.on_canvas_release()
         if self.reader.frame_count != self.frame_count:
@@ -3880,7 +3892,17 @@ class CrossingReviewApp(ctk.CTk):
             self.frame_count = self.reader.frame_count
             self.frame_spin.configure(from_=0, to=max(0, self.frame_count - 1))
             self.frame_scale.configure(from_=0, to=max(0, self.frame_count - 1))
-        frame_idx = max(0, min(self.frame_count - 1, int(actual_idx)))
+        return self._present_decoded_frame(frame_bgr, actual_idx, reset_view=reset_view)
+
+    def _present_decoded_frame(self, frame_bgr, frame_idx: int, *, reset_view=False) -> bool:
+        if self.reader is None or self._closing:
+            return False
+        if self.reader.frame_count != self.frame_count:
+            self.frame_count = self.reader.frame_count
+            self.frame_spin.configure(from_=0, to=max(0, self.frame_count - 1))
+            self.frame_scale.configure(from_=0, to=max(0, self.frame_count - 1))
+        frame_idx = max(0, min(self.frame_count - 1, int(frame_idx)))
+        self.reader._cache_put(frame_idx, frame_bgr)
         self.current_frame = frame_idx
         self.frame_var.set(frame_idx)
         self.frame_scale.set(frame_idx)
@@ -5999,15 +6021,12 @@ class CrossingReviewApp(ctk.CTk):
     def set_playback_speed(self, speed: float):
         if speed not in (1.0, 2.0, 4.0, 0.5, 0.25):
             raise ValueError("Playback speed must be 0.25, 0.5, 1, 2, or 4.")
-        if self._playback_timing is not None:
-            now = time.monotonic()
-            anchor_frame, anchor_time, previous_speed = self._playback_timing
-            position = anchor_frame + max(0.0, now - anchor_time) * self._playback_fps() * previous_speed
-            self._playback_timing = (position, now, speed)
         self.playback_speed = speed
+        if self.playback_active and self._smooth_player is not None:
+            self._smooth_player.set_speed(speed)
+            direction = -1 if self._playback_timing is not None and self._playback_timing[2] < 0 else 1
+            self._playback_timing = (float(self.current_frame), time.monotonic(), direction * speed)
         self._update_play_button()
-        if self.playback_active:
-            self._schedule_playback(delay_ms=1)
 
     def on_canvas_speed_click(self, event, speed: float):
         if self.reader is None:
@@ -6028,26 +6047,79 @@ class CrossingReviewApp(ctk.CTk):
             self.start_playback()
         return "break"
 
-    def start_playback(self):
-        if self.reader is None or self.frame_count <= 0 or self.playback_active:
+    def _ensure_smooth_player(self):
+        reader = self.reader
+        if reader is None:
+            raise RuntimeError("No video is loaded.")
+        if self._smooth_player is not None and self._smooth_player.reader is reader:
+            return self._smooth_player
+        if self._smooth_player is not None:
+            self._smooth_player.close()
+        rotation = 0
+        if hasattr(cv2, "CAP_PROP_ORIENTATION_META") and hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
+            try:
+                if bool(round(reader.cap.get(cv2.CAP_PROP_ORIENTATION_AUTO))):
+                    rotation = int(round(reader.cap.get(cv2.CAP_PROP_ORIENTATION_META))) % 360
+            except Exception:
+                rotation = 0
+
+        def seeded_frames(center):
+            with reader._cache_lock:
+                return {index: PreparedFrame(pixels=frame)
+                        for index, frame in reader.cache.items() if index < center}
+
+        self._smooth_player = SmoothPreviewPlayback(
+            self, reader=reader, fps=self._playback_fps(),
+            frame_count=reader.frame_count,
+            read_forward=lambda index, gap: reader.read_bgr_with_index(
+                index, max_sequential_gap=gap),
+            cached_frames=seeded_frames, rotation=rotation,
+            render=lambda image, index: self._present_decoded_frame(image, index),
+            on_error=self._smooth_playback_failed,
+            on_boundary=self.stop_playback,
+        )
+        return self._smooth_player
+
+    def _smooth_playback_failed(self, error):
+        self.stop_playback()
+        self.set_status(f"Preview decode failed: {error}")
+
+    def _stop_held_playback(self, direction):
+        timing = self._playback_timing
+        if self.playback_active and timing is not None and timing[2] * direction > 0:
+            self.stop_playback()
+
+    def start_playback(self, direction: int = 1):
+        if self.reader is None or self.frame_count <= 1 or self.playback_active:
             return
-        if self.current_frame >= self.frame_count - 1:
+        if direction not in (-1, 1):
+            raise ValueError("Playback direction must be -1 or 1.")
+        if direction > 0 and self.current_frame >= self.frame_count - 1:
             if not self.set_frame(0):
                 return
+        elif direction < 0 and self.current_frame <= 0:
+            return
         if self.prefetch_after_id is not None:
             self.after_cancel(self.prefetch_after_id)
             self.prefetch_after_id = None
         self._prefetch_cancel.set()
-        self._preview_pacer.resume()
+        try:
+            pipeline = self._ensure_smooth_player()
+            pipeline.start(direction, self.playback_speed)
+        except Exception as exc:
+            self.set_status(f"Preview playback initialization failed: {exc}")
+            return
         self.playback_active = True
-        self._playback_timing = (float(self.current_frame), time.monotonic(), self.playback_speed)
+        self._playback_timing = (float(self.current_frame), time.monotonic(),
+                                 direction * self.playback_speed)
         self._update_play_button()
-        self._schedule_playback(delay_ms=1)
 
     def stop_playback(self, update_button: bool = True):
         was_active = self.playback_active
         self.playback_active = False
         self._playback_timing = None
+        if self._smooth_player is not None:
+            self._smooth_player.stop()
         if self.playback_job is not None:
             self.after_cancel(self.playback_job)
             self.playback_job = None
@@ -6061,39 +6133,14 @@ class CrossingReviewApp(ctk.CTk):
         self.playback_speed_button.configure(text=f"{self.playback_speed:g}×")
 
     def _schedule_playback(self, *, delay_ms: int = 8):
-        if not self.playback_active:
-            return
-        if self.playback_job is not None:
-            self.after_cancel(self.playback_job)
-        self.playback_job = self.after(max(1, int(delay_ms)), self._playback_tick)
+        # The shared decoder owns the render-driven playback timer.
+        if self.playback_active and self._smooth_player is not None:
+            self._smooth_player._schedule(delay_ms)
 
     def _playback_tick(self):
-        self.playback_job = None
-        if not self.playback_active or self.reader is None or self._playback_timing is None:
-            return
-        now = time.monotonic()
-        anchor_frame, anchor_time, speed = self._playback_timing
-        rate = self._playback_fps() * speed
-        target = min(self.frame_count - 1, int(anchor_frame + max(0.0, now - anchor_time) * rate))
-        if target > self.current_frame:
-            wait_ms = self._preview_pacer.delay_ms(now, rate)
-            if wait_ms > 0:
-                self._schedule_playback(delay_ms=wait_ms)
-                return
-            started = time.monotonic()
-            self._preview_pacer.begin_frame(started)
-            rendered = self.set_frame(target, from_playback=True)
-            self._preview_pacer.observe_frame(time.monotonic() - started)
-            if not rendered:
-                self.stop_playback()
-                return
-        if self.current_frame >= self.frame_count - 1:
-            self.stop_playback()
-            return
-        now = time.monotonic()
-        next_due = anchor_time + (self.current_frame + 1 - anchor_frame) / rate
-        timeline_wait = max(1, math.ceil((next_due - now) * 1000))
-        self._schedule_playback(delay_ms=max(timeline_wait, self._preview_pacer.delay_ms(now, rate)))
+        # Retained for callers using the legacy callback name.
+        if self._smooth_player is not None:
+            self._smooth_player._tick()
 
     def _open_progress_popup(self, title: str):
         self._close_progress_popup()
