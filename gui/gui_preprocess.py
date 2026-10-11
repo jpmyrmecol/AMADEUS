@@ -638,6 +638,7 @@ class PreprocessApp(ctk.CTk):
         self.region_export_vars: list[tk.BooleanVar] = []
 
         self.tk_image: ImageTk.PhotoImage | None = None
+        self._canvas_image_id: int | None = None
         self.view_initialized = False
         self.zoom_scale = 1.0
         self.preview_turns = 0
@@ -1845,6 +1846,9 @@ class PreprocessApp(ctk.CTk):
         self.in_frame = 0
         self.out_frame = reader.frame_count - 1
         self.frame_bgr_cache = None
+        self.canvas.delete("all")
+        self._canvas_image_id = None
+        self.tk_image = None
         self.output_speed_var.set(1.0)
         self.output_speed_spin.delete(0, tk.END)
         self.output_speed_spin.insert(0, "1.00")
@@ -2582,16 +2586,24 @@ class PreprocessApp(ctk.CTk):
         preview_bgr = self._build_preview_bgr()
         if preview_bgr is None:
             self.canvas.delete("all")
+            self._canvas_image_id = None
+            self.tk_image = None
             w = max(1, self.canvas.winfo_width())
             h = max(1, self.canvas.winfo_height())
             self.canvas.create_text(w / 2, h / 2, text="No video loaded", fill=MUTED_TEXT, font=("Arial", 18))
             return
         preview_rgb = cv2.cvtColor(preview_bgr, cv2.COLOR_BGR2RGB)
         self._present_image(preview_rgb)
+        # Keep the same Tk Canvas image item while the movie is playing.
+        # Only overlay shapes need recreating when the displayed image changes.
+        self.canvas.delete("preview_overlay")
         if self.active_region_idx == 0:
             self._draw_crop_overlays()
         if self.cursor_position is not None:
             self._draw_edit_cursor(*self.cursor_position)
+        for item_id in self.canvas.find_all():
+            if item_id != self._canvas_image_id:
+                self.canvas.addtag_withtag("preview_overlay", item_id)
 
     def fit_canvas_to_window(self):
         self.view_initialized = False
@@ -2634,9 +2646,18 @@ class PreprocessApp(ctk.CTk):
         matrix = np.array([[self.view_scale, 0, self.view_offset_x],
                            [0, self.view_scale, self.view_offset_y]], dtype=float)
         rendered = cv2.warpAffine(img_rgb, matrix, (can_w, can_h), flags=cv2.INTER_LINEAR)
-        self.tk_image = ImageTk.PhotoImage(Image.fromarray(rendered))
-        self.canvas.delete("all")
-        self.canvas.create_image(0, 0, anchor="nw", image=self.tk_image)
+        image = Image.fromarray(rendered)
+        if (self.tk_image is None or
+                self.tk_image.width() != can_w or self.tk_image.height() != can_h):
+            self.tk_image = ImageTk.PhotoImage(image)
+        else:
+            self.tk_image.paste(image)
+        if self._canvas_image_id is None or not self.canvas.type(self._canvas_image_id):
+            self._canvas_image_id = self.canvas.create_image(
+                0, 0, anchor="nw", image=self.tk_image
+            )
+        else:
+            self.canvas.itemconfigure(self._canvas_image_id, image=self.tk_image)
 
     def save_canvas_screenshot(self):
         frame = self._build_preview_bgr()
