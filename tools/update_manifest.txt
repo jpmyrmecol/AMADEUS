@@ -19,6 +19,7 @@ gui/canvas_file_drop.py
 gui/color.py
 gui/config_path_recovery.py
 gui/convert.py
+gui/copyable_text.py
 gui/gui_advanced_tracking.py
 gui/gui_colab.py
 gui/gui_easy_tracking.py
@@ -27,7 +28,11 @@ gui/gui_multi_config_batch.py
 gui/gui_preprocess.py
 gui/gui_refinement.py
 gui/gui_segmentation.py
+gui/preview_key_navigation.py
+gui/preview_playback_timing.py
 gui/project_paths.py
+gui/reverse_playback_buffer.py
+gui/runtime.py
 gui/splash_ipc.py
 gui/splash_reveal.py
 gui/splash_standalone.py
@@ -36,6 +41,7 @@ gui/update_support.py
 gui/video_input.py
 gui/window_icon.py
 main/__init__.py
+main/adjacent_blob_placement.py
 main/animal_noise.py
 main/apply_class_label_filtering.py
 main/assign_types.py
@@ -74,13 +80,14 @@ main/segmentation_core.py
 main/segmentation_metadata.py
 main/tracking_artifacts.py
 main/tracking_constants.py
+main/tracking_video_inputs.py
 main/training_paths.py
 main/variable_population.py
+main/version_info.py
 main/video_compat.py
 main/video_encoders.py
 main/video_frame_count.py
 main/video_frame_rows.py
-main/version_info.py
 main/weight_utils.py
 main/without_direction_estimation/README.md
 main/without_direction_estimation/__init__.py
@@ -111,6 +118,7 @@ tools/check_torch.cmd
 tools/colab_runner.py
 tools/ffmpeg_runtime.py
 tools/macos_python.sh
+tools/prepare_linux_tk_xft.py
 tools/runtime_profiles.py
 tools/setup_environment.py
 tools/update_manifest.txt
