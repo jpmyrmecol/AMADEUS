@@ -113,6 +113,9 @@ class ArrowKeys:
     def stop(self):
         pass
 
+    def frame_rendered(self):
+        pass
+
 
 class CanvasSize:
     def winfo_width(self):
@@ -348,6 +351,18 @@ class RefinementPlaybackTests(unittest.TestCase):
         self.assertEqual(capture.grabs, 0)
         self.assertEqual(capture.seeks, [300])
 
+
+    def test_forward_key_hold_catches_up_with_sequential_grabs(self):
+        reader, capture = self.make_reader()
+        reader.read(0)
+        app = HeadlessApp(reader=reader, current=0)
+        app._arrow_key_play.direction = 1
+        app._arrow_key_play.repeating = True
+        app.request_frame(60, immediate=True)
+        result = self.decode_one_request(app)
+        self.assertEqual(result[2], 60)
+        self.assertEqual(capture.grabs, 59)
+        self.assertEqual(capture.seeks, [])
 
     def test_reverse_key_hold_decodes_windows_instead_of_per_frame_seeks(self):
         reader, capture = self.make_reader()
