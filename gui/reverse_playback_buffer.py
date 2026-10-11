@@ -8,6 +8,9 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import math
 import threading
+import time
+
+import av
 from typing import TYPE_CHECKING
 
 import cv2
@@ -52,6 +55,22 @@ class PreparedFrame:
         if self.rotation in rotations:
             pixels = cv2.rotate(pixels, rotations[self.rotation])
         return pixels
+
+
+    def to_bgr(self) -> np.ndarray:
+        """Decoded BGR image; used only by the two OpenCV-based preview GUIs."""
+        if self.native is None:
+            return self.pixels
+        bgr = self.native.reformat(format="bgr24")
+        plane = bgr.planes[0]
+        pixels = np.ndarray(
+            (bgr.height, bgr.width, 3), dtype=np.uint8, buffer=plane,
+            strides=(plane.line_size, 3, 1),
+        )
+        rotations = {90: cv2.ROTATE_90_CLOCKWISE,
+                     180: cv2.ROTATE_180,
+                     270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+        return cv2.rotate(pixels, rotations[self.rotation]) if self.rotation in rotations else pixels
 
 
 class ReversePlaybackBuffer:
@@ -413,3 +432,277 @@ class ReversePlaybackBuffer:
                     if not self._active:
                         self._warm_blocks = max(0, self._warm_blocks - 1)
                 self._cond.notify_all()
+
+
+class SmoothPreviewPlayback:
+    """Common asynchronous playback engine for Segmentation and Cropping.
+
+    PyAV decodes reverse blocks into the existing bounded reverse buffer.
+    A separate single worker performs forward decoding or reverse-frame color
+    conversion. Tk never executes a decoder call during continuous playback.
+    """
+
+    def __init__(self, owner, *, reader, fps, frame_count, read_forward,
+                 cached_frames, render, on_error, on_boundary,
+                 lower_bound=0, upper_bound=None, rotation=0):
+        self.owner, self.reader = owner, reader
+        self.fps = float(fps)
+        self.frame_count = int(frame_count)
+        self.read_forward, self.render = read_forward, render
+        self.on_error, self.on_boundary = on_error, on_boundary
+        self.lower_bound = int(lower_bound)
+        self.upper_bound = self.frame_count - 1 if upper_bound is None else int(upper_bound)
+        self.rotation = int(rotation) % 360
+        self._container = av.open(reader.video_path)
+        try:
+            self._stream = self._container.streams.video[0]
+            codec = self._stream.codec_context
+            codec.thread_count = 4
+            codec.thread_type = "AUTO"
+            width, height = codec.width, codec.height
+            native_bytes = math.ceil(
+                (width + 64) * (height + 64) * codec.format.padded_bits_per_pixel / 8
+            )
+            self._reverse_lock = threading.Lock()
+            self.reverse_buffer = ReversePlaybackBuffer(
+                self._decode_reverse_block, frame_count=frame_count,
+                fps=fps, frame_bytes=max((width + 64) * height * 3, native_bytes),
+                seed_frames=cached_frames,
+            )
+        except Exception:
+            self._container.close()
+            raise
+
+        self._cond = threading.Condition()
+        self._closed = False
+        self._request = None
+        self._result = None
+        self._generation = 0
+        self._pending = False
+        self._active = False
+        self._direction = 1
+        self._speed = 1.0
+        self._timing = None
+        self._waiting_reverse = False
+        self._resume_clock = False
+        self._timer = None
+        self._worker = threading.Thread(
+            target=self._decode_loop, name="preview-video-decoder", daemon=True,
+        )
+        self._worker.start()
+
+    def _decode_reverse_block(self, first, last, stride, is_cancelled):
+        with self._reverse_lock:
+            if self._closed or is_cancelled():
+                return
+            stream = self._stream
+            start = stream.start_time or 0
+            self._container.seek(
+                start + int(first / self.fps / stream.time_base),
+                stream=stream, backward=True, any_frame=False,
+            )
+            expected = first
+            for frame in self._container.decode(stream):
+                if self._closed or is_cancelled():
+                    return
+                if frame.pts is None:
+                    raise RuntimeError("Reverse frame has no presentation timestamp.")
+                position = float((frame.pts - start) * stream.time_base) * self.fps
+                index = round(position)
+                if abs(index - position) > 0.1:
+                    raise RuntimeError("Reverse preview requires constant frame timing.")
+                if index < first:
+                    continue
+                if index != expected:
+                    raise RuntimeError(f"Reverse decoding skipped frame {expected}.")
+                if index % stride == 0 or index == last:
+                    yield index, PreparedFrame(native=frame, rotation=self.rotation)
+                if index == last:
+                    return
+                expected += 1
+
+    def _decode_loop(self):
+        while True:
+            with self._cond:
+                self._cond.wait_for(lambda: self._closed or self._request is not None)
+                if self._closed:
+                    return
+                generation, index, prepared, max_gap = self._request
+                self._request = None
+            try:
+                if prepared is not None:
+                    frame, actual = prepared.to_bgr(), index
+                else:
+                    frame, actual = self.read_forward(index, max_gap)
+                if frame is None:
+                    raise RuntimeError(f"Could not decode preview frame {index}.")
+                result = (generation, actual, frame, None)
+            except Exception as exc:
+                result = (generation, index, None, exc)
+            with self._cond:
+                if not self._closed and generation == self._generation:
+                    self._result = result
+
+    def _schedule(self, delay=8):
+        if self._timer is not None:
+            try:
+                self.owner.after_cancel(self._timer)
+            except Exception:
+                pass
+            self._timer = None
+        if not self._closed and (self._active or self._pending):
+            self._timer = self.owner.after(max(1, int(delay)), self._tick)
+
+    def _position(self, now):
+        anchor, epoch, speed = self._timing
+        return anchor + max(0.0, now - epoch) * self.fps * speed
+
+    def start(self, direction, speed):
+        if self._closed:
+            return
+        if direction not in (-1, 1):
+            raise ValueError("Playback direction must be -1 or 1.")
+        self._direction, self._speed = direction, float(speed)
+        center = int(self.owner.current_frame)
+        self._active = True
+        self._timing = (float(center), time.perf_counter(), direction * self._speed)
+        self._resume_clock = self._pending
+        if direction < 0:
+            self.reverse_buffer.start(center, self._speed)
+            self._waiting_reverse = not self.reverse_buffer.ready(center)
+        else:
+            self.reverse_buffer.stop()
+            self._waiting_reverse = False
+        self._schedule(1)
+
+    def stop(self):
+        self._active = False
+        self._timing = None
+        self.reverse_buffer.stop()
+        self._waiting_reverse = False
+        self._schedule(8)  # Complete one pending frame even if paused.
+
+    def set_speed(self, speed):
+        self._speed = float(speed)
+        if not self._active or self._timing is None:
+            return
+        now = time.perf_counter()
+        position = self._position(now)
+        self._timing = (position, now, self._direction * self._speed)
+        if self._direction < 0:
+            center = int(self.owner.current_frame)
+            self.reverse_buffer.start(center, self._speed)
+            self._waiting_reverse = not self.reverse_buffer.ready(center)
+        self._schedule(1)
+
+    def invalidate(self):
+        """Invalidate stale decoder results after manual seeking."""
+        with self._cond:
+            self._generation += 1
+            self._request = None
+            self._result = None
+            self._pending = False
+        self._schedule()
+
+    def _receive(self):
+        with self._cond:
+            result, self._result = self._result, None
+        if result is None:
+            return
+        _, frame_idx, image, error = result
+        self._pending = False
+        if error is not None:
+            self.stop()
+            self.on_error(error)
+            return
+        self.render(image, frame_idx)
+        if self._active:
+            if self._direction < 0:
+                self.reverse_buffer.advance(frame_idx)
+            if self._resume_clock:
+                self._timing = (float(frame_idx), time.perf_counter(),
+                                self._direction * self._speed)
+                self._resume_clock = False
+
+    def _queue_frame(self, index, prepared=None):
+        with self._cond:
+            if self._closed or self._pending:
+                return
+            self._generation += 1
+            gap = max(12, math.ceil(self.fps * max(1.0, self._speed) * 2))
+            self._request = (self._generation, int(index), prepared, gap)
+            self._pending = True
+            self._cond.notify()
+
+    def _tick(self):
+        self._timer = None
+        if self._closed:
+            return
+        self._receive()
+        if not self._active or self._timing is None:
+            self._schedule()
+            return
+        current = int(self.owner.current_frame)
+        bound = self.lower_bound if self._direction < 0 else self.upper_bound
+        if (current - bound) * self._direction >= 0:
+            self.on_boundary()
+            return
+        if self._pending:
+            self._schedule(8)
+            return
+        now = time.perf_counter()
+        target = (math.ceil(self._position(now)) if self._direction < 0
+                  else int(self._position(now)))
+        target = min(self.upper_bound, max(self.lower_bound, target))
+        if (target - current) * self._direction <= 0:
+            rate = self.fps * self._speed
+            anchor, epoch, signed_speed = self._timing
+            due = epoch + (current + self._direction - anchor) / (self.fps * signed_speed)
+            self._schedule(max(1, int((due - now) * 1000)))
+            return
+
+        prepared = None
+        if self._direction < 0:
+            error = self.reverse_buffer.error
+            if error is not None:
+                self.stop()
+                self.on_error(error)
+                return
+            if self._waiting_reverse:
+                if not self.reverse_buffer.ready(current):
+                    self._schedule(8)
+                    return
+                self._timing = (float(current), now, -self._speed)
+                self._waiting_reverse = False
+                self._schedule(1)
+                return
+            choice = self.reverse_buffer.get_frame(target, current)
+            if choice is None:
+                self.reverse_buffer.advance(current)
+                self._waiting_reverse = True
+                self._schedule(8)
+                return
+            target, prepared = choice
+
+        self._queue_frame(target, prepared)
+        self._schedule(8)
+
+    def close(self):
+        if self._timer is not None:
+            try:
+                self.owner.after_cancel(self._timer)
+            except Exception:
+                pass
+            self._timer = None
+        self._active = False
+        self._closed = True
+        self.reverse_buffer.close()
+        with self._cond:
+            self._request = None
+            self._result = None
+            self._cond.notify_all()
+        def cleanup():
+            with self._reverse_lock:
+                self._container.close()
+        threading.Thread(target=cleanup, name="preview-ffmpeg-cleanup",
+                         daemon=True).start()
