@@ -514,13 +514,21 @@ class VideoFrameReader:
             self._cache_put(frame_idx, self._apply_orientation(frame))
 
     def close(self) -> None:
+        """Release decoder handles after in-flight reads without blocking Tk."""
+        if self._closed.is_set():
+            return
         self._closed.set()
-        with self._prefetch_lock:
-            if self._prefetch_cap is not None:
-                self._prefetch_cap.release()
-                self._prefetch_cap = None
-        with self._lock:
-            self.cap.release()
+
+        def cleanup():
+            with self._prefetch_lock:
+                if self._prefetch_cap is not None:
+                    self._prefetch_cap.release()
+                    self._prefetch_cap = None
+            with self._lock:
+                self.cap.release()
+
+        threading.Thread(target=cleanup, name="cropping-video-cleanup",
+                         daemon=True).start()
 
 
 @dataclass
@@ -2105,6 +2113,13 @@ class PreprocessApp(ctk.CTk):
         if delta is None:
             return None
         self._arrow_key_play.press(delta)
+        if delta < 0 and self._arrow_key_play.direction == -1:
+            # Reuse the hold-detection interval to warm the reverse buffer.
+            try:
+                pipeline = self._ensure_smooth_player()
+                pipeline.reverse_buffer.prepare(self.current_frame, self.playback_speed)
+            except Exception:
+                pass  # Preserve single-frame stepping if reverse setup fails.
         return "break"
 
     def _on_frame_navigation_key_release(self, event) -> str | None:
