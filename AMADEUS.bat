@@ -79,6 +79,7 @@ set "UV_EXE="
 for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\uv_bootstrap.ps1" -ProjectRoot "%~dp0."`) do set "UV_EXE=%%I"
 if not defined UV_EXE (
     echo [ERROR] uv could not be prepared. See the message above.
+    endlocal
     exit /b 1
 )
 
