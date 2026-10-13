@@ -739,7 +739,7 @@ class EasyTrackingGUI(ctk.CTk):
             text="Launch Segmentation",
             width=230,
             height=36,
-            border_width=3,
+            border_width=0,
             border_color="#777777",
             command=self._launch_segmentation,
         )
@@ -896,6 +896,9 @@ class EasyTrackingGUI(ctk.CTk):
         canvas.itemconfigure(
             "segmentation_attention_border", state="normal" if active else "hidden"
         )
+        # The native border is part of the highlight, never a permanent outline.
+        self._seg_btn.configure(border_width=3 if active else 0)
+        self._seg_border_size = None
         if active:
             self._seg_attention_phase = 0.0
             self._seg_attention_last_time = time.monotonic()
