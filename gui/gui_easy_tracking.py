@@ -513,6 +513,8 @@ class EasyTrackingGUI(ctk.CTk):
             text="Launch Segmentation",
             width=230,
             height=36,
+            border_width=3,
+            border_color="#777777",
             command=self._launch_segmentation,
         )
         self._seg_btn.pack(side="left", padx=(0, 12))
@@ -542,10 +544,13 @@ class EasyTrackingGUI(ctk.CTk):
         self._refresh_tracking_video_controls()
 
     @staticmethod
-    def _segmentation_border_points(width: int, height: int, count: int) -> list[tuple[float, float]]:
-        """Evenly spaced points around the button's rounded-rectangle outline."""
-        left, top, right, bottom = 2.0, 2.0, width - 2.0, height - 2.0
-        radius = min(9.0, (bottom - top) / 2)
+    def _segmentation_border_points(
+        width: int, height: int, count: int, corner_radius: float, border_width: float,
+    ) -> list[tuple[float, float]]:
+        """Follow the center of CTkButton's native border, including its rounded corners."""
+        inset = border_width / 2
+        left, top, right, bottom = inset, inset, width - inset, height - inset
+        radius = max(1.0, min(corner_radius, width / 2, height / 2) - inset)
         horizontal = right - left - 2 * radius
         vertical = bottom - top - 2 * radius
         arc = math.pi * radius / 2
@@ -595,7 +600,11 @@ class EasyTrackingGUI(ctk.CTk):
             return
         count = len(self._seg_border_items)
         if size != self._seg_border_size:
-            points = self._segmentation_border_points(*size, count)
+            points = self._segmentation_border_points(
+                *size, count,
+                self._seg_btn._apply_widget_scaling(self._seg_btn.cget("corner_radius")),
+                self._seg_btn._apply_widget_scaling(self._seg_btn.cget("border_width")),
+            )
             for i, item in enumerate(self._seg_border_items):
                 x0, y0 = points[i]
                 x1, y1 = points[(i + 1) % count]
@@ -604,7 +613,7 @@ class EasyTrackingGUI(ctk.CTk):
         for i, item in enumerate(self._seg_border_items):
             distance = abs((i / count - self._seg_attention_phase + 0.5) % 1 - 0.5)
             brightness = max(0.0, 1.0 - distance / 0.13) ** 2
-            low, high = (30, 103, 145), (230, 250, 255)
+            low, high = (119, 119, 119), (250, 250, 250)
             color = "#{:02x}{:02x}{:02x}".format(
                 *(round(a + (b - a) * brightness) for a, b in zip(low, high))
             )
@@ -630,7 +639,6 @@ class EasyTrackingGUI(ctk.CTk):
         if self._seg_attention_job is not None:
             self.after_cancel(self._seg_attention_job)
             self._seg_attention_job = None
-        self._seg_btn.configure(width=242, height=38)
         self._paint_segmentation_border()
 
     def _on_segmentation_leave(self, _event=None) -> None:
@@ -646,7 +654,6 @@ class EasyTrackingGUI(ctk.CTk):
         if not self._seg_hovered:
             return
         self._seg_hovered = False
-        button.configure(width=230, height=36)
         self._seg_attention_last_time = time.monotonic()
         self._paint_segmentation_border()
         if self._seg_attention_active:
