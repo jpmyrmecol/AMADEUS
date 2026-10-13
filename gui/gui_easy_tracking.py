@@ -428,7 +428,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._build_progress_section(left)
         self._build_canvas_panel(right)
         self._video_drop_state = install_canvas_file_drop(
-            self, self,
+            self, pane,
             allowed_suffixes=VIDEO_DROP_SUFFIXES,
             on_path=self._handle_dropped_training_video,
             status_callback=lambda message: self._canvas_status.configure(text=message),
