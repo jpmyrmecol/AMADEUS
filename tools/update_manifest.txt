@@ -13,6 +13,7 @@ assets/logo_amadeus_splash.png
 colab/AMADEUS_Colab.ipynb
 gui/__init__.py
 gui/advanced_tracking_layout.py
+gui/attention_border.py
 gui/app_uninstall.py
 gui/app_update.py
 gui/canvas_file_drop.py
