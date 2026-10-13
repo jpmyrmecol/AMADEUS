@@ -610,7 +610,7 @@ class EasyTrackingGUI(ctk.CTk):
         session = self._get_session()
         if not session:
             return False
-        if self._without_direction.get():
+        if self._without_direction.get() and os.path.basename(os.path.normpath(session)) != "without_direction_estimation":
             session = os.path.join(session, "without_direction_estimation")
         folder = os.path.join(session, "results")
         if not os.path.isdir(folder):
@@ -1238,7 +1238,8 @@ class EasyTrackingGUI(ctk.CTk):
             self._seg_status.configure(text="Done", text_color="#1f8040")
         else:
             self._seg_status.configure(text="Not started", text_color="gray")
-        self._set_post_segmentation_visibility(completed)
+        # Collapse Step 1 only after the Segmentation GUI has returned.
+        self._set_post_segmentation_visibility(completed and not running)
         self._set_segmentation_attention(
             os.path.isfile(self._video_entry.get().strip()) and not completed and not running
         )
