@@ -444,24 +444,29 @@ class EasyTrackingGUI(ctk.CTk):
         self._video_details_revealed = False
         self._video_prompt = ctk.CTkFrame(
             parent, corner_radius=12, border_width=1,
-            border_color="#505050", fg_color="#242424",
+            border_color="#505050", fg_color="#1b1b1b",
         )
-        self._video_prompt.pack(expand=True, padx=24, pady=12)
+        # Occupy almost all of the left area above the fixed footer, leaving
+        # a narrow margin. Center the controls inside this large panel.
+        self._video_prompt.pack(fill="both", expand=True, padx=20, pady=18)
+        prompt_contents = ctk.CTkFrame(self._video_prompt, fg_color="transparent")
+        prompt_contents.pack(expand=True)
+        prompt_font = ctk.CTkFont(size=21, weight="bold")
         self._video_select_btn = ctk.CTkButton(
-            self._video_prompt,
+            prompt_contents,
             text="Select Videos",
             width=260, height=52,
             border_width=3, border_color="#777777",
-            font=("TkDefaultFont", 17, "bold"),
+            font=prompt_font,
             command=self._browse_training_video,
         )
-        self._video_select_btn.pack(padx=48, pady=(36, 12))
+        self._video_select_btn.pack(padx=24, pady=(0, 20))
         ctk.CTkLabel(
-            self._video_prompt,
+            prompt_contents,
             text="or drag & drop a video",
-            text_color="#b8b8b8",
-            font=("TkDefaultFont", 17),
-        ).pack(pady=(0, 36))
+            text_color="#d0d0d0",
+            font=prompt_font,
+        ).pack()
 
         self._video_select_phase = 0.0
         self._video_select_last_time = time.monotonic()
