@@ -508,26 +508,33 @@ class EasyTrackingGUI(ctk.CTk):
 
         action_row = ctk.CTkFrame(frame, corner_radius=0)
         action_row.pack(fill="x", padx=8, pady=(2, 10))
-        self._seg_sparkle_left = ctk.CTkLabel(
-            action_row, text="", width=22, font=("TkDefaultFont", 20),
-        )
-        self._seg_sparkle_left.pack(side="left", padx=(0, 2))
         self._seg_btn = ctk.CTkButton(
             action_row,
             text="Launch Segmentation",
             width=230,
+            height=36,
             command=self._launch_segmentation,
         )
-        self._seg_btn.pack(side="left", padx=(0, 2))
-        self._seg_sparkle_right = ctk.CTkLabel(
-            action_row, text="", width=22, font=("TkDefaultFont", 16),
-        )
-        self._seg_sparkle_right.pack(side="left", padx=(0, 10))
+        self._seg_btn.pack(side="left", padx=(0, 12))
         self._seg_attention_active = False
         self._seg_attention_job: str | None = None
-        self._seg_attention_started_at = 0.0
-        self._seg_default_border_width = self._seg_btn.cget("border_width")
-        self._seg_default_border_color = self._seg_btn.cget("border_color")
+        self._seg_attention_phase = 0.0
+        self._seg_attention_last_time = 0.0
+        self._seg_hovered = False
+        self._seg_border_size: tuple[int, int] | None = None
+        self._seg_border_items = [
+            self._seg_btn._canvas.create_line(
+                0, 0, 0, 0, width=2.6, capstyle=tk.ROUND,
+                tags="segmentation_attention_border", state="hidden",
+            )
+            for _ in range(96)
+        ]
+        self._seg_btn.bind("<Enter>", self._on_segmentation_enter)
+        self._seg_btn.bind("<Leave>", self._on_segmentation_leave)
+        self._seg_btn._canvas.bind(
+            "<Configure>", lambda _event: self.after_idle(self._paint_segmentation_border),
+            add="+",
+        )
         self._seg_status = ctk.CTkLabel(
             action_row, text="Not started", text_color="gray", anchor="w"
         )
@@ -535,49 +542,134 @@ class EasyTrackingGUI(ctk.CTk):
         self._refresh_tracking_video_controls()
 
     @staticmethod
-    def _seg_sparkle_color(level: float) -> str:
-        low, high = (28, 94, 150), (216, 246, 255)
-        rgb = (round(a + (b - a) * level) for a, b in zip(low, high))
-        return "#{:02x}{:02x}{:02x}".format(*rgb)
+    def _segmentation_border_points(width: int, height: int, count: int) -> list[tuple[float, float]]:
+        """Evenly spaced points around the button's rounded-rectangle outline."""
+        left, top, right, bottom = 2.0, 2.0, width - 2.0, height - 2.0
+        radius = min(9.0, (bottom - top) / 2)
+        horizontal = right - left - 2 * radius
+        vertical = bottom - top - 2 * radius
+        arc = math.pi * radius / 2
+        lengths = (horizontal, arc, vertical, arc, horizontal, arc, vertical, arc)
+        perimeter = sum(lengths)
+        result = []
+        for i in range(count):
+            distance = i * perimeter / count
+            for part, length in enumerate(lengths):
+                if distance < length:
+                    t = distance / length
+                    break
+                distance -= length
+            if part == 0:
+                point = (left + radius + t * horizontal, top)
+            elif part == 1:
+                angle = -math.pi / 2 + t * math.pi / 2
+                point = (right - radius + radius * math.cos(angle),
+                         top + radius + radius * math.sin(angle))
+            elif part == 2:
+                point = (right, top + radius + t * vertical)
+            elif part == 3:
+                angle = t * math.pi / 2
+                point = (right - radius + radius * math.cos(angle),
+                         bottom - radius + radius * math.sin(angle))
+            elif part == 4:
+                point = (right - radius - t * horizontal, bottom)
+            elif part == 5:
+                angle = math.pi / 2 + t * math.pi / 2
+                point = (left + radius + radius * math.cos(angle),
+                         bottom - radius + radius * math.sin(angle))
+            elif part == 6:
+                point = (left, bottom - radius - t * vertical)
+            else:
+                angle = math.pi + t * math.pi / 2
+                point = (left + radius + radius * math.cos(angle),
+                         top + radius + radius * math.sin(angle))
+            result.append(point)
+        return result
+
+    def _paint_segmentation_border(self) -> None:
+        if not self._seg_attention_active:
+            return
+        canvas = self._seg_btn._canvas
+        size = (canvas.winfo_width(), canvas.winfo_height())
+        if min(size) < 20:
+            return
+        count = len(self._seg_border_items)
+        if size != self._seg_border_size:
+            points = self._segmentation_border_points(*size, count)
+            for i, item in enumerate(self._seg_border_items):
+                x0, y0 = points[i]
+                x1, y1 = points[(i + 1) % count]
+                canvas.coords(item, x0, y0, x1, y1)
+            self._seg_border_size = size
+        for i, item in enumerate(self._seg_border_items):
+            distance = abs((i / count - self._seg_attention_phase + 0.5) % 1 - 0.5)
+            brightness = max(0.0, 1.0 - distance / 0.13) ** 2
+            low, high = (30, 103, 145), (230, 250, 255)
+            color = "#{:02x}{:02x}{:02x}".format(
+                *(round(a + (b - a) * brightness) for a, b in zip(low, high))
+            )
+            canvas.itemconfigure(item, fill=color)
+        canvas.tag_raise("segmentation_attention_border")
 
     def _animate_segmentation_attention(self) -> None:
         self._seg_attention_job = None
-        if not self._seg_attention_active:
+        if not self._seg_attention_active or self._seg_hovered:
             return
-        phase = (time.monotonic() - self._seg_attention_started_at) * (2 * math.pi / 2.8)
-        left = (1 + math.sin(phase)) / 2
-        right = (1 + math.sin(phase + 2.1)) / 2
-        self._seg_sparkle_left.configure(
-            text="✦" if left > 0.40 else "✧",
-            text_color=self._seg_sparkle_color(left),
-        )
-        self._seg_sparkle_right.configure(
-            text="✦" if right > 0.40 else "✧",
-            text_color=self._seg_sparkle_color(right),
-        )
-        self._seg_btn.configure(
-            border_width=2,
-            border_color=self._seg_sparkle_color((left + right) / 2),
-        )
-        self._seg_attention_job = self.after(80, self._animate_segmentation_attention)
+        now = time.monotonic()
+        self._seg_attention_phase = (
+            self._seg_attention_phase + (now - self._seg_attention_last_time) / 3.0
+        ) % 1.0
+        self._seg_attention_last_time = now
+        self._paint_segmentation_border()
+        self._seg_attention_job = self.after(50, self._animate_segmentation_attention)
+
+    def _on_segmentation_enter(self, _event=None) -> None:
+        if self._seg_hovered:
+            return
+        self._seg_hovered = True
+        if self._seg_attention_job is not None:
+            self.after_cancel(self._seg_attention_job)
+            self._seg_attention_job = None
+        self._seg_btn.configure(width=242, height=38)
+        self._paint_segmentation_border()
+
+    def _on_segmentation_leave(self, _event=None) -> None:
+        # Moving between the label and the canvas also triggers Leave in CTkButton.
+        self.after(25, self._check_segmentation_hover)
+
+    def _check_segmentation_hover(self) -> None:
+        button = self._seg_btn
+        x, y = self.winfo_pointerx(), self.winfo_pointery()
+        if (button.winfo_rootx() <= x < button.winfo_rootx() + button.winfo_width()
+                and button.winfo_rooty() <= y < button.winfo_rooty() + button.winfo_height()):
+            return
+        if not self._seg_hovered:
+            return
+        self._seg_hovered = False
+        button.configure(width=230, height=36)
+        self._seg_attention_last_time = time.monotonic()
+        self._paint_segmentation_border()
+        if self._seg_attention_active:
+            self._animate_segmentation_attention()
 
     def _set_segmentation_attention(self, active: bool) -> None:
         if self._seg_attention_active == active:
             return
         self._seg_attention_active = active
+        if self._seg_attention_job is not None:
+            self.after_cancel(self._seg_attention_job)
+            self._seg_attention_job = None
+        canvas = self._seg_btn._canvas
+        canvas.itemconfigure(
+            "segmentation_attention_border", state="normal" if active else "hidden"
+        )
         if active:
-            self._seg_attention_started_at = time.monotonic()
-            self._animate_segmentation_attention()
-        else:
-            if self._seg_attention_job is not None:
-                self.after_cancel(self._seg_attention_job)
-                self._seg_attention_job = None
-            self._seg_sparkle_left.configure(text="")
-            self._seg_sparkle_right.configure(text="")
-            self._seg_btn.configure(
-                border_width=self._seg_default_border_width,
-                border_color=self._seg_default_border_color,
-            )
+            self._seg_attention_phase = 0.0
+            self._seg_attention_last_time = time.monotonic()
+            self._paint_segmentation_border()
+            if not self._seg_hovered:
+                self._animate_segmentation_attention()
+
 
     def _set_training_video(self, path: str, *, sync_analysis: bool = True) -> None:
         path = os.path.normpath(str(path).strip()) if path else ""
