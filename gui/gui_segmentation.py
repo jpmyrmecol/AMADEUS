@@ -5030,6 +5030,156 @@ class CrossingReviewApp(ctk.CTk):
             return None
         return self._result_match.obbs_by_frame.get(int(self.current_frame))
 
+    def _toggle_static_options(self) -> None:
+        if self.static_exclusion_enabled_var.get():
+            self.static_options_frame.pack(fill="x", pady=(0, 4))
+        else:
+            self.static_options_frame.pack_forget()
+
+    def _on_static_search_changed(self) -> None:
+        if not hasattr(self, "static_options_frame"):
+            return
+        self._toggle_static_options()
+        self._static_search_signature = None
+        self._static_exclusions.clear()
+        self.static_search_status_var.set(
+            "Not searched — press Search before Processing"
+            if self.static_exclusion_enabled_var.get() else "Disabled"
+        )
+        if self.reader is not None and not getattr(self, "_loading_video", False):
+            self.redraw_current_frame()
+
+    def _static_search_key(self) -> tuple:
+        """Cache key covering source video, segmentation, thresholds, and frame range."""
+        return (
+            os.path.normcase(os.path.abspath(self.video_path_var.get().strip())),
+            int(self.frame_count),
+            self._segmentation_signature(),
+            self._classifier_signature(),
+            bool(self.single_blob_smoothing_enabled_var.get()),
+            int(self.single_blob_smoothing_level_var.get()),
+            int(self.training_frame_start_var.get()),
+            int(self.training_frame_end_var.get()),
+            int(self.static_frame_window_var.get()),
+            float(self.static_presence_var.get()),
+            float(self.static_iou_var.get()),
+            float(self.static_max_movement_var.get()),
+        )
+
+    def _static_search_is_current(self) -> bool:
+        return bool(
+            self.static_exclusion_enabled_var.get()
+            and self._static_search_signature is not None
+            and self._static_search_signature == self._static_search_key()
+        )
+
+    def _apply_static_outliers(self, blobs: list[BlobMetrics], fid: int) -> list[BlobMetrics]:
+        if not self._static_search_is_current():
+            return blobs
+        matched_indices = self._static_exclusions.get(int(fid), ())
+        for blob in blobs:
+            if blob.blob_index in matched_indices and not blob.is_crossing:
+                blob.persistent_static_outlier = True
+                blob.is_crossing = True
+        return blobs
+
+    def search_persistent_static_blobs(self) -> None:
+        """Examine consecutive original frames without retaining their images."""
+        if not self.static_exclusion_enabled_var.get() or self.reader is None:
+            return
+        if self.progress_popup is not None:
+            return
+        if self.analysis_is_stale or (
+            self._needs_area_analysis() and not self.analysis_iqr_stats
+        ):
+            messagebox.showwarning(
+                "Persistent static blobs",
+                "Run Analyze with the current segmentation settings first.",
+            )
+            return
+        try:
+            window = int(self.static_frame_window_var.get())
+            presence = float(self.static_presence_var.get())
+            min_iou = float(self.static_iou_var.get())
+            max_drift = float(self.static_max_movement_var.get())
+            if not 2 <= window <= 2000:
+                raise ValueError("Frame window must be between 2 and 2000.")
+            scanner = PersistentStaticScanner(window, presence, min_iou, max_drift)
+            start = max(0, int(self.training_frame_start_var.get()))
+            end = self._resolved_frame_end(int(self.training_frame_end_var.get()))
+            if end - start + 1 < window:
+                raise ValueError("Frame window exceeds the selected training-frame range.")
+            snapshot_key = self._static_search_key()
+            cfg = self._capture_seg_config()
+            result_match = self._result_match
+            bounds = self._bounds_from_fixed_stats(self.analysis_iqr_stats)
+            path = self.video_path_var.get().strip()
+            total = end - start + 1
+        except (ValueError, TypeError) as exc:
+            messagebox.showerror("Persistent static blobs", str(exc))
+            return
+
+        self._static_search_signature = None
+        self._static_exclusions.clear()
+        self.static_search_status_var.set("Searching...")
+        self._prefetch_cancel.set()
+        self.reader.clear_cache()
+        error: list[Exception | None] = [None]
+
+        def work():
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                error[0] = RuntimeError(f"Cannot open video: {path}")
+                return False
+            try:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+                for n, fid in enumerate(range(start, end + 1), 1):
+                    if self._progress_cancel:
+                        return False
+                    ok, image = cap.read()
+                    if not ok or image is None:
+                        raise RuntimeError(f"Cannot decode frame {fid}.")
+                    blobs = _segment_blobs_with_config(image, fid, cfg)
+                    classified = self._classify_blobs(
+                        blobs, bounds, clone=False, result_match=result_match, frame_idx=fid,
+                    )
+                    if cfg.single_blob_smoothing_enabled:
+                        classified = _smooth_classified_blobs(classified, image.shape, cfg)
+                        classified = self._classify_blobs(
+                            classified, bounds, clone=False, result_match=result_match, frame_idx=fid,
+                        )
+                    scanner.add_frame(fid, classified)
+                    if n == 1 or n % 25 == 0 or n == total:
+                        self._set_progress_popup(
+                            f"Searching persistent static blobs: {n}/{total} ({100*n/total:.0f}%)",
+                            100.0 * n / total,
+                        )
+                return True
+            except Exception as exc:
+                error[0] = exc
+                return False
+            finally:
+                cap.release()
+
+        ok = self._with_progress_popup("Persistent static blobs", "Searching...", work)
+        if not ok:
+            self.static_search_status_var.set("Search cancelled or failed — press Search again")
+            if error[0] is not None:
+                messagebox.showerror("Persistent static blobs", str(error[0]))
+            return
+        if snapshot_key != self._static_search_key():
+            self.static_search_status_var.set("Settings changed — press Search again")
+            return
+
+        self._static_exclusions = scanner.excluded
+        self._static_search_signature = snapshot_key
+        self.static_search_status_var.set(
+            f"Found {scanner.excluded_count} blob occurrences "
+            f"in {scanner.qualifying_windows} qualifying windows."
+        )
+        self.redraw_current_frame()
+        self.set_status("Persistent static blob search completed")
+
     def _toggle_single_blob_smoothing_params(self):
         if self.single_blob_smoothing_enabled_var.get():
             self.single_blob_smoothing_params_frame.pack(fill="x", pady=(0, 4))
