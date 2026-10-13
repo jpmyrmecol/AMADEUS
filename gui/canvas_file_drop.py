@@ -103,8 +103,14 @@ def install_canvas_file_drop(
     accept_path: Callable[[str], bool] | None = None,
     status_callback: Callable[[str], None] | None = None,
     label: str = "file",
+    include_descendants: bool = False,
 ) -> CanvasFileDropState:
-    """Register one-file native drops on a canvas when tkdnd is available."""
+    """Register one-file drops on the target, optionally covering all child widgets.
+
+    Descendants are separately registered because tkdnd dispatches drops to
+    the widget under the pointer. The top-level bindtag delivers all events
+    to the single handler when the target is the application window.
+    """
     state = CanvasFileDropState()
 
     def log(message: str) -> None:
@@ -149,6 +155,15 @@ def install_canvas_file_drop(
         canvas.drop_target_register(DND_FILES)
         state.canvas_registered = True
         log("canvas registered=True")
+        if include_descendants:
+            pending = list(canvas.winfo_children())
+            registered = 1
+            while pending:
+                widget = pending.pop()
+                pending.extend(widget.winfo_children())
+                widget.drop_target_register(DND_FILES)
+                registered += 1
+            log(f"window drop targets registered={registered}")
 
         def on_enter(_event):
             return COPY
