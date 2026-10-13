@@ -3346,8 +3346,7 @@ class CrossingReviewApp(ctk.CTk):
             self._updating_area_ranges = False
 
     def _build_area_iqr_control(self, parent: ctk.CTkFrame):
-        # The saved values remain IQR multipliers. The two editable fields show
-        # the resulting area limits, matching the Absolute control above its plot.
+        # Display and edit the saved IQR multipliers directly above the boxplot.
         self.area_iqr_bounds_row = ctk.CTkFrame(parent, corner_radius=0)
         self.area_iqr_bounds_row.grid_columnconfigure((0, 1), weight=1)
         self._iqr_bound_entries = []
@@ -3356,7 +3355,7 @@ class CrossingReviewApp(ctk.CTk):
             self.register(lambda text: bool(re.fullmatch(r"-?\d*(?:\.\d*)?", text))),
             "%P",
         )
-        for index, label in enumerate(("Minimum area (px²)", "Maximum area (px²)")):
+        for index, label in enumerate(("Min (×IQR)", "Max (×IQR)")):
             side = "w" if index == 0 else "e"
             ctk.CTkLabel(self.area_iqr_bounds_row, text=label).grid(
                 row=0, column=index, sticky=side,
@@ -3364,7 +3363,8 @@ class CrossingReviewApp(ctk.CTk):
             entry_var = tk.StringVar()
             spin = tk.Spinbox(
                 self.area_iqr_bounds_row,
-                from_=-sys.maxsize, to=sys.maxsize, increment=1, width=13,
+                from_=-1.0, to=AREA_IQR_MULTIPLIER_MAX, increment=0.1,
+                width=10, format="%.1f",
                 textvariable=entry_var, validate="key", validatecommand=validate,
                 command=lambda i=index: self._commit_iqr_area_entry(i),
                 **_SPIN_CFG,
@@ -3394,12 +3394,12 @@ class CrossingReviewApp(ctk.CTk):
     def _sync_iqr_area_entries(self, *, force=False):
         if not self.analysis_iqr_stats or "area" not in self.analysis_iqr_stats:
             return
-        lower, upper = self._current_area_bounds(self.analysis_iqr_stats)
-        for spin, entry, bound in zip(
-            self._iqr_bound_spins, self._iqr_bound_entries, (lower, upper)
+        multipliers = (self.area_iqr_min_var.get(), self.area_iqr_max_var.get())
+        for spin, entry, multiplier in zip(
+            self._iqr_bound_spins, self._iqr_bound_entries, multipliers
         ):
             if force or self.focus_get() is not spin:
-                value = f"{bound:.8g}"
+                value = f"{multiplier:.1f}"
                 if entry.get() != value:
                     entry.set(value)
             spin.configure(
@@ -3408,19 +3408,27 @@ class CrossingReviewApp(ctk.CTk):
             )
 
     def _commit_iqr_area_entry(self, index: int):
+        if not self.analysis_iqr_stats or "area" not in self.analysis_iqr_stats:
+            return
         entry = self._iqr_bound_entries[index]
         try:
             value = float(entry.get().strip())
             if not math.isfinite(value):
-                raise ValueError("Area bound must be finite.")
+                raise ValueError("IQR multiplier must be finite.")
         except ValueError:
             self._sync_iqr_area_entries(force=True)
             return
-        current = self._current_area_bounds(self.analysis_iqr_stats)[index]
-        # Display rounding must not silently change an untouched threshold.
-        if entry.get().strip() != f"{current:.8g}":
-            self._set_iqr_area_bound(index, value)
+        variable = (self.area_iqr_min_var, self.area_iqr_max_var)[index]
+        # An unchanged, rounded display must not alter an older saved setting.
+        if entry.get().strip() != f"{variable.get():.1f}":
+            self._set_iqr_multiplier(index, value)
         self._sync_iqr_area_entries(force=True)
+
+    def _set_iqr_multiplier(self, index: int, multiplier: float):
+        multiplier = round(max(-1.0, min(AREA_IQR_MULTIPLIER_MAX, multiplier)), 1)
+        variable = (self.area_iqr_min_var, self.area_iqr_max_var)[index]
+        if not math.isclose(variable.get(), multiplier, rel_tol=0.0, abs_tol=1e-12):
+            variable.set(multiplier)
 
     def _set_iqr_area_bound(self, index: int, area: float):
         if not self.analysis_iqr_stats or "area" not in self.analysis_iqr_stats:
@@ -3433,13 +3441,10 @@ class CrossingReviewApp(ctk.CTk):
         if index == 0:
             area = max(q1 - AREA_IQR_MULTIPLIER_MAX * iqr, min(median, area))
             multiplier = (q1 - area) / iqr
-            if not math.isclose(self.area_iqr_min_var.get(), multiplier, rel_tol=0.0, abs_tol=1e-12):
-                self.area_iqr_min_var.set(multiplier)
         else:
             area = min(q3 + AREA_IQR_MULTIPLIER_MAX * iqr, max(median, area))
             multiplier = (area - q3) / iqr
-            if not math.isclose(self.area_iqr_max_var.get(), multiplier, rel_tol=0.0, abs_tol=1e-12):
-                self.area_iqr_max_var.set(multiplier)
+        self._set_iqr_multiplier(index, multiplier)
 
     def _iqr_bracket_hit(self, event):
         axis = self._iqr_plot_axis
