@@ -7355,6 +7355,26 @@ class CrossingReviewApp(ctk.CTk):
                 self.set_status("", auto_clear=False)
             return
         config_path, background_path, pickle_path, project_dir = completed[0]
+        # Tell the invoking Easy Tracking GUI where the actual completed
+        # segmentation was saved. An existing segmentation GUI config can
+        # redirect output to a different session than the launch argument.
+        handoff_path = getattr(self, "_easy_handoff_file", "")
+        if handoff_path:
+            try:
+                if not (os.path.isfile(pickle_path) and os.path.isfile(background_path)):
+                    raise FileNotFoundError("Segmentation output is incomplete")
+                handoff = {
+                    "video_path": self.video_path_var.get().strip(),
+                    "session_path": project_dir,
+                    "pickle_path": pickle_path,
+                    "background_path": background_path,
+                }
+                temp_handoff = handoff_path + ".tmp"
+                with open(temp_handoff, "w", encoding="utf-8") as file:
+                    json.dump(handoff, file)
+                os.replace(temp_handoff, handoff_path)
+            except (OSError, ValueError) as exc:
+                print(f"[Segmentation] Could not write Easy Tracking handoff: {exc}", flush=True)
         self.config_path = config_path
         try:
             self._write_processing_log(
@@ -7674,10 +7694,12 @@ def main():
     parser.add_argument("--session", default="")
     parser.add_argument("--no-launch-tracking", action="store_true")
     parser.add_argument("--return-to-easy", action="store_true")
+    parser.add_argument("--easy-handoff-file", default="")
     args = parser.parse_args()
 
     configure_taskbar_identity()
     app = CrossingReviewApp(no_launch_tracking=args.no_launch_tracking or args.return_to_easy)
+    app._easy_handoff_file = str(args.easy_handoff_file or "").strip() if args.return_to_easy else ""
     app.session_path = str(args.session or "").strip()
     if args.dropped_video:
         # Home drops follow the same validation, optional conversion, and
