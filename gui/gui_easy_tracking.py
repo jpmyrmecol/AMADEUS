@@ -638,8 +638,14 @@ class EasyTrackingGUI(ctk.CTk):
                 frame.pack_forget()
 
         ready = visible and (self._num_confirmed or self._variable_count.get())
-        running = self._batch_proc is not None and self._batch_proc.poll() is None
-        has_results = visible and self._results_exist() and not running
+        running = (
+            self._last_run_state == "running"
+            or (self._batch_proc is not None and self._batch_proc.poll() is None)
+        )
+        has_results = self._results_exist() and not running
+        # A loaded config with existing result CSVs is usable even if its
+        # temporary segmentation inputs have subsequently been cleaned up.
+        ready = ready or (has_results and bool(self._loaded_config_path))
         progress_visible = visible and self._workflow_progress_revealed
 
         show(self._settings_frame, visible, 5)
@@ -653,9 +659,9 @@ class EasyTrackingGUI(ctk.CTk):
             self._open_results_btn.pack_forget()
         for name, glow in self._action_glows.items():
             glow.set_active(
-                (name == "enter" and visible and not ready and not has_results)
-                or (name == "processing" and ready and not running and not has_results)
-                or (name == "results" and has_results)
+                (name == "enter" and visible and not ready)
+                or (name == "processing" and ready and visible and not running and not has_results)
+                or (name == "results" and ready and has_results)
             )
 
     # Step 1: Video
@@ -2824,6 +2830,7 @@ class EasyTrackingGUI(ctk.CTk):
         if not variable:
             self._confirmed_num_objects = self._parse_num_objects_input() or 1
         self._apply_individual_count_state(reset_multi_paste=True)
+        self._set_post_segmentation_visibility(self._workflow_segmentation_ready)
 
     def _parse_num_objects_input(self) -> int | None:
         if not hasattr(self, "_num_objects_sb"):
@@ -2845,11 +2852,13 @@ class EasyTrackingGUI(ctk.CTk):
         self._confirmed_num_objects = int(n)
         self._num_confirmed = True
         self._apply_individual_count_state(reset_multi_paste=True)
+        self._set_post_segmentation_visibility(self._workflow_segmentation_ready)
         return "break"
 
     def _invalidate_num_confirm(self):
         self._num_confirmed = False
         self._apply_individual_count_state()
+        self._set_post_segmentation_visibility(self._workflow_segmentation_ready)
 
     def _on_num_objects_key_release(self, event):
         if getattr(event, "keysym", "") in {"Return", "KP_Enter"}:
@@ -3561,6 +3570,8 @@ class EasyTrackingGUI(ctk.CTk):
         self._stop_requested = False
 
         self._last_run_state = "running"
+        self._workflow_progress_revealed = True
+        self._set_post_segmentation_visibility(self._workflow_segmentation_ready)
         self._update_next_action()
 
         self._run_btn.configure(state="disabled")
@@ -3916,6 +3927,7 @@ class EasyTrackingGUI(ctk.CTk):
                 f"Processing failed with exit code {returncode}.\n\n"
                 f"Full log:\n{log_path}",
             )
+        self._set_post_segmentation_visibility(self._workflow_segmentation_ready)
         self._update_next_action()
 
     def _stop_batch(self) -> None:
@@ -3982,6 +3994,8 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _apply_config_to_gui(self, cfg: dict) -> None:
         cfg = cfg or {}
+        self._workflow_progress_revealed = False
+        self._last_run_state = "idle"
         self._manual_skip_keys.clear()
 
         # Paths
