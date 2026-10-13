@@ -305,11 +305,10 @@ def make_panel(
                 tags="background",
             )
         canvas.tag_lower("background")
-        title_y = height / 2 - 18 if hint is not None else height / 2
-        canvas.coords(shadow, width / 2 + 2, title_y + 2)
-        canvas.coords(label, width / 2, title_y)
+        canvas.coords(shadow, width / 2 + 2, height / 2 + 2)
+        canvas.coords(label, width / 2, height / 2)
         if hint is not None:
-            canvas.coords(hint, width / 2, height / 2 + 44)
+            canvas.coords(hint, width / 2, height * 5 / 6)
 
     def animate_hint() -> None:
         if hint is None or not canvas.winfo_exists():
