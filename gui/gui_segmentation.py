@@ -2067,8 +2067,7 @@ class CrossingReviewApp(ctk.CTk):
         self._refresh_guidance_ui()
 
     def _update_analysis_dependent_buttons(self):
-        # Processing stays clickable in every state so that pressing it explains
-        # the missing step instead of silently doing nothing.
+        # Processing is revealed by the Outlier Extraction Done button.
         ready = self.outlier_section_revealed and not self.analysis_is_stale and (
             bool(self.analysis_iqr_stats) or not self._needs_area_analysis()
         )
@@ -4440,6 +4439,7 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_is_stale = True
         self.analysis_ready_var.set("analysis: not computed")
         self.outlier_section_revealed = False
+        self._guidance_stage = "background" if self._segmentation_needs_background() else "threshold"
         self._update_analysis_dependent_buttons()
         self._refresh_segmentation_controls()
         if not self._segmentation_needs_background():
@@ -6714,8 +6714,7 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_is_stale = True
         self.analysis_ready_var.set("analysis: not computed")
         self.outlier_section_revealed = False
-        if self._guidance_stage in ("outlier", "processing"):
-            self._guidance_stage = "background"
+        self._guidance_stage = "background" if self._segmentation_needs_background() else "threshold"
         self._set_workflow_stage("analysis")
 
     def _activate_cached_background(self, method: str, redraw: bool = True) -> bool:
