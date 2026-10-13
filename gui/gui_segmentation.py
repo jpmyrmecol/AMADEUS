@@ -2122,7 +2122,13 @@ class CrossingReviewApp(ctk.CTk):
                 state["outer"].pack_forget()
 
         for section, optional in sections:
-            if section is None or (optional and not show_optional):
+            if section is None:
+                continue
+            # An enabled saved filter must expose its required Search button,
+            # even when optional settings are otherwise collapsed.
+            if section is getattr(self, "static_blob_section", None) and self.static_exclusion_enabled_var.get():
+                optional = False
+            if optional and not show_optional:
                 continue
             if section is self.ana_section and not self.outlier_section_revealed:
                 if self._guidance_stage == "analysis" and self.analysis_gate_frame is not None:
@@ -2403,6 +2409,16 @@ class CrossingReviewApp(ctk.CTk):
                 pass
         if "show_centers" not in settings:
             self.show_centers_var.set(True)
+        # Old configs must not inherit these optional settings from another
+        # video. The window itself is initialized from the loaded video FPS.
+        if "static_exclusion_enabled" not in settings:
+            self.static_exclusion_enabled_var.set(False)
+        if "static_presence" not in settings:
+            self.static_presence_var.set(0.98)
+        if "static_min_iou" not in settings:
+            self.static_iou_var.set(0.8)
+        if "static_max_movement" not in settings:
+            self.static_max_movement_var.set(0.2)
         # Loading an older session must not inherit smoothing from the last one.
         self.single_blob_smoothing_enabled_var.set(bool(settings.get("single_blob_smoothing_enabled", False)))
         self.single_blob_smoothing_level_var.set(max(1, min(20, int(settings.get("single_blob_smoothing_level", 3)))))
@@ -5071,6 +5087,7 @@ class CrossingReviewApp(ctk.CTk):
             if self.static_exclusion_enabled_var.get() else "Disabled"
         )
         if self.reader is not None and not getattr(self, "_loading_video", False):
+            self._set_workflow_stage("static")
             self.redraw_current_frame()
 
     def _static_search_key(self) -> tuple:
