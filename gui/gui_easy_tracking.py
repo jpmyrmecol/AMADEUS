@@ -1007,14 +1007,11 @@ class EasyTrackingGUI(ctk.CTk):
         previous_video = self._selected_training_video
         changed_video = self._video_path_key(path) != self._video_path_key(previous_video)
         if changed_video:
-            previous_default = self._standard_session_for_video(previous_video)
             session = self._session_entry.get().strip()
-            # Follow the new video's standard session unless the user chose a
-            # custom session explicitly (e.g. via the Reference button).
-            if not session or (
-                previous_default
-                and self._video_path_key(session) == self._video_path_key(previous_default)
-            ):
+            # Switching to a different video must not retain the previous
+            # video's session (including a previously selected custom path).
+            # A session explicitly chosen before the FIRST video is respected.
+            if previous_video or not session:
                 new_session = self._standard_session_for_video(path)
                 self._session_entry.delete(0, tk.END)
                 if new_session:
