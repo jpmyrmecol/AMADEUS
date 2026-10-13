@@ -78,6 +78,10 @@ ACCENT_RED_ORANGE = "#f22800"
 BLACK_RGB = (0, 0, 0)
 GRADIENT_STEPS = 96
 HOVER_INTERVAL_MS = 16
+CTA_INTERVAL_MS = 50
+CTA_PERIOD_MS = 3000
+CTA_MIN_BRIGHTNESS = 0.4
+CTA_MAX_BRIGHTNESS = 0.9
 HOVER_EASING = 0.24
 FLOW_SPEED = 0.012
 FLOW_RAMP = 0.055
@@ -234,6 +238,7 @@ def make_panel(
     *,
     font_size: int,
     hover_strength: float = 1.0,
+    prompt_text: str | None = None,
 ) -> tk.Canvas:
     canvas = tk.Canvas(
         parent,
@@ -247,6 +252,15 @@ def make_panel(
     canvas.AMADEUS_PANEL_FONT = font
     shadow = canvas.create_text(0, 0, text=text, fill=SHADOW_COLOR, font=font, anchor="center", justify="center")
     label = canvas.create_text(0, 0, text=text, fill=TEXT_COLOR, font=font, anchor="center", justify="center")
+    hint = (
+        canvas.create_text(
+            0, 0, text=prompt_text,
+            fill=_rgb_to_hex(_mix_rgb(BLACK_RGB, _hex_to_rgb(TEXT_COLOR), CTA_MAX_BRIGHTNESS)),
+            font=tk_font_spec(root, "Arial", 16), anchor="center", justify="center",
+        )
+        if prompt_text else None
+    )
+    hint_started_at = time.monotonic()
     state = {"hover": 0.0, "target": 0.0, "phase": 0.0, "flow": 0.0, "job_id": None}
 
     def draw() -> None:
@@ -291,8 +305,26 @@ def make_panel(
                 tags="background",
             )
         canvas.tag_lower("background")
-        canvas.coords(shadow, width / 2 + 2, height / 2 + 2)
-        canvas.coords(label, width / 2, height / 2)
+        title_y = height / 2 - 18 if hint is not None else height / 2
+        canvas.coords(shadow, width / 2 + 2, title_y + 2)
+        canvas.coords(label, width / 2, title_y)
+        if hint is not None:
+            canvas.coords(hint, width / 2, height / 2 + 44)
+
+    def animate_hint() -> None:
+        if hint is None or not canvas.winfo_exists():
+            return
+        if float(state["target"]) > 0.0:
+            brightness = CTA_MAX_BRIGHTNESS
+        else:
+            phase = (time.monotonic() - hint_started_at) * 2 * math.pi * 1000 / CTA_PERIOD_MS
+            brightness = CTA_MIN_BRIGHTNESS + (
+                (CTA_MAX_BRIGHTNESS - CTA_MIN_BRIGHTNESS) * (1 + math.cos(phase)) / 2
+            )
+        canvas.itemconfigure(
+            hint, fill=_rgb_to_hex(_mix_rgb(BLACK_RGB, _hex_to_rgb(TEXT_COLOR), brightness))
+        )
+        canvas.after(CTA_INTERVAL_MS, animate_hint)
 
     def animate() -> None:
         current = float(state["hover"])
@@ -333,6 +365,8 @@ def make_panel(
     canvas.bind("<Return>", on_click)
     canvas.bind("<space>", on_click)
     draw()
+    if hint is not None:
+        canvas.after(CTA_INTERVAL_MS, animate_hint)
     return canvas
 
 
@@ -361,6 +395,7 @@ def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
         launch_easy_tracking,
         font_size=44,
         hover_strength=0.9,
+        prompt_text="CLICK TO OPEN",
     )
     easy_panel.grid(row=0, column=0, columnspan=6, sticky="nsew")
     drop_targets = [(easy_panel, "gui_easy_tracking.py")]
