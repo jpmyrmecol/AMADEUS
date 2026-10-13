@@ -105,11 +105,11 @@ def install_canvas_file_drop(
     label: str = "file",
     include_descendants: bool = False,
 ) -> CanvasFileDropState:
-    """Register one-file drops on the target, optionally covering all child widgets.
+    """Register one-file drops on the target and optionally its child widgets.
 
-    Descendants are separately registered because tkdnd dispatches drops to
-    the widget under the pointer. The top-level bindtag delivers all events
-    to the single handler when the target is the application window.
+    TkDND binds drop events to the widget under the pointer. Registering
+    children without attaching their own handlers does not forward those events
+    to the parent.
     """
     state = CanvasFileDropState()
 
@@ -152,18 +152,13 @@ def install_canvas_file_drop(
         _add_tkdnd_package_path(window, log)
         tkdnd_version = TkinterDnD.require(window)
         log(f"tkdnd={tkdnd_version}")
-        canvas.drop_target_register(DND_FILES)
-        state.canvas_registered = True
-        log("canvas registered=True")
+        targets = [canvas]
         if include_descendants:
             pending = list(canvas.winfo_children())
-            registered = 1
             while pending:
                 widget = pending.pop()
+                targets.append(widget)
                 pending.extend(widget.winfo_children())
-                widget.drop_target_register(DND_FILES)
-                registered += 1
-            log(f"window drop targets registered={registered}")
 
         def on_enter(_event):
             return COPY
@@ -190,9 +185,13 @@ def install_canvas_file_drop(
             window.after_idle(lambda path=selected_path: on_path(path))
             return COPY
 
-        canvas.dnd_bind("<<DropEnter>>", on_enter)
-        canvas.dnd_bind("<<DropLeave>>", on_leave)
-        canvas.dnd_bind("<<Drop>>", on_drop)
+        for target in targets:
+            target.drop_target_register(DND_FILES)
+            target.dnd_bind("<<DropEnter>>", on_enter)
+            target.dnd_bind("<<DropLeave>>", on_leave)
+            target.dnd_bind("<<Drop>>", on_drop)
+        state.canvas_registered = True
+        log(f"drop targets registered={len(targets)}")
         state.enabled = True
         log("initialization succeeded")
     except Exception as exc:
