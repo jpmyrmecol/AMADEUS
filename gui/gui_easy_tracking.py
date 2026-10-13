@@ -4,6 +4,7 @@
 import codecs
 import csv
 import glob
+import json
 import math
 import os
 import re
@@ -12,6 +13,7 @@ import copy
 import argparse
 import queue
 import subprocess
+import tempfile
 import threading
 import time
 import traceback
@@ -284,6 +286,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._seg_proc: subprocess.Popen | None = None
         self._seg_poll_id: str | None = None
         self._seg_launch_pickle_signature: tuple[int, int] | None = None
+        self._seg_handoff_path: str = ""
         self._ui_event_queue = queue.SimpleQueue()
         self._ui_event_poll_id: str | None = None
         self._batch_proc: subprocess.Popen | None = None
@@ -1309,13 +1312,30 @@ class EasyTrackingGUI(ctk.CTk):
         pickle_path, _background_path = self._segmentation_output_paths()
         self._seg_launch_pickle_signature = self._file_signature(pickle_path)
         seg_script = str(gui_script("gui_segmentation.py"))
-        cmd = [sys.executable, "-u", seg_script, "--return-to-easy"]
+        fd, handoff_path = tempfile.mkstemp(
+            prefix="amadeus_segmentation_", suffix=".json",
+        )
+        os.close(fd)
+        self._seg_handoff_path = handoff_path
+        cmd = [
+            sys.executable, "-u", seg_script, "--return-to-easy",
+            "--easy-handoff-file", handoff_path,
+        ]
         if video:
             cmd += ["--video", video]
         session = self._get_session()
         if session:
             cmd += ["--session", session]
-        self._seg_proc = subprocess.Popen(cmd)
+        try:
+            self._seg_proc = subprocess.Popen(cmd)
+        except OSError as exc:
+            self._seg_handoff_path = ""
+            try:
+                os.unlink(handoff_path)
+            except OSError:
+                pass
+            messagebox.showerror("Launch Segmentation", str(exc), parent=self)
+            return
         self._seg_status.configure(text="Running...", text_color="#f0a000")
         self._seg_btn.configure(state="disabled")
         self._sync_segmentation_status_from_outputs()
@@ -1334,16 +1354,71 @@ class EasyTrackingGUI(ctk.CTk):
         proc.wait()
         self._post_ui_event(self._on_seg_done, proc)
 
+    def _consume_segmentation_handoff(self) -> bool:
+        """Recover the exact output session after the child completes Processing."""
+        path = self._seg_handoff_path
+        self._seg_handoff_path = ""
+        if not path:
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as file:
+                handoff = json.load(file)
+        except (OSError, ValueError):
+            return False
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+        if not isinstance(handoff, dict):
+            return False
+        video = self._video_entry.get().strip()
+        session = str(handoff.get("session_path", "") or "").strip()
+        if not video or not session:
+            return False
+        if self._video_path_key(handoff.get("video_path", "")) != self._video_path_key(video):
+            return False
+        expected_pickle, expected_bg = segmentation_paths_for_session(session, video)
+        if not all((
+            self._video_path_key(handoff.get("pickle_path", "")) == self._video_path_key(expected_pickle),
+            self._video_path_key(handoff.get("background_path", "")) == self._video_path_key(expected_bg),
+            os.path.isfile(expected_pickle),
+            os.path.isfile(expected_bg),
+        )):
+            return False
+
+        if self._video_path_key(session) != self._video_path_key(self._get_session()):
+            self._session_entry.delete(0, tk.END)
+            self._session_entry.insert(0, session)
+            # Never save a new Tracking config over a different session.
+            if isinstance(self._loaded_cfg, dict) and self._loaded_cfg:
+                self._loaded_cfg["SESSION_PATH"] = session
+            self._loaded_config_path = (
+                os.path.join(session, "config.yaml")
+                if os.path.isfile(os.path.join(session, "config.yaml"))
+                else ""
+            )
+        print(f"[Easy Tracking] Segmentation completed: {expected_pickle}", flush=True)
+        return True
+
     def _on_seg_done(self, proc: subprocess.Popen) -> None:
-        if self._seg_proc is proc:
-            self._seg_proc = None
+        if self._seg_proc is not proc:
+            return
+        self._seg_proc = None
         if self._seg_poll_id is not None:
             try:
                 self.after_cancel(self._seg_poll_id)
             except Exception:
                 pass
             self._seg_poll_id = None
+        got_handoff = self._consume_segmentation_handoff()
         self._sync_segmentation_status_from_outputs()
+        if not got_handoff and not self._segmentation_outputs_exist():
+            self._seg_status.configure(
+                text="No completed output (run Processing in Segmentation)",
+                text_color="#e69b42",
+            )
         self._seg_btn.configure(state="normal")
         self.lift()
         self.focus_force()
