@@ -394,6 +394,18 @@ class EasyTrackingGUI(ctk.CTk):
 
         left_footer = ctk.CTkFrame(left_wrap, corner_radius=0)
         left_footer.pack(side="bottom", fill="x", padx=12, pady=(0, 10))
+        config_buttons = ctk.CTkFrame(left_footer, fg_color="transparent")
+        config_buttons.pack(side="left")
+        self._load_btn = ctk.CTkButton(
+            config_buttons, text="Load Config", height=34, width=110,
+            command=self._load_config,
+        )
+        self._load_btn.pack(side="left", padx=(0, 8))
+        self._save_btn = ctk.CTkButton(
+            config_buttons, text="Save Config", height=34, width=110,
+            command=self._save_config,
+        )
+        self._save_btn.pack(side="left")
         self._switch_btn = ctk.CTkButton(
             left_footer, text="Switch Advanced Mode", width=180, height=34,
             command=self._switch_advanced_mode,
@@ -412,6 +424,19 @@ class EasyTrackingGUI(ctk.CTk):
         self._build_action_buttons(left)
         self._build_progress_section(left)
         self._build_canvas_panel(right)
+        self._sync_segmentation_status_from_outputs()
+
+    def _set_post_segmentation_visibility(self, visible: bool) -> None:
+        """Keep the tracking settings, Processing controls and Progress hidden until segmentation."""
+        for frame, pady in (
+            (self._settings_frame, 5),
+            (self._action_frame, 8),
+            (self._progress_frame, (5, 14)),
+        ):
+            if visible and not frame.winfo_manager():
+                frame.pack(fill="x", padx=12, pady=pady)
+            elif not visible and frame.winfo_manager():
+                frame.pack_forget()
 
     # Step 1: Video
     def _build_video_section(self, parent: ctk.CTkScrollableFrame) -> None:
@@ -433,6 +458,9 @@ class EasyTrackingGUI(ctk.CTk):
         self._video_entry.pack(side="left", expand=True, fill="x", padx=5)
         self._video_entry.bind("<FocusOut>", self._on_training_video_committed)
         self._video_entry.bind("<Return>", self._on_training_video_committed)
+        self._video_entry.bind(
+            "<KeyRelease>", lambda _event: self._sync_segmentation_status_from_outputs()
+        )
         ctk.CTkButton(
             training_row,
             text="Reference",
@@ -480,18 +508,76 @@ class EasyTrackingGUI(ctk.CTk):
 
         action_row = ctk.CTkFrame(frame, corner_radius=0)
         action_row.pack(fill="x", padx=8, pady=(2, 10))
+        self._seg_sparkle_left = ctk.CTkLabel(
+            action_row, text="", width=22, font=("TkDefaultFont", 20),
+        )
+        self._seg_sparkle_left.pack(side="left", padx=(0, 2))
         self._seg_btn = ctk.CTkButton(
             action_row,
             text="Launch Segmentation",
             width=230,
             command=self._launch_segmentation,
         )
-        self._seg_btn.pack(side="left", padx=(0, 12))
+        self._seg_btn.pack(side="left", padx=(0, 2))
+        self._seg_sparkle_right = ctk.CTkLabel(
+            action_row, text="", width=22, font=("TkDefaultFont", 16),
+        )
+        self._seg_sparkle_right.pack(side="left", padx=(0, 10))
+        self._seg_attention_active = False
+        self._seg_attention_job: str | None = None
+        self._seg_attention_started_at = 0.0
+        self._seg_default_border_width = self._seg_btn.cget("border_width")
+        self._seg_default_border_color = self._seg_btn.cget("border_color")
         self._seg_status = ctk.CTkLabel(
             action_row, text="Not started", text_color="gray", anchor="w"
         )
         self._seg_status.pack(side="left")
         self._refresh_tracking_video_controls()
+
+    @staticmethod
+    def _seg_sparkle_color(level: float) -> str:
+        low, high = (28, 94, 150), (216, 246, 255)
+        rgb = (round(a + (b - a) * level) for a, b in zip(low, high))
+        return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+    def _animate_segmentation_attention(self) -> None:
+        self._seg_attention_job = None
+        if not self._seg_attention_active:
+            return
+        phase = (time.monotonic() - self._seg_attention_started_at) * (2 * math.pi / 2.8)
+        left = (1 + math.sin(phase)) / 2
+        right = (1 + math.sin(phase + 2.1)) / 2
+        self._seg_sparkle_left.configure(
+            text="✦" if left > 0.40 else "✧",
+            text_color=self._seg_sparkle_color(left),
+        )
+        self._seg_sparkle_right.configure(
+            text="✦" if right > 0.40 else "✧",
+            text_color=self._seg_sparkle_color(right),
+        )
+        self._seg_btn.configure(
+            border_width=2,
+            border_color=self._seg_sparkle_color((left + right) / 2),
+        )
+        self._seg_attention_job = self.after(80, self._animate_segmentation_attention)
+
+    def _set_segmentation_attention(self, active: bool) -> None:
+        if self._seg_attention_active == active:
+            return
+        self._seg_attention_active = active
+        if active:
+            self._seg_attention_started_at = time.monotonic()
+            self._animate_segmentation_attention()
+        else:
+            if self._seg_attention_job is not None:
+                self.after_cancel(self._seg_attention_job)
+                self._seg_attention_job = None
+            self._seg_sparkle_left.configure(text="")
+            self._seg_sparkle_right.configure(text="")
+            self._seg_btn.configure(
+                border_width=self._seg_default_border_width,
+                border_color=self._seg_default_border_color,
+            )
 
     def _set_training_video(self, path: str, *, sync_analysis: bool = True) -> None:
         path = os.path.normpath(str(path).strip()) if path else ""
@@ -773,7 +859,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._seg_proc = subprocess.Popen(cmd)
         self._seg_status.configure(text="Running...", text_color="#f0a000")
         self._seg_btn.configure(state="disabled")
-        self._update_next_action()
+        self._sync_segmentation_status_from_outputs()
         if self._seg_poll_id is not None:
             try:
                 self.after_cancel(self._seg_poll_id)
@@ -816,17 +902,26 @@ class EasyTrackingGUI(ctk.CTk):
         if not hasattr(self, "_seg_status"):
             return
         running = self._seg_proc is not None and self._seg_proc.poll() is None
-        if running and not self._segmentation_finished_for_current_launch():
+        completed = (
+            self._segmentation_finished_for_current_launch()
+            if running else self._segmentation_outputs_exist(cfg)
+        )
+        if running and not completed:
             self._seg_status.configure(text="Running...", text_color="#f0a000")
-        elif self._segmentation_outputs_exist(cfg):
+        elif completed:
             self._seg_status.configure(text="Done", text_color="#1f8040")
         else:
             self._seg_status.configure(text="Not started", text_color="gray")
+        self._set_post_segmentation_visibility(completed)
+        self._set_segmentation_attention(
+            os.path.isfile(self._video_entry.get().strip()) and not completed and not running
+        )
         self._update_next_action()
 
     # Step 2: Questions
     def _build_questions_section(self, parent: ctk.CTkScrollableFrame) -> None:
         frame = ctk.CTkFrame(parent, corner_radius=6)
+        self._settings_frame = frame
         frame.pack(fill="x", padx=12, pady=5)
         header = ctk.CTkFrame(frame, corner_radius=0)
         header.pack(fill="x", padx=8, pady=(6, 2))
@@ -964,6 +1059,7 @@ class EasyTrackingGUI(ctk.CTk):
     # Action buttons
     def _build_action_buttons(self, parent: ctk.CTkScrollableFrame) -> None:
         frame = ctk.CTkFrame(parent, corner_radius=0)
+        self._action_frame = frame
         frame.pack(fill="x", padx=12, pady=8)
 
         row1 = ctk.CTkFrame(frame, corner_radius=0)
@@ -995,6 +1091,7 @@ class EasyTrackingGUI(ctk.CTk):
     # Progress section
     def _build_progress_section(self, parent: ctk.CTkScrollableFrame) -> None:
         frame = ctk.CTkFrame(parent, corner_radius=6)
+        self._progress_frame = frame
         frame.pack(fill="x", padx=12, pady=(5, 14))
         ctk.CTkLabel(frame, text="Progress",
                      font=("TkDefaultFont", 13, "bold"), anchor="w").pack(fill="x", padx=8, pady=(6, 2))
@@ -1020,35 +1117,12 @@ class EasyTrackingGUI(ctk.CTk):
         wrap = ctk.CTkFrame(parent, corner_radius=0)
         wrap.pack(fill="x", padx=8, pady=(0, 10))
 
-        actions = ctk.CTkFrame(wrap, corner_radius=0)
-        actions.grid(
-            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8)
-        )
-        for col in range(3):
-            actions.grid_columnconfigure(col, weight=1, uniform="easy_actions")
-
         self._open_results_btn = ctk.CTkButton(
-            actions, text="Open results", height=34,
+            wrap, text="Open results", height=34,
             command=self._open_results,
         )
         self._open_results_btn.grid(
-            row=0, column=0, sticky="ew", padx=(0, 3)
-        )
-
-        self._save_btn = ctk.CTkButton(
-            actions, text="Save Config", height=34,
-            command=self._save_config,
-        )
-        self._save_btn.grid(
-            row=0, column=1, sticky="ew", padx=3
-        )
-
-        self._load_btn = ctk.CTkButton(
-            actions, text="Load Config", height=34,
-            command=self._load_config,
-        )
-        self._load_btn.grid(
-            row=0, column=2, sticky="ew", padx=(3, 0)
+            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8)
         )
 
         ctk.CTkLabel(
