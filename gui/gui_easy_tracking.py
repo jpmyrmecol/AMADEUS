@@ -292,7 +292,8 @@ class EasyTrackingGUI(ctk.CTk):
         self._stop_requested = False
         self._last_run_state = "idle"
         self._workflow_segmentation_ready = False
-        self._workflow_progress_revealed = False
+        self._progress_details_open = False
+        self._progress_config_loaded = False
         self._step1_details_open = True
         self._step2_details_open = True
         self._action_glows: dict[str, RotatingBorderHighlight] = {}
@@ -635,6 +636,29 @@ class EasyTrackingGUI(ctk.CTk):
         else:
             self._settings_frame.pack_forget()
 
+    def _toggle_progress_details(self) -> None:
+        """Collapse or expand Progress without changing tracking execution."""
+        if not self._progress_host.winfo_manager():
+            return
+        self._progress_details_open = not self._progress_details_open
+        self._update_progress_layout(True)
+
+    def _update_progress_layout(self, visible: bool) -> None:
+        """Show a collapsed Progress tab when Processing becomes available."""
+        if not visible:
+            self._progress_host.pack_forget()
+            return
+        if not self._progress_host.winfo_manager():
+            self._progress_host.pack(fill="x", padx=12, pady=(5, 14))
+        self._progress_tab.configure(
+            text=("▾" if self._progress_details_open else "▸") + "  Progress"
+        )
+        if self._progress_details_open:
+            if not self._progress_frame.winfo_manager():
+                self._progress_frame.pack(fill="x", pady=(2, 0))
+        else:
+            self._progress_frame.pack_forget()
+
     def _results_exist(self) -> bool:
         """Only actual tracking CSV output counts, not an empty results directory."""
         session = self._get_session()
@@ -663,9 +687,10 @@ class EasyTrackingGUI(ctk.CTk):
         self._update_step1_layout()
         self._update_step2_layout(visible)
 
-        def show(frame, enabled, pady):
+        def show(frame, enabled, pady, *, before=None):
             if enabled and not frame.winfo_manager():
-                frame.pack(fill="x", padx=12, pady=pady)
+                options = {"before": before} if before is not None else {}
+                frame.pack(fill="x", padx=12, pady=pady, **options)
             elif not enabled and frame.winfo_manager():
                 frame.pack_forget()
 
@@ -678,10 +703,16 @@ class EasyTrackingGUI(ctk.CTk):
         # A loaded config with existing result CSVs is usable even if its
         # temporary segmentation inputs have subsequently been cleaned up.
         ready = ready or (has_results and bool(self._loaded_config_path))
-        progress_visible = visible and self._workflow_progress_revealed
+        # Progress tab is available alongside Processing, but starts collapsed.
+        # Loading a config makes it available and expands it even when its
+        # segmentation artifacts have been cleaned up.
+        progress_visible = ready or self._progress_config_loaded
 
-        show(self._action_frame, ready, 8)
-        show(self._progress_frame, progress_visible, (5, 14))
+        show(
+            self._action_frame, ready, 8,
+            before=self._progress_host if self._progress_host.winfo_manager() else None,
+        )
+        self._update_progress_layout(progress_visible)
 
         if has_results:
             if not self._open_results_btn.winfo_manager():
@@ -1456,11 +1487,18 @@ class EasyTrackingGUI(ctk.CTk):
 
     # Progress section
     def _build_progress_section(self, parent: ctk.CTkScrollableFrame) -> None:
-        frame = ctk.CTkFrame(parent, corner_radius=6)
+        self._progress_host = ctk.CTkFrame(parent, fg_color="transparent")
+        self._progress_host.pack(fill="x", padx=12, pady=(5, 14))
+        self._progress_tab = ctk.CTkButton(
+            self._progress_host, text="▸  Progress", height=30,
+            fg_color="#343434", hover_color="#464646",
+            command=self._toggle_progress_details,
+            anchor="w",
+        )
+        self._progress_tab.pack(fill="x")
+        frame = ctk.CTkFrame(self._progress_host, corner_radius=6)
         self._progress_frame = frame
-        frame.pack(fill="x", padx=12, pady=(5, 14))
-        ctk.CTkLabel(frame, text="Progress",
-                     font=("TkDefaultFont", 13, "bold"), anchor="w").pack(fill="x", padx=8, pady=(6, 2))
+        frame.pack(fill="x", pady=(2, 0))
 
         # Overall progress bar
         pb_wrap = ctk.CTkFrame(frame, corner_radius=0)
@@ -3605,7 +3643,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._stop_requested = False
 
         self._last_run_state = "running"
-        self._workflow_progress_revealed = True
+        self._progress_details_open = True
         self._set_post_segmentation_visibility(self._workflow_segmentation_ready)
         self._update_next_action()
 
@@ -4029,7 +4067,8 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _apply_config_to_gui(self, cfg: dict) -> None:
         cfg = cfg or {}
-        self._workflow_progress_revealed = False
+        self._progress_config_loaded = True
+        self._progress_details_open = True
         self._last_run_state = "idle"
         self._manual_skip_keys.clear()
 
