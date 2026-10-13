@@ -964,6 +964,13 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _set_training_video(self, path: str, *, sync_analysis: bool = True) -> None:
         path = os.path.normpath(str(path).strip()) if path else ""
+        loaded_video = str(self._loaded_cfg.get("TRAINING_VIDEO_PATH", "") or "")
+        if self._progress_config_loaded and (
+            os.path.normcase(path) != os.path.normcase(os.path.normpath(loaded_video))
+        ):
+            # A newly selected video is not the previously loaded session.
+            self._progress_config_loaded = False
+            self._progress_details_open = False
         self._video_entry.delete(0, tk.END)
         if path:
             self._video_entry.insert(0, path)
