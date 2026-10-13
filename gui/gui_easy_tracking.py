@@ -419,12 +419,51 @@ class EasyTrackingGUI(ctk.CTk):
         pane.add(left_wrap, minsize=540)
         pane.add(right, minsize=360)
 
-        self._build_video_section(left)
+        video_area = ctk.CTkFrame(left, fg_color="transparent")
+        video_area.pack(fill="x")
+        self._build_video_prompt(video_area)
+        self._build_video_section(video_area)
         self._build_questions_section(left)
         self._build_action_buttons(left)
         self._build_progress_section(left)
         self._build_canvas_panel(right)
+        self._video_drop_state = install_canvas_file_drop(
+            self, self,
+            allowed_suffixes=VIDEO_DROP_SUFFIXES,
+            on_path=self._handle_dropped_training_video,
+            status_callback=lambda message: self._canvas_status.configure(text=message),
+            label="video",
+            include_descendants=True,
+        )
         self._sync_segmentation_status_from_outputs()
+
+    def _build_video_prompt(self, parent: ctk.CTkFrame) -> None:
+        """Initial entry point. The full Step 1 form appears after a video is chosen."""
+        self._video_details_revealed = False
+        self._video_prompt = ctk.CTkFrame(
+            parent, corner_radius=12, border_width=1,
+            border_color="#505050", fg_color="#242424",
+        )
+        self._video_prompt.pack(fill="x", padx=24, pady=(64, 12))
+        ctk.CTkButton(
+            self._video_prompt,
+            text="Select Videos",
+            width=260, height=52,
+            font=("TkDefaultFont", 17, "bold"),
+            command=self._browse_training_video,
+        ).pack(pady=(36, 12))
+        ctk.CTkLabel(
+            self._video_prompt,
+            text="or drag & drop a video anywhere in this window",
+            text_color="#b8b8b8",
+            font=("TkDefaultFont", 13),
+        ).pack(pady=(0, 36))
+
+    def _reveal_video_details_if_selected(self) -> None:
+        if not self._video_details_revealed and self._video_entry.get().strip():
+            self._video_prompt.pack_forget()
+            self._video_frame.pack(fill="x", padx=12, pady=(10, 5))
+            self._video_details_revealed = True
 
     def _set_post_segmentation_visibility(self, visible: bool) -> None:
         """Keep the tracking settings, Processing controls and Progress hidden until segmentation."""
@@ -439,9 +478,9 @@ class EasyTrackingGUI(ctk.CTk):
                 frame.pack_forget()
 
     # Step 1: Video
-    def _build_video_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_video_section(self, parent: ctk.CTkFrame) -> None:
         frame = ctk.CTkFrame(parent, corner_radius=6)
-        frame.pack(fill="x", padx=12, pady=(10, 5))
+        self._video_frame = frame
         ctk.CTkLabel(
             frame,
             text="Step 1: Select Videos",
@@ -1000,6 +1039,7 @@ class EasyTrackingGUI(ctk.CTk):
     def _sync_segmentation_status_from_outputs(self, cfg: dict | None = None) -> None:
         if not hasattr(self, "_seg_status"):
             return
+        self._reveal_video_details_if_selected()
         running = self._seg_proc is not None and self._seg_proc.poll() is None
         completed = (
             self._segmentation_finished_for_current_launch()
@@ -1373,15 +1413,6 @@ class EasyTrackingGUI(ctk.CTk):
         self._display_canvas = tk.Canvas(parent, bg="#1a1a1a", highlightthickness=0)
         self._display_canvas.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
         self._display_canvas.bind("<Configure>", lambda _e: self._on_canvas_resize())
-        self._video_drop_state = install_canvas_file_drop(
-            self,
-            self._display_canvas,
-            allowed_suffixes=VIDEO_DROP_SUFFIXES,
-            on_path=self._handle_dropped_training_video,
-            status_callback=lambda message: self._canvas_status.configure(text=message)
-            if hasattr(self, "_canvas_status") else None,
-            label="video",
-        )
 
         self._next_action_label = tk.Label(
             parent,
