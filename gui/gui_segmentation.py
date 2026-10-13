@@ -67,6 +67,7 @@ from main.roi import (
 from main.video_frame_count import detect_seekable_frame_count
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
 from gui.preview_playback_timing import AdaptivePreviewPacer
+from gui.attention_border import RotatingBorderHighlight
 from gui.reverse_playback_buffer import PreparedFrame, SmoothPreviewPlayback
 
 APP_TITLE = "AMADEUS: Segmentation"
@@ -1420,6 +1421,8 @@ class CrossingReviewApp(ctk.CTk):
         self.area_iqr_boxplot = None
         self.analysis_gate_frame = None
         self.outlier_section_revealed = False
+        self._guidance_stage = "background"
+        self._guidance_glows: dict[str, RotatingBorderHighlight] = {}
 
         self.optional_configurations_var = tk.BooleanVar(value=False)
         self.show_overlay_var = tk.BooleanVar(value=True)
@@ -1527,6 +1530,7 @@ class CrossingReviewApp(ctk.CTk):
         self._build_ui()
         self._bind_events()
         self._bind_traces()
+        self._refresh_guidance_ui()
         _start_maximized(self)
         self.after(1200, _start_torch_init)
 
@@ -1652,11 +1656,11 @@ class CrossingReviewApp(ctk.CTk):
             anchor="center",
             justify="center",
         ).pack(fill="x", pady=(0, 4))
-        ctk.CTkButton(
-            self.analysis_gate_frame,
-            text="Analyze",
-            command=self.analyze_sample_frames,
-        ).pack(fill="x", padx=6, pady=(0, 6))
+        self.analysis_start_button = ctk.CTkButton(
+            self.analysis_gate_frame, text="Analyze", command=self.analyze_sample_frames,
+            border_width=3, border_color="#777777",
+        )
+        self.analysis_start_button.pack(fill="x", padx=6, pady=(0, 6))
         self.result_section = section("Result OBB Import (Optional)")
         self.additional_outlier_section = section("Additional Outlier (Optional)")
         self.single_blob_smoothing_section = section("Single-animal Smoothing (Optional)")
@@ -1667,7 +1671,11 @@ class CrossingReviewApp(ctk.CTk):
         self.bg_controls_frame = ctk.CTkFrame(seg, corner_radius=0)
         self.bg_controls_frame.pack(fill="x")
         self._pack_combobox(self.bg_controls_frame, "Background method", self.bg_method_var, list(BACKGROUND_METHODS))
-        self.bg_preview_button = ctk.CTkButton(self.bg_controls_frame, text="Show background", command=self.show_background_popup, state="disabled")
+        self.bg_preview_button = ctk.CTkButton(
+            self.bg_controls_frame, text="Show background",
+            command=self.show_background_popup, state="disabled",
+            border_width=3, border_color="#777777",
+        )
         self.bg_preview_button.pack(fill="x", padx=6, pady=(2, 6))
         self.frame_ranges_button = ctk.CTkButton(seg, text="Change Frame Ranges...", command=self.change_frame_ranges, state="disabled")
         self.frame_ranges_button.pack(fill="x", padx=6, pady=(2, 6))
@@ -1687,6 +1695,11 @@ class CrossingReviewApp(ctk.CTk):
         self.bright_diff_threshold_scale = self._pack_scale_entry(self.bright_hybrid_threshold_controls_frame, "Diff threshold", self.diff_threshold_var, 0, 255, 1)
 
         self.min_area_scale = self._pack_scale_entry(seg, "Min blob area", self.min_area_var, 1, 100000, 1)
+        self.threshold_done_button = ctk.CTkButton(
+            seg, text="Done", command=self._confirm_threshold,
+            border_width=3, border_color="#777777",
+        )
+        self.threshold_done_button.pack(fill="x", padx=6, pady=(6, 8))
 
         roi = self.roi_section
         _roi_set_row = ctk.CTkFrame(roi, corner_radius=0)
@@ -1842,6 +1855,11 @@ class CrossingReviewApp(ctk.CTk):
         self._build_area_iqr_control(self.area_iqr_frame)
         self._build_area_absolute_control(self.area_absolute_frame)
         self._toggle_area_outlier_method_controls()
+        self.outlier_done_button = ctk.CTkButton(
+            ana, text="Done", command=self._confirm_outliers,
+            border_width=3, border_color="#777777",
+        )
+        self.outlier_done_button.pack(side="bottom", fill="x", padx=6, pady=(6, 8))
 
         result = self.result_section
         ctk.CTkCheckBox(
@@ -1900,12 +1918,20 @@ class CrossingReviewApp(ctk.CTk):
         # out instead of blending in with the checkboxes.
         self.processing_button = ctk.CTkButton(
             self.sidebar, text="Processing", command=self.run_processing, height=40,
+            border_width=3, border_color="#777777",
         )
         self.processing_button.pack(side="bottom", fill="x", padx=8, pady=(0, 6))
 
 
         self._refresh_segmentation_controls()
         self._refresh_segmentation_controls()
+        self._guidance_glows = {
+            "background": RotatingBorderHighlight(self, self.bg_preview_button),
+            "threshold": RotatingBorderHighlight(self, self.threshold_done_button),
+            "analysis": RotatingBorderHighlight(self, self.analysis_start_button),
+            "outlier": RotatingBorderHighlight(self, self.outlier_done_button),
+            "processing": RotatingBorderHighlight(self, self.processing_button),
+        }
         self._set_workflow_stage("background")
 
     def _make_collapsible_section(self, parent: ctk.CTkFrame, title: str, expanded: bool = True) -> ctk.CTkFrame:
@@ -1965,6 +1991,46 @@ class CrossingReviewApp(ctk.CTk):
     def _on_optional_configurations_changed(self):
         self._set_workflow_stage("optional_configurations")
 
+    def _confirm_threshold(self):
+        if self._guidance_stage == "threshold":
+            self._guidance_stage = "analysis"
+            self._set_workflow_stage("analysis")
+
+    def _confirm_outliers(self):
+        if self._guidance_stage == "outlier":
+            self._guidance_stage = "processing"
+            self._refresh_guidance_ui()
+
+    def _refresh_guidance_ui(self):
+        if not self._guidance_glows:
+            return
+        stage = self._guidance_stage
+        if stage == "background" and not self._segmentation_needs_background():
+            stage = self._guidance_stage = "threshold"
+        if stage in ("outlier", "processing") and not self.outlier_section_revealed:
+            stage = self._guidance_stage = "analysis"
+
+        if stage == "threshold":
+            if not self.threshold_done_button.winfo_manager():
+                self.threshold_done_button.pack(fill="x", padx=6, pady=(6, 8))
+        else:
+            self.threshold_done_button.pack_forget()
+
+        if stage == "outlier" and self.outlier_section_revealed:
+            if not self.outlier_done_button.winfo_manager():
+                self.outlier_done_button.pack(side="bottom", fill="x", padx=6, pady=(6, 8))
+        else:
+            self.outlier_done_button.pack_forget()
+
+        # Processing remains hidden until the Outlier Extraction Done is pressed.
+        if stage == "processing" and self.outlier_section_revealed:
+            if not self.processing_button.winfo_manager():
+                self.processing_button.pack(side="bottom", fill="x", padx=8, pady=(0, 6))
+        else:
+            self.processing_button.pack_forget()
+        for name, glow in self._guidance_glows.items():
+            glow.set_active(name == stage)
+
     def _set_workflow_stage(self, stage: str):
         """Show optional sections on request while preserving their original order."""
         show_optional = bool(self.optional_configurations_var.get())
@@ -1993,11 +2059,12 @@ class CrossingReviewApp(ctk.CTk):
             if section is None or (optional and not show_optional):
                 continue
             if section is self.ana_section and not self.outlier_section_revealed:
-                if self.analysis_gate_frame is not None:
+                if self._guidance_stage == "analysis" and self.analysis_gate_frame is not None:
                     self.analysis_gate_frame.pack(fill="x", padx=8, pady=6)
                 continue
             self._pack_sidebar_section(section)
         self._update_analysis_dependent_buttons()
+        self._refresh_guidance_ui()
 
     def _update_analysis_dependent_buttons(self):
         # Processing stays clickable in every state so that pressing it explains
