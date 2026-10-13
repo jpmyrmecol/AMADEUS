@@ -13,6 +13,7 @@ import math
 
 import cv2
 import numpy as np
+from scipy.spatial import cKDTree
 
 
 @dataclass
@@ -109,13 +110,20 @@ class PersistentStaticScanner:
                       if (obs := self._observation(fid, blob)) is not None]
         active = [track for track in self._tracks
                   if fid - track.last.frame <= max(1, allowed_missing + 1)]
+        # Query only nearby existing tracks, rather than scanning all active
+        # tracks for every blob (quadratic for crowded recordings).
         remaining = set(range(len(active)))
-        # Greedy unique matching: nearby contours only; no global location
-        # suppression, so a different moving animal can later cross this area.
+        centers = np.asarray([(t.last.x, t.last.y) for t in active], dtype=np.float64)
+        tree = cKDTree(centers) if active else None
+        longest = max((t.last.length for t in active), default=0.0)
         for obs in candidates:
             best = None
             score = float("inf")
-            for index in remaining:
+            radius = max(1.0, self.max_displacement * max(obs.length, longest))
+            neighborhood = sorted(tree.query_ball_point((obs.x, obs.y), radius)) if tree is not None else []
+            for index in neighborhood:
+                if index not in remaining:
+                    continue
                 last = active[index].last
                 dist = math.hypot(obs.x - last.x, obs.y - last.y)
                 tolerance = max(1.0, self.max_displacement * max(obs.length, last.length))
