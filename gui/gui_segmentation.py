@@ -2454,6 +2454,7 @@ class CrossingReviewApp(ctk.CTk):
             self.analysis_ready_var.set("analysis: not computed")
 
         self.outlier_section_revealed = bool(self.analysis_iqr_stats) and not self.analysis_is_stale
+        self._guidance_stage = "outlier" if self.outlier_section_revealed else "background"
 
         # background.png always lives next to this JSON config itself (see
         # _default_background_path()), so no separate stored path is needed.
@@ -2795,6 +2796,8 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_is_stale = True
         self.analysis_ready_var.set(message)
         self.outlier_section_revealed = False
+        if self._guidance_stage in ("outlier", "processing"):
+            self._guidance_stage = "analysis"
         self._set_workflow_stage("analysis")
         self._redraw_area_iqr_boxplot()
         self._update_analysis_dependent_buttons()
@@ -3794,6 +3797,7 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_iqr_stats = {}
         self.analysis_is_stale = True
         self.outlier_section_revealed = False
+        self._guidance_stage = "background"
         self.background_ready_var.set("background: not computed")
         self.analysis_ready_var.set("analysis: not computed")
         if self.bg_preview_button is not None:
@@ -3875,6 +3879,8 @@ class CrossingReviewApp(ctk.CTk):
         if self._closing:
             return
         self._closing = True
+        for glow in self._guidance_glows.values():
+            glow.stop()
         if self._space_release_job is not None:
             self.after_cancel(self._space_release_job)
             self._space_release_job = None
@@ -4333,6 +4339,7 @@ class CrossingReviewApp(ctk.CTk):
             self.analysis_ready_var.set("analysis: stale (segmentation changed; re-run Analyze)")
         if self.outlier_section_revealed:
             self.outlier_section_revealed = False
+            self._guidance_stage = "analysis"
             self._set_workflow_stage("analysis")
         else:
             self._update_analysis_dependent_buttons()
@@ -5920,6 +5927,7 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_is_stale = False
         self.analysis_ready_var.set(f"analysis: ready ({scope_text}, blobs={total}, outliers={outliers})")
         self.outlier_section_revealed = True
+        self._guidance_stage = "outlier"
         self._set_workflow_stage("processing")
         self._redraw_area_iqr_boxplot()
         self.redraw_current_frame()
@@ -6556,6 +6564,9 @@ class CrossingReviewApp(ctk.CTk):
         label.configure(image=self.bg_preview_image)
         self.bg_preview_popup = popup
         popup.protocol("WM_DELETE_WINDOW", lambda: self._close_bg_preview())
+        if self._guidance_stage == "background":
+            self._guidance_stage = "threshold"
+            self._set_workflow_stage("analysis")
 
     def _close_bg_preview(self):
         if self.bg_preview_popup is not None:
@@ -6703,6 +6714,8 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_is_stale = True
         self.analysis_ready_var.set("analysis: not computed")
         self.outlier_section_revealed = False
+        if self._guidance_stage in ("outlier", "processing"):
+            self._guidance_stage = "background"
         self._set_workflow_stage("analysis")
 
     def _activate_cached_background(self, method: str, redraw: bool = True) -> bool:
