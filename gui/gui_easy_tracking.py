@@ -699,13 +699,6 @@ class EasyTrackingGUI(ctk.CTk):
     def _build_video_section(self, parent: ctk.CTkFrame) -> None:
         frame = ctk.CTkFrame(parent, corner_radius=6)
         self._video_frame = frame
-        ctk.CTkLabel(
-            frame,
-            text="Step 1: Select Videos",
-            font=("TkDefaultFont", 13, "bold"),
-            anchor="w",
-        ).pack(fill="x", padx=8, pady=(6, 2))
-
         training_row = ctk.CTkFrame(frame, corner_radius=0)
         training_row.pack(fill="x", padx=8, pady=4)
         ctk.CTkLabel(
@@ -1292,12 +1285,6 @@ class EasyTrackingGUI(ctk.CTk):
         frame.pack(fill="x", padx=12, pady=5)
         header = ctk.CTkFrame(frame, corner_radius=0)
         header.pack(fill="x", padx=8, pady=(6, 2))
-        ctk.CTkLabel(
-            header,
-            text="Step 2: Settings",
-            font=("TkDefaultFont", 13, "bold"),
-            anchor="w",
-        ).pack(side="left")
         self._delete_tmp_files = tk.BooleanVar(value=True)
         ctk.CTkCheckBox(
             header,
