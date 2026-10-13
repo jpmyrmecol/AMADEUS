@@ -125,8 +125,8 @@ ANALYSIS_FORWARD_MAX_FRAMES = 512
 PROCESSING_BATCH_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_TRAINING_MAX_FRAME_INDEX = 19999
 LONG_VIDEO_FRAME_COUNT_THRESHOLD = DEFAULT_TRAINING_MAX_FRAME_INDEX + 1
-# Lower and upper IQR multiplier controls share the same maximum.
-AREA_IQR_SLIDER_MAX = 10.0
+# Maximum IQR multiplier used for interactive area limits.
+AREA_IQR_MULTIPLIER_MAX = 10.0
 REGION_EXPAND_SLIDER_MAX_PX = 50
 REGION_EXPAND_ENTRY_MAX_PX = 1000
 # Handles and hit tolerance stay the same size on screen at any zoom level.
@@ -3416,7 +3416,10 @@ class CrossingReviewApp(ctk.CTk):
         except ValueError:
             self._sync_iqr_area_entries(force=True)
             return
-        self._set_iqr_area_bound(index, value)
+        current = self._current_area_bounds(self.analysis_iqr_stats)[index]
+        # Display rounding must not silently change an untouched threshold.
+        if entry.get().strip() != f"{current:.8g}":
+            self._set_iqr_area_bound(index, value)
         self._sync_iqr_area_entries(force=True)
 
     def _set_iqr_area_bound(self, index: int, area: float):
@@ -3428,13 +3431,15 @@ class CrossingReviewApp(ctk.CTk):
         if iqr <= 1e-9:
             return  # An IQR multiplier cannot move a bound when IQR is zero.
         if index == 0:
-            area = max(q1 - AREA_IQR_SLIDER_MAX * iqr, min(median, area))
+            area = max(q1 - AREA_IQR_MULTIPLIER_MAX * iqr, min(median, area))
             multiplier = (q1 - area) / iqr
-            self.area_iqr_min_var.set(multiplier)
+            if not math.isclose(self.area_iqr_min_var.get(), multiplier, rel_tol=0.0, abs_tol=1e-12):
+                self.area_iqr_min_var.set(multiplier)
         else:
-            area = min(q3 + AREA_IQR_SLIDER_MAX * iqr, max(median, area))
+            area = min(q3 + AREA_IQR_MULTIPLIER_MAX * iqr, max(median, area))
             multiplier = (area - q3) / iqr
-            self.area_iqr_max_var.set(multiplier)
+            if not math.isclose(self.area_iqr_max_var.get(), multiplier, rel_tol=0.0, abs_tol=1e-12):
+                self.area_iqr_max_var.set(multiplier)
 
     def _iqr_bracket_hit(self, event):
         axis = self._iqr_plot_axis
@@ -3456,7 +3461,8 @@ class CrossingReviewApp(ctk.CTk):
         return None
 
     def _update_iqr_boxplot_cursor(self, event):
-        active = self._iqr_bracket_hit(event) is not None
+        stats = self.analysis_iqr_stats.get("area")
+        active = bool(stats and stats[3] > 1e-9 and self._iqr_bracket_hit(event) is not None)
         self.area_iqr_boxplot.configure(cursor="hand2" if active else "")
 
     def _start_iqr_boxplot_drag(self, event):
@@ -3538,7 +3544,7 @@ class CrossingReviewApp(ctk.CTk):
         lo, hi = self._bounds_from_fixed_stats(self.analysis_iqr_stats).get("area", (q1, q3))
 
         # A symmetric axis keeps the median exactly centered, including skewed data.
-        multiplier = AREA_IQR_SLIDER_MAX
+        multiplier = AREA_IQR_MULTIPLIER_MAX
         span = max(median - (q1 - multiplier * iqr),
                    (q3 + multiplier * iqr) - median, 1.0, abs(median) * 0.1)
         vmin, vmax = median - span, median + span
@@ -6187,8 +6193,7 @@ class CrossingReviewApp(ctk.CTk):
 
         _draw_result_obbs(base, self._current_result_obbs())
 
-        # IQR-related numeric values are intentionally not drawn on the image.
-        # The box plot below the sliders is the only reference display.
+        # IQR bounds are edited in the boxplot controls, not over the video.
 
         return cv2.cvtColor(base, cv2.COLOR_BGR2RGB)
 
