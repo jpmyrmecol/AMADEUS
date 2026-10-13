@@ -85,7 +85,7 @@ if not defined UV_EXE (
 
 REM Setup may rebuild .venv; run it outside that environment to avoid locking its Python.
 set "VIRTUAL_ENV="
-"%UV_EXE%" --quiet run --no-project --isolated --python 3.10 python tools\setup_environment.py --uv "%UV_EXE%"
+"%UV_EXE%" --quiet run --no-project --isolated --python 3.12 python tools\setup_environment.py --uv "%UV_EXE%"
 set "AMADEUS_SETUP_EXIT=%errorlevel%"
 endlocal & exit /b %AMADEUS_SETUP_EXIT%
 

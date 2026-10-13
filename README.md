@@ -39,6 +39,8 @@ Use the [installers on the website](https://amadeus.jpmyrmecol.com/#install), or
 | macOS on Apple Silicon | Open `AMADEUS.command` |
 | Linux / WSL2 | Run `bash AMADEUS.sh` |
 
+AMADEUS requires **Python 3.12.x** on all supported operating systems. The launchers select Python 3.12, and setup rebuilds the default managed `.venv` if it was created with Python 3.10 or 3.11. macOS additionally requires Tcl/Tk 8.6.
+
 For platform requirements, installation details, and troubleshooting, see the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html).
 
 To update AMADEUS, select **Update** below **Help** on the Home screen. Review the version change and confirm to install; AMADEUS closes during the update and restarts when setup is complete.

@@ -7,7 +7,7 @@ name = "amadeus"
 dynamic = ["version"]
 description = "A GUI workflow for animal tracking and movement analysis."
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.12,<3.13"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 dependencies = [

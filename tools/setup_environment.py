@@ -287,8 +287,8 @@ def check_python(python: str, *, macos: bool, required_minor: str | None = None)
     """Reject unsupported Python/Tk before uv can replace an existing environment."""
     code = """
 import sys
-if not (3, 10) <= sys.version_info[:2] < (3, 13):
-    raise RuntimeError('Python 3.10–3.12 required')
+if sys.version_info[:2] != (3, 12):
+    raise RuntimeError('Python 3.12 required')
 """
     if required_minor:
         code += f"""
@@ -337,7 +337,7 @@ def select_python(requested: str | None, profile: str) -> str:
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 f"Existing environment is incompatible: {venv_python()}\n{exc.stderr}\n"
-                "Select a Python 3.10–3.12 with Tcl/Tk 8.6 using AMADEUS_PYTHON "
+                "Select Python 3.12 with Tcl/Tk 8.6 using AMADEUS_PYTHON "
                 "and set AMADEUS_VENV=.venv-tk86 to preserve the old environment."
             ) from exc
         return str(venv_python())
@@ -345,7 +345,7 @@ def select_python(requested: str | None, profile: str) -> str:
         return required_minor
     if macos:
         # Python.org framework installations are candidates, not an assumed Tk guarantee.
-        for minor in (12, 11, 10):
+        for minor in (12,):
             candidate = f"/Library/Frameworks/Python.framework/Versions/3.{minor}/bin/python3.{minor}"
             if Path(candidate).is_file():
                 try:
@@ -354,11 +354,11 @@ def select_python(requested: str | None, profile: str) -> str:
                 except subprocess.CalledProcessError:
                     continue
         raise RuntimeError(
-            "macOS requires native Python 3.10–3.12 with Tcl/Tk 8.6. "
+            "macOS requires native Python 3.12 with Tcl/Tk 8.6. "
             "Run AMADEUS.command (or AMADEUS-Setup.command) to check Python and offer installation. "
             "Tk 9 is not supported with CustomTkinter 5.2.2. See README macOS setup."
         )
-    return "3.10"
+    return "3.12"
 
 
 def _ready_marker_profile() -> str | None:
@@ -390,8 +390,8 @@ def prepare_profile_environment(profile: str, previous_profile: str | None = Non
             or current.install_dependencies
         )
 
-    required_minor = current.python_minor
-    if not rebuild and required_minor and venv_python().exists():
+    required_minor = current.python_minor or "3.12"
+    if not rebuild and venv_python().exists():
         try:
             running_minor = subprocess.check_output(
                 [
@@ -490,6 +490,9 @@ def verify_pytorch_profile(profile: str) -> None:
     """Verify the selected wheel build and accelerator computation/NMS when required."""
     check_support(profile)
     code = f"""
+import sys
+if sys.version_info[:2] != (3, 12):
+    raise RuntimeError('AMADEUS requires Python 3.12')
 import torch
 import torchvision
 from tools.runtime_profiles import verify_execution

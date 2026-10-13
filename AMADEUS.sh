@@ -177,7 +177,7 @@ fi
 if [ "$(uname -s)" = Darwin ]; then
     setup_python="$AMADEUS_PYTHON"
 else
-    setup_python=3.10
+    setup_python=3.12
 fi
 # Setup may rebuild .venv; keep the bootstrap interpreter outside that environment.
 if ! env -u VIRTUAL_ENV "$UV_EXE" --quiet run --no-project --isolated --python "$setup_python" python tools/setup_environment.py --uv "$UV_EXE"; then

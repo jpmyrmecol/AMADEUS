@@ -9,7 +9,7 @@ amadeus_check_python() {
 import platform
 import sys
 assert sys.platform == 'darwin'
-assert (3, 10) <= sys.version_info[:2] < (3, 13)
+assert sys.version_info[:2] == (3, 12)
 assert platform.machine() == 'arm64'
 import tkinter as tk
 assert tk.TclVersion == 8.6 and tk.TkVersion == 8.6
@@ -23,12 +23,9 @@ PY
 }
 
 amadeus_python_candidates() {
-    local minor candidate
-    for minor in 12 11 10; do
-        printf '%s\n' "/Library/Frameworks/Python.framework/Versions/3.$minor/bin/python3.$minor"
-        printf '%s\n' "/opt/homebrew/opt/python@3.$minor/bin/python3.$minor"
-        command -v "python3.$minor" || true
-    done
+    printf '%s\n' "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12"
+    printf '%s\n' "/opt/homebrew/opt/python@3.12/bin/python3.12"
+    command -v python3.12 || true
     candidate="$(command -v python3 || true)"
     # Apple's stub can open a Command Line Tools installation dialog.
     if [ "$candidate" != /usr/bin/python3 ]; then printf '%s\n' "$candidate"; fi
@@ -69,7 +66,7 @@ amadeus_ensure_macos_python() {
         *) export AMADEUS_VENV="$PWD/$AMADEUS_VENV" ;;
     esac
     echo '[AMADEUS] Checking for compatible Apple Silicon Python and Tcl/Tk...'
-    # An explicit selection or existing environment must never be silently replaced.
+    # Explicit Python selections must be validated before setup.
     if [ -n "${AMADEUS_PYTHON:-}" ]; then
         if ! amadeus_check_python "$AMADEUS_PYTHON"; then
             echo '[ERROR] AMADEUS_PYTHON is incompatible. Correct or unset it, then retry.' >&2
@@ -83,9 +80,7 @@ amadeus_ensure_macos_python() {
             export AMADEUS_PYTHON="$existing"
             return 0
         fi
-        echo '[ERROR] Existing environment is incomplete or incompatible and has been preserved.' >&2
-        echo '[ERROR] Set AMADEUS_VENV to a new directory, then retry setup.' >&2
-        return 1
+        echo '[AMADEUS] Existing environment is incompatible with Python 3.12; setup will rebuild the managed .venv.'
     fi
     while IFS= read -r candidate; do
         if [ -x "$candidate" ] && amadeus_check_python "$candidate"; then
@@ -95,7 +90,7 @@ amadeus_ensure_macos_python() {
         fi
     done < <(amadeus_python_candidates)
 
-    echo 'No compatible Python was found (native arm64, Python 3.10-3.12, Tcl/Tk 8.6).'
+    echo 'No compatible Python was found (native arm64, Python 3.12, Tcl/Tk 8.6).'
     if ! /usr/bin/osascript -e 'display dialog "No compatible Python was found. Download the official Python 3.12.10 package from python.org and open it in Installer.app?\n\nInstaller.app will handle installation and any administrator authentication. It installs a system-wide Python and may replace an existing python.org 3.12 installation.\n\nAfter completing the Python installation, run AMADEUS Setup again." with title "AMADEUS Setup" buttons {"Cancel", "Download Python"} default button "Download Python" cancel button "Cancel"' >/dev/null; then
         echo '[AMADEUS] Python download was not approved; setup stopped.'
         return 2
