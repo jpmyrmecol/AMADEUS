@@ -3062,7 +3062,9 @@ class CrossingReviewApp(ctk.CTk):
             ctk.CTkCheckBox(row, text="", variable=enable_var).pack(side="left", padx=(0, 4))
         ctk.CTkLabel(row, text=label, width=144, anchor="w").pack(side="left")
 
-        fmt = "{:.6g}" if entry_prefix == "IQRx" else ("{:.1f}" if is_float else "{:d}")
+        fmt = ("{:.6g}" if entry_prefix == "IQRx" else
+               ("{:.2f}" if is_float and float(resolution) < 0.1 else
+                "{:.1f}" if is_float else "{:d}"))
         default_value = float(var.get()) if is_float else int(var.get())
         state = {"updating": False}
 
