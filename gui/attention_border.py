@@ -22,6 +22,10 @@ class RotatingBorderHighlight:
         self.last_time = time.monotonic()
         self.job = None
         self.size = None
+        # A non-highlighted button must have the ordinary borderless CTk look.
+        # Remember the configured highlight width before clearing it.
+        self.highlight_border_width = max(3, int(button.cget("border_width") or 0))
+        button.configure(border_width=0)
         self.items = [
             button._canvas.create_line(
                 0, 0, 0, 0, width=2.6, capstyle=tk.ROUND,
@@ -145,6 +149,10 @@ class RotatingBorderHighlight:
         self.button._canvas.itemconfigure(
             "rotating_border_highlight", state="normal" if active else "hidden"
         )
+        self.button.configure(
+            border_width=self.highlight_border_width if active else 0
+        )
+        self.size = None
         if active:
             self.last_time = time.monotonic()
             self._paint()
