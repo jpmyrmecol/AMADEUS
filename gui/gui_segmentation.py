@@ -46,7 +46,8 @@ except ImportError:  # Preserve direct execution with: python gui/gui_segmentati
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
 
 ensure_import_paths(PROJECT_ROOT)
-from gui.color import OBB_COLOR, OUTLIER_COLOR, ROI_COLOR, WHITE
+from gui.color import OBB_COLOR, OUTLIER_COLOR, ROI_COLOR, WHITE, GREEN
+from main.persistent_static_blobs import PersistentStaticScanner
 from gui.video_input import (
     VIDEO_DROP_SUFFIXES,
     VIDEO_FILETYPES,
@@ -88,6 +89,8 @@ RESULT_OBB_COLOR = (255, 0, 255)
 # Fraction of a blob that its single imported OBB must cover for the blob to be
 # accepted as one large animal instead of an area outlier.
 DEFAULT_RESULT_OBB_COVERAGE = 0.7
+# Stage 1 rejects OBB aspect ratios strictly below MIN_ASPECT (1.1 by default).
+DEFAULT_MIN_OBB_ASPECT = 1.1
 
 ZOOM_IN_FACTOR = 1.12
 ZOOM_OUT_FACTOR = 1.0 / ZOOM_IN_FACTOR
@@ -408,6 +411,8 @@ class BlobMetrics:
     bbox_area_outlier: bool = False
     width_outlier: bool = False
     height_outlier: bool = False
+    low_obb_aspect_outlier: bool = False
+    persistent_static_outlier: bool = False
     manual_outlier: bool = False
     is_crossing: bool = False
     result_obb_count: int = 0        # imported OBBs owned by this blob
@@ -1154,6 +1159,10 @@ def _segmentation_pickle_blob(blob: BlobMetrics, source_index: Optional[int] = N
         exclusion = "synthetic"
     elif blob.manual_outlier:
         exclusion = "manual"
+    elif blob.persistent_static_outlier:
+        exclusion = "persistent_static"
+    elif blob.low_obb_aspect_outlier:
+        exclusion = "low_obb_aspect"
     elif blob.result_obb_count > 1:
         exclusion = "result_multiple"
     elif not blob.is_crossing:
@@ -1385,6 +1394,16 @@ class CrossingReviewApp(ctk.CTk):
         self.additional_outlier_revision = 0
 
         self.analysis_sample_count_var = tk.IntVar(value=200)
+
+        # Default 0.5 second window is converted to whole frames on video load.
+        self.static_exclusion_enabled_var = tk.BooleanVar(value=False)
+        self.static_frame_window_var = tk.IntVar(value=15)
+        self.static_presence_var = tk.DoubleVar(value=0.98)
+        self.static_iou_var = tk.DoubleVar(value=0.8)
+        self.static_max_movement_var = tk.DoubleVar(value=0.2)
+        self.static_search_status_var = tk.StringVar(value="Not searched")
+        self._static_search_signature: Optional[tuple] = None
+        self._static_exclusions: dict[int, set[int]] = {}
 
         self.result_import_enabled_var = tk.BooleanVar(value=False)
         self.result_import_path_var = tk.StringVar(value="")
@@ -1668,6 +1687,7 @@ class CrossingReviewApp(ctk.CTk):
         self.result_section = section("Result OBB Import (Optional)")
         self.additional_outlier_section = section("Additional Outlier (Optional)")
         self.single_blob_smoothing_section = section("Single-animal Smoothing (Optional)")
+        self.static_blob_section = section("Exclude persistent static blobs (Optional)")
 
         seg = self.seg_section
         self._pack_combobox(seg, "Segmentation mode", self.segmentation_mode_var, ["background_diff", "dark_region", "bright_region", "dark_region_and_background_diff", "bright_region_and_background_diff"])
@@ -1825,6 +1845,44 @@ class CrossingReviewApp(ctk.CTk):
             anchor="w", justify="left", wraplength=280,
         ).pack(fill="x", padx=6, pady=(2, 6))
         self._toggle_single_blob_smoothing_params()
+
+        static_section = self.static_blob_section
+        ctk.CTkCheckBox(
+            static_section, text="Enabled",
+            variable=self.static_exclusion_enabled_var,
+            command=self._on_static_search_changed,
+        ).pack(anchor="w", padx=6, pady=(4, 4))
+        self.static_options_frame = ctk.CTkFrame(static_section, corner_radius=0)
+        self._pack_scale_entry(
+            self.static_options_frame, "Frame window",
+            self.static_frame_window_var, 2, 2000, 1,
+        )
+        self._pack_scale_entry(
+            self.static_options_frame, "Presence ratio",
+            self.static_presence_var, 0.01, 1.0, 0.01, is_float=True,
+        )
+        self._pack_scale_entry(
+            self.static_options_frame, "Median contour IoU",
+            self.static_iou_var, 0.0, 1.0, 0.01, is_float=True,
+        )
+        self._pack_scale_entry(
+            self.static_options_frame, "Max center drift / body length",
+            self.static_max_movement_var, 0.0, 1.0, 0.01, is_float=True,
+        )
+        ctk.CTkButton(
+            self.static_options_frame, text="Search",
+            command=self.search_persistent_static_blobs,
+        ).pack(fill="x", padx=6, pady=(4, 4))
+        ctk.CTkLabel(
+            self.static_options_frame, textvariable=self.static_search_status_var,
+            anchor="w", wraplength=330, justify="left",
+        ).pack(fill="x", padx=6, pady=(0, 6))
+        self._toggle_static_options()
+        for var in (
+            self.static_frame_window_var, self.static_presence_var,
+            self.static_iou_var, self.static_max_movement_var,
+        ):
+            var.trace_add("write", lambda *_: self._on_static_search_changed())
 
         expansion = self.region_expansion_section
         self._pack_scale_entry(expansion, "Expand region (px)", self.region_expand_px_var,
@@ -2049,6 +2107,7 @@ class CrossingReviewApp(ctk.CTk):
             (getattr(self, "result_section", None), True),
             (getattr(self, "additional_outlier_section", None), True),
             (getattr(self, "single_blob_smoothing_section", None), True),
+            (getattr(self, "static_blob_section", None), True),
         ]
 
         # Reset the pack order before restoring visible sections. This keeps
@@ -2121,6 +2180,11 @@ class CrossingReviewApp(ctk.CTk):
             "single_blob_smoothing_enabled": self.single_blob_smoothing_enabled_var,
             "single_blob_smoothing_level": self.single_blob_smoothing_level_var,
             "analysis_sample_count": self.analysis_sample_count_var,
+            "static_exclusion_enabled": self.static_exclusion_enabled_var,
+            "static_frame_window": self.static_frame_window_var,
+            "static_presence": self.static_presence_var,
+            "static_min_iou": self.static_iou_var,
+            "static_max_movement": self.static_max_movement_var,
             "area_outlier_method": self.area_outlier_method_var,
             "area_iqr_min": self.area_iqr_min_var,
             "area_iqr_max": self.area_iqr_max_var,
@@ -5675,6 +5739,8 @@ class CrossingReviewApp(ctk.CTk):
             bbox_area_outlier=blob.bbox_area_outlier,
             width_outlier=blob.width_outlier,
             height_outlier=blob.height_outlier,
+            low_obb_aspect_outlier=blob.low_obb_aspect_outlier,
+            persistent_static_outlier=blob.persistent_static_outlier,
             manual_outlier=blob.manual_outlier,
             is_crossing=blob.is_crossing,
             result_obb_count=blob.result_obb_count,
