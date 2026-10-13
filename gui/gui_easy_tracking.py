@@ -413,15 +413,17 @@ class EasyTrackingGUI(ctk.CTk):
         self._switch_btn.pack(side="right")
 
         left = ctk.CTkScrollableFrame(left_wrap, corner_radius=0)
-        left.pack(fill="both", expand=True)
+        self._left_controls = left
+        self._video_prompt_host = ctk.CTkFrame(left_wrap, corner_radius=0)
+        self._video_prompt_host.pack(fill="both", expand=True)
         right = tk.Frame(pane, bg="#181818", width=480)
 
         pane.add(left_wrap, minsize=540)
         pane.add(right, minsize=360)
 
+        self._build_video_prompt(self._video_prompt_host)
         video_area = ctk.CTkFrame(left, fg_color="transparent")
         video_area.pack(fill="x")
-        self._build_video_prompt(video_area)
         self._build_video_section(video_area)
         self._build_questions_section(left)
         self._build_action_buttons(left)
@@ -438,32 +440,124 @@ class EasyTrackingGUI(ctk.CTk):
         self._sync_segmentation_status_from_outputs()
 
     def _build_video_prompt(self, parent: ctk.CTkFrame) -> None:
-        """Initial entry point. The full Step 1 form appears after a video is chosen."""
+        """Initial video picker, centered until a video has been selected."""
         self._video_details_revealed = False
         self._video_prompt = ctk.CTkFrame(
             parent, corner_radius=12, border_width=1,
             border_color="#505050", fg_color="#242424",
         )
-        self._video_prompt.pack(fill="x", padx=24, pady=(64, 12))
-        ctk.CTkButton(
+        self._video_prompt.pack(expand=True, padx=24, pady=12)
+        self._video_select_btn = ctk.CTkButton(
             self._video_prompt,
             text="Select Videos",
             width=260, height=52,
+            border_width=3, border_color="#777777",
             font=("TkDefaultFont", 17, "bold"),
             command=self._browse_training_video,
-        ).pack(pady=(36, 12))
+        )
+        self._video_select_btn.pack(padx=48, pady=(36, 12))
         ctk.CTkLabel(
             self._video_prompt,
-            text="or drag & drop a video anywhere in this window",
+            text="or drag & drop a video",
             text_color="#b8b8b8",
-            font=("TkDefaultFont", 13),
+            font=("TkDefaultFont", 17),
         ).pack(pady=(0, 36))
+
+        self._video_select_phase = 0.0
+        self._video_select_last_time = time.monotonic()
+        self._video_select_hovered = False
+        self._video_select_after_id: str | None = None
+        self._video_select_border_size: tuple[int, int] | None = None
+        self._video_select_border_items = [
+            self._video_select_btn._canvas.create_line(
+                0, 0, 0, 0, width=2.6, capstyle=tk.ROUND,
+                tags="video_select_attention_border",
+            )
+            for _ in range(96)
+        ]
+        self._video_select_btn.bind("<Enter>", self._on_video_select_enter)
+        self._video_select_btn.bind("<Leave>", self._on_video_select_leave)
+        self._video_select_btn._canvas.bind(
+            "<Configure>", lambda _event: self.after_idle(self._paint_video_select_border),
+            add="+",
+        )
+        self._video_select_after_id = self.after(50, self._animate_video_select_border)
+
+    def _paint_video_select_border(self) -> None:
+        if self._video_details_revealed or not self._video_select_btn.winfo_ismapped():
+            return
+        button = self._video_select_btn
+        canvas = button._canvas
+        size = (canvas.winfo_width(), canvas.winfo_height())
+        if min(size) < 20:
+            return
+        count = len(self._video_select_border_items)
+        if size != self._video_select_border_size:
+            points = self._segmentation_border_points(
+                *size, count,
+                button._apply_widget_scaling(button.cget("corner_radius")),
+                button._apply_widget_scaling(button.cget("border_width")),
+            )
+            for i, item in enumerate(self._video_select_border_items):
+                x0, y0 = points[i]
+                x1, y1 = points[(i + 1) % count]
+                canvas.coords(item, x0, y0, x1, y1)
+            self._video_select_border_size = size
+        for i, item in enumerate(self._video_select_border_items):
+            distance = abs((i / count - self._video_select_phase + 0.5) % 1 - 0.5)
+            brightness = max(0.0, 1.0 - distance / 0.13) ** 2
+            low, high = (119, 119, 119), (250, 250, 250)
+            color = "#{:02x}{:02x}{:02x}".format(
+                *(round(a + (b - a) * brightness) for a, b in zip(low, high))
+            )
+            canvas.itemconfigure(item, fill=color)
+        canvas.tag_raise("video_select_attention_border")
+
+    def _animate_video_select_border(self) -> None:
+        self._video_select_after_id = None
+        if self._video_details_revealed or self._video_select_hovered:
+            return
+        now = time.monotonic()
+        self._video_select_phase = (
+            self._video_select_phase + (now - self._video_select_last_time) / 3.0
+        ) % 1.0
+        self._video_select_last_time = now
+        self._paint_video_select_border()
+        self._video_select_after_id = self.after(50, self._animate_video_select_border)
+
+    def _on_video_select_enter(self, _event=None) -> None:
+        if self._video_select_hovered:
+            return
+        self._video_select_hovered = True
+        if self._video_select_after_id is not None:
+            self.after_cancel(self._video_select_after_id)
+            self._video_select_after_id = None
+        self._paint_video_select_border()
+
+    def _on_video_select_leave(self, _event=None) -> None:
+        self.after(25, self._check_video_select_hover)
+
+    def _check_video_select_hover(self) -> None:
+        if self._video_details_revealed or not self._video_select_hovered:
+            return
+        button = self._video_select_btn
+        x, y = self.winfo_pointerx(), self.winfo_pointery()
+        if (button.winfo_rootx() <= x < button.winfo_rootx() + button.winfo_width()
+                and button.winfo_rooty() <= y < button.winfo_rooty() + button.winfo_height()):
+            return
+        self._video_select_hovered = False
+        self._video_select_last_time = time.monotonic()
+        self._animate_video_select_border()
 
     def _reveal_video_details_if_selected(self) -> None:
         if not self._video_details_revealed and self._video_entry.get().strip():
-            self._video_prompt.pack_forget()
-            self._video_frame.pack(fill="x", padx=12, pady=(10, 5))
             self._video_details_revealed = True
+            if self._video_select_after_id is not None:
+                self.after_cancel(self._video_select_after_id)
+                self._video_select_after_id = None
+            self._video_prompt_host.pack_forget()
+            self._left_controls.pack(fill="both", expand=True)
+            self._video_frame.pack(fill="x", padx=12, pady=(10, 5))
 
     def _set_post_segmentation_visibility(self, visible: bool) -> None:
         """Keep the tracking settings, Processing controls and Progress hidden until segmentation."""
