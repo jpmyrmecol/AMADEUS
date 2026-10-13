@@ -2416,6 +2416,18 @@ class CrossingReviewApp(ctk.CTk):
         self._current_result_area_bounds()
 
         self._apply_frame_ranges_from_settings(settings)
+        if "static_frame_window" not in settings and self.reader is not None:
+            fps = float(self.reader.fps) if self.reader.fps and self.reader.fps > 0 else 30.0
+            self.static_frame_window_var.set(max(2, int(round(0.5 * fps))))
+        # Search results are intentionally not trusted from a saved config:
+        # the current video must be searched again before exclusion.
+        self._static_search_signature = None
+        self._static_exclusions.clear()
+        self._toggle_static_options()
+        self.static_search_status_var.set(
+            "Not searched — press Search before Processing"
+            if self.static_exclusion_enabled_var.get() else "Disabled"
+        )
         self._toggle_area_outlier_method_controls()
 
         image_shape = (self.reader.height, self.reader.width) if self.reader is not None else None
@@ -3978,6 +3990,16 @@ class CrossingReviewApp(ctk.CTk):
         self._absolute_zoomed = False
         self._absolute_dragging = False
         self.frame_count = reader.frame_count
+        # Reinitialize to the downstream DIR_MIN_SEC=0.5 s equivalent, in
+        # integer frames. Loading an explicit config overrides this value.
+        fps = float(reader.fps) if reader.fps and reader.fps > 0 else 30.0
+        self.static_frame_window_var.set(max(2, int(round(0.5 * fps))))
+        self._static_search_signature = None
+        self._static_exclusions.clear()
+        self.static_search_status_var.set(
+            "Not searched — press Search before Processing"
+            if self.static_exclusion_enabled_var.get() else "Disabled"
+        )
         self.current_frame = 0
         self.frame_var.set(0)
         self.frame_spin.configure(from_=0, to=max(0, self.frame_count - 1))
@@ -7226,7 +7248,10 @@ class CrossingReviewApp(ctk.CTk):
         bounds: Optional[dict[str, tuple[float, float]]] = None,
         progress_label: str = "Processing frames",
         result_match: Optional["_ResultMatchConfig"] = None,
+        static_exclusions: Optional[dict[int, set[int]]] = None,
     ) -> dict[int, list[BlobMetrics]]:
+        if static_exclusions is None:
+            static_exclusions = self._static_exclusions if self._static_search_signature is not None else {}
         if bounds is None:
             if self._needs_area_analysis() and not self.analysis_iqr_stats:
                 raise RuntimeError("Please run Analyze sampled frames first.")
@@ -7328,6 +7353,7 @@ class CrossingReviewApp(ctk.CTk):
                                 source[fid], (self.reader.height, self.reader.width), cfg)
                             source[fid] = self._classify_blobs(
                                 source[fid], bounds, clone=False, result_match=result_match, frame_idx=fid)
+                        self._apply_static_outliers(source[fid], fid, static_exclusions)
 
                     n = batch_fids[-1] + 1 - start_frame
                     elapsed = max(1e-9, time.perf_counter() - start_time)
@@ -7481,11 +7507,21 @@ class CrossingReviewApp(ctk.CTk):
             )
             return
 
+        if self.static_exclusion_enabled_var.get() and not self._static_search_is_current():
+            messagebox.showwarning(
+                "Persistent static blobs",
+                "Search has not been completed for the current settings.\n"
+                "Open 'Exclude persistent static blobs' and press Search, "
+                "or disable the option before Processing.",
+            )
+            return
+
         self._prefetch_cancel.set()
         self.reader.clear_cache()
         try:
             # Capture GUI state once on the main thread.  The processing worker
             # can then run without cross-thread Tk variable access.
+            static_exclusions = dict(self._static_exclusions) if self._static_search_is_current() else {}
             cfg = self._capture_seg_config()
             result_match = self._result_match
             bounds = self._bounds_from_fixed_stats(self.analysis_iqr_stats)
@@ -7530,6 +7566,7 @@ class CrossingReviewApp(ctk.CTk):
                     bounds=bounds,
                     progress_label="Processing frames",
                     result_match=result_match,
+                    static_exclusions=static_exclusions,
                 )
                 if self._progress_cancel or not source:
                     return False
@@ -7819,6 +7856,11 @@ class CrossingReviewApp(ctk.CTk):
         if self._needs_area_analysis() and not self.analysis_iqr_stats:
             messagebox.showerror("Error", "Please run Analyze sampled frames first.")
             return
+        if self.static_exclusion_enabled_var.get() and not self._static_search_is_current():
+            messagebox.showwarning(
+                "Persistent static blobs", "Press Search before exporting labeled video.",
+            )
+            return
 
         options = self._show_export_labeled_video_dialog()
         if options is None:
@@ -7837,6 +7879,7 @@ class CrossingReviewApp(ctk.CTk):
         result_match = self._result_match
         show_result_obb = bool(self.result_import_show_obb_var.get())
         export_bounds = self._bounds_from_fixed_stats(self.analysis_iqr_stats)
+        static_exclusions = dict(self._static_exclusions) if self._static_search_is_current() else {}
         fps = self.reader.fps if self.reader.fps > 0 else 25.0
         h, w = self.reader.height, self.reader.width
 
@@ -7852,6 +7895,7 @@ class CrossingReviewApp(ctk.CTk):
                     bounds=export_bounds,
                     progress_label="Segmenting selected frames",
                     result_match=result_match,
+                    static_exclusions=static_exclusions,
                 )
                 if self._progress_cancel or not source:
                     return False
