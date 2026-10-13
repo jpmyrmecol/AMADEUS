@@ -294,6 +294,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._workflow_segmentation_ready = False
         self._workflow_progress_revealed = False
         self._step1_details_open = True
+        self._step2_details_open = True
         self._action_glows: dict[str, RotatingBorderHighlight] = {}
         self._base_cfg: dict = {}
         self._loaded_cfg: dict = {}
@@ -429,6 +430,7 @@ class EasyTrackingGUI(ctk.CTk):
 
         self._build_video_prompt(self._video_prompt_host)
         video_area = ctk.CTkFrame(left, fg_color="transparent")
+        self._video_area = video_area
         video_area.pack(fill="x")
         self._step1_tab = ctk.CTkButton(
             video_area, text="▸  Step 1: Select Videos", height=30,
@@ -605,6 +607,34 @@ class EasyTrackingGUI(ctk.CTk):
         else:
             self._video_frame.pack_forget()
 
+    def _toggle_step2_details(self) -> None:
+        if not self._workflow_segmentation_ready:
+            return
+        self._step2_details_open = not self._step2_details_open
+        self._update_step2_layout(True)
+
+    def _update_step2_layout(self, visible: bool) -> None:
+        """Display Step 2 as an expandable tab; keep it open on first reveal."""
+        if not visible:
+            self._settings_frame.pack_forget()
+            self._step2_tab.pack_forget()
+            return
+
+        if not self._step2_tab.winfo_manager():
+            self._step2_tab.pack(
+                fill="x", padx=12, pady=(5, 2), after=self._video_area,
+            )
+        self._step2_tab.configure(
+            text=("▾" if self._step2_details_open else "▸") + "  Step 2: Settings"
+        )
+        if self._step2_details_open:
+            if not self._settings_frame.winfo_manager():
+                self._settings_frame.pack(
+                    fill="x", padx=12, pady=(2, 5), after=self._step2_tab,
+                )
+        else:
+            self._settings_frame.pack_forget()
+
     def _results_exist(self) -> bool:
         """Only actual tracking CSV output counts, not an empty results directory."""
         session = self._get_session()
@@ -628,8 +658,10 @@ class EasyTrackingGUI(ctk.CTk):
         """Display each stage only once its preceding interaction is finished."""
         if visible and not self._workflow_segmentation_ready:
             self._step1_details_open = False
+            self._step2_details_open = True
         self._workflow_segmentation_ready = visible
         self._update_step1_layout()
+        self._update_step2_layout(visible)
 
         def show(frame, enabled, pady):
             if enabled and not frame.winfo_manager():
@@ -648,7 +680,6 @@ class EasyTrackingGUI(ctk.CTk):
         ready = ready or (has_results and bool(self._loaded_config_path))
         progress_visible = visible and self._workflow_progress_revealed
 
-        show(self._settings_frame, visible, 5)
         show(self._action_frame, ready, 8)
         show(self._progress_frame, progress_visible, (5, 14))
 
@@ -1250,6 +1281,12 @@ class EasyTrackingGUI(ctk.CTk):
 
     # Step 2: Questions
     def _build_questions_section(self, parent: ctk.CTkScrollableFrame) -> None:
+        self._step2_tab = ctk.CTkButton(
+            parent, text="▾  Step 2: Settings", height=30,
+            fg_color="#343434", hover_color="#464646",
+            command=self._toggle_step2_details,
+            anchor="w",
+        )
         frame = ctk.CTkFrame(parent, corner_radius=6)
         self._settings_frame = frame
         frame.pack(fill="x", padx=12, pady=5)
