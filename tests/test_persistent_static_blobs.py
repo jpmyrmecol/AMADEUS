@@ -75,3 +75,32 @@ def test_nonconsecutive_frames_raise_error():
     scanner.add_frame(0, [blob()])
     with pytest.raises(ValueError, match="consecutive"):
         scanner.add_frame(2, [blob()])
+
+
+def test_presence_98_percent_accepts_one_missing_frame_in_fifty():
+    scanner = PersistentStaticScanner(50, presence=0.98)
+    for fid in range(50):
+        scanner.add_frame(fid, [] if fid == 25 else [blob()])
+    assert scanner.excluded_count == 49
+    assert 25 not in scanner.excluded
+
+
+def test_presence_98_percent_rejects_two_missing_frames_in_fifty():
+    scanner = PersistentStaticScanner(50, presence=0.98)
+    for fid in range(50):
+        scanner.add_frame(fid, [] if fid in (25, 30) else [blob()])
+    assert scanner.excluded_count == 0
+
+
+def test_median_shape_iou_filters_inconsistent_rotation():
+    scanner = PersistentStaticScanner(6, min_iou=0.8)
+    for fid in range(6):
+        # Both blobs have the same center and major-axis length, but
+        # alternately occupy horizontal and vertical rectangles.
+        candidate = (
+            blob(x=30, y=38, w=20, h=8)
+            if fid % 2 == 0
+            else blob(x=36, y=32, w=8, h=20)
+        )
+        scanner.add_frame(fid, [candidate])
+    assert scanner.excluded_count == 0
