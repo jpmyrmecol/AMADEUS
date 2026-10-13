@@ -301,6 +301,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._loaded_cfg: dict = {}
         self._loaded_config_path: str = ""
         self._loaded_easy_answers: dict = {}
+        self._selected_training_video: str = ""
         self._tracking_video_is_dir = tk.BooleanVar(value=False)
         self._prepared_tracking_directory = ""
         self._prepared_tracking_files: list[str] = []
@@ -962,15 +963,79 @@ class EasyTrackingGUI(ctk.CTk):
                 self._animate_segmentation_attention()
 
 
-    def _set_training_video(self, path: str, *, sync_analysis: bool = True) -> None:
+    @staticmethod
+    def _video_path_key(path: str) -> str:
+        """Compare selected and saved video paths without depending on spelling."""
+        path = str(path or "").strip()
+        return os.path.normcase(os.path.abspath(os.path.expanduser(path))) if path else ""
+
+    @staticmethod
+    def _standard_session_for_video(path: str) -> str:
+        """Default session path: <video_dir>/amadeus_<video_stem>."""
+        path = str(path or "").strip()
+        if not path:
+            return ""
+        return os.path.join(
+            os.path.dirname(path),
+            "amadeus_" + os.path.splitext(os.path.basename(path))[0],
+        )
+
+    def _auto_load_video_config(self, video_path: str) -> bool:
+        """Restore saved settings when a video has an existing session config."""
+        if not video_path or not os.path.isfile(video_path):
+            return False
+        session = self._get_session()
+        standard_session = self._standard_session_for_video(video_path)
+        candidates = [os.path.join(session, "config.yaml")] if session else []
+        standard_config = os.path.join(standard_session, "config.yaml")
+        if not any(self._video_path_key(path) == self._video_path_key(standard_config)
+                   for path in candidates):
+            candidates.append(standard_config)
+
+        for candidate in candidates:
+            if not os.path.isfile(candidate):
+                continue
+            if self._load_config_path(candidate, expected_video=video_path, quiet=True):
+                print(f"[Easy Tracking] Auto-loaded saved config: {candidate}", flush=True)
+                return True
+        return False
+
+    def _set_training_video(
+        self, path: str, *, sync_analysis: bool = True, auto_load_config: bool = True,
+    ) -> None:
         path = os.path.normpath(str(path).strip()) if path else ""
-        loaded_video = str(self._loaded_cfg.get("TRAINING_VIDEO_PATH", "") or "")
-        if self._progress_config_loaded and (
-            os.path.normcase(path) != os.path.normcase(os.path.normpath(loaded_video))
-        ):
-            # A newly selected video is not the previously loaded session.
+        previous_video = self._selected_training_video
+        changed_video = self._video_path_key(path) != self._video_path_key(previous_video)
+        if changed_video:
+            previous_default = self._standard_session_for_video(previous_video)
+            session = self._session_entry.get().strip()
+            # Follow the new video's standard session unless the user chose a
+            # custom session explicitly (e.g. via the Reference button).
+            if not session or (
+                previous_default
+                and self._video_path_key(session) == self._video_path_key(previous_default)
+            ):
+                new_session = self._standard_session_for_video(path)
+                self._session_entry.delete(0, tk.END)
+                if new_session:
+                    self._session_entry.insert(0, new_session)
+
+            # Do not keep using another video's saved config path or animal count.
+            self._loaded_cfg = {}
+            self._loaded_config_path = ""
+            self._loaded_easy_answers = {}
             self._progress_config_loaded = False
             self._progress_details_open = False
+            self._num_confirmed = False
+            self._confirmed_num_objects = 1
+            self._variable_count.set(False)
+            self._num_objects_sb.configure(state="normal")
+            self._num_enter_button.configure(state="normal")
+            self._num_objects_sb.delete(0, tk.END)
+            self._num_objects_sb.insert(0, "1")
+            self._apply_individual_count_state()
+
+        self._selected_training_video = path
         self._video_entry.delete(0, tk.END)
         if path:
             self._video_entry.insert(0, path)
@@ -984,6 +1049,10 @@ class EasyTrackingGUI(ctk.CTk):
 
         self._refresh_tracking_video_controls()
         self._update_session_label()
+        # Re-selecting a video must behave like Load Config, not silently
+        # fall back to the default animal count.
+        if auto_load_config and (changed_video or not self._loaded_config_path):
+            self._auto_load_video_config(path)
 
     def _browse_training_video(self) -> None:
         prepared = ask_open_analysis_video(
@@ -1156,10 +1225,8 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _update_session_label(self) -> None:
         if not self._session_entry.get().strip():
-            v = self._video_entry.get().strip()
-            if v:
-                stem = os.path.splitext(os.path.basename(v))[0]
-                session = os.path.join(os.path.dirname(v), f"amadeus_{stem}")
+            session = self._standard_session_for_video(self._video_entry.get().strip())
+            if session:
                 self._session_entry.delete(0, tk.END)
                 self._session_entry.insert(0, session)
         self._refresh_tracking_video_controls()
@@ -1186,12 +1253,17 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _apply_startup_paths(self, video_path: str = "", session_path: str = "") -> None:
         if video_path:
-            self._set_training_video(video_path, sync_analysis=True)
+            # Apply an explicit --session before searching for saved settings.
+            self._set_training_video(
+                video_path, sync_analysis=True, auto_load_config=False,
+            )
         if session_path:
             self._session_entry.delete(0, tk.END)
             self._session_entry.insert(0, session_path)
         elif video_path:
             self._update_session_label()
+        if video_path:
+            self._auto_load_video_config(video_path)
         self._refresh_tracking_video_controls()
         self._sync_segmentation_status_from_outputs()
 
@@ -4050,11 +4122,26 @@ class EasyTrackingGUI(ctk.CTk):
             return
         self._load_config_path(path)
 
-    def _load_config_path(self, path: str, *, show_msg: bool = False) -> bool:
+    def _load_config_path(
+        self, path: str, *, show_msg: bool = False,
+        expected_video: str | None = None, quiet: bool = False,
+    ) -> bool:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}
             cfg = prepare_config_for_gui(cfg, path, parent=self)
+            if expected_video:
+                configured_video = str(cfg.get("TRAINING_VIDEO_PATH", "") or "").strip()
+                if configured_video and (
+                    self._video_path_key(configured_video) != self._video_path_key(expected_video)
+                ):
+                    print(
+                        f"[Easy Tracking] Skipping config for a different training video: {path}",
+                        flush=True,
+                    )
+                    return False
+                if not configured_video:
+                    cfg["TRAINING_VIDEO_PATH"] = expected_video
             # PICKLE_PATH/BACKGROUND_PATH always live under SESSION_PATH; always
             # recompute rather than trust whatever an old config.yaml stored, so
             # a stale value never survives a load.
@@ -4069,7 +4156,10 @@ class EasyTrackingGUI(ctk.CTk):
                 messagebox.showinfo("Loaded", f"Config loaded from:\n{path}")
             return True
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load config:\n{e}")
+            if quiet:
+                print(f"[Easy Tracking] Could not auto-load config {path}: {e}", flush=True)
+            else:
+                messagebox.showerror("Error", f"Failed to load config:\n{e}")
             return False
 
     def _apply_config_to_gui(self, cfg: dict) -> None:
@@ -4082,6 +4172,7 @@ class EasyTrackingGUI(ctk.CTk):
         # Paths
         video = str(cfg.get("TRAINING_VIDEO_PATH", "") or "")
         if video:
+            self._selected_training_video = video
             self._video_entry.delete(0, tk.END)
             self._video_entry.insert(0, video)
         tracking_video = str(cfg.get("TRACKING_VIDEO_PATH", "") or "") or video
