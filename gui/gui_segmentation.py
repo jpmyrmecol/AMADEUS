@@ -3342,32 +3342,146 @@ class CrossingReviewApp(ctk.CTk):
                 self._absolute_slider_cap = area_cap
             self._sync_absolute_control(force=True)
             self._update_result_area_control_ranges()
-            if self._area_reference_max <= 0:
-                return  # No detected blob provides a meaningful size reference yet.
-            cap = max(1.0, float(math.ceil(self._area_reference_max * 1.2)))
-            stat = self.analysis_iqr_stats.get("area", self._area_reference_stats)
-            q1, median, q3, iqr = self._normalized_area_stat(stat)
-            if iqr > 1e-9:
-                upper = 10.0
-                # Round each median endpoint outward to a 0.1 step. The slider then
-                # still reaches the median, which _current_area_bounds holds.
-                lower_min = math.floor((q1 - median) / iqr * 10.0) / 10.0
-                upper_min = math.floor((median - q3) / iqr * 10.0) / 10.0
-            else:
-                upper, lower_min, upper_min = 10.0, 0.0, 0.0
-            self._area_iqr_range_max = upper
-            self.area_iqr_min_scale.set_value_range(lower_min, upper, slider_upper=AREA_IQR_SLIDER_MAX)
-            self.area_iqr_max_scale.set_value_range(upper_min, upper, slider_upper=AREA_IQR_SLIDER_MAX)
         finally:
             self._updating_area_ranges = False
 
     def _build_area_iqr_control(self, parent: ctk.CTkFrame):
-        self.area_iqr_min_scale = self._pack_scale_entry(parent, "Lower IQR multiplier", self.area_iqr_min_var, 0.0, 10.0, 0.1, is_float=True, entry_prefix="IQRx")
-        self.area_iqr_max_scale = self._pack_scale_entry(parent, "Upper IQR multiplier", self.area_iqr_max_var, 0.0, 10.0, 0.1, is_float=True, entry_prefix="IQRx")
-        for scale in (self.area_iqr_min_scale, self.area_iqr_max_scale):
-            scale.set_value_range(0.0, 10.0, slider_upper=AREA_IQR_SLIDER_MAX)
-        self.area_iqr_boxplot = tk.Canvas(parent, height=54, bg="white", highlightthickness=1, highlightbackground="#cccccc")
+        # The saved values remain IQR multipliers. The two editable fields show
+        # the resulting area limits, matching the Absolute control above its plot.
+        self.area_iqr_bounds_row = ctk.CTkFrame(parent, corner_radius=0)
+        self.area_iqr_bounds_row.grid_columnconfigure((0, 1), weight=1)
+        self._iqr_bound_entries = []
+        self._iqr_bound_spins = []
+        validate = (
+            self.register(lambda text: bool(re.fullmatch(r"-?\d*(?:\.\d*)?", text))),
+            "%P",
+        )
+        for index, label in enumerate(("Minimum area (px²)", "Maximum area (px²)")):
+            side = "w" if index == 0 else "e"
+            ctk.CTkLabel(self.area_iqr_bounds_row, text=label).grid(
+                row=0, column=index, sticky=side,
+            )
+            entry_var = tk.StringVar()
+            spin = tk.Spinbox(
+                self.area_iqr_bounds_row,
+                from_=-sys.maxsize, to=sys.maxsize, increment=1, width=13,
+                textvariable=entry_var, validate="key", validatecommand=validate,
+                command=lambda i=index: self._commit_iqr_area_entry(i),
+                **_SPIN_CFG,
+            )
+            spin.grid(row=1, column=index, sticky=side)
+            for event in ("<Return>", "<KP_Enter>", "<FocusOut>"):
+                spin.bind(event, lambda _event, i=index: self._commit_iqr_area_entry(i))
+            self._register_numeric_entry(
+                spin, lambda i=index: self._commit_iqr_area_entry(i),
+            )
+            self._iqr_bound_entries.append(entry_var)
+            self._iqr_bound_spins.append(spin)
+
+        self._iqr_plot_axis = None
+        self._iqr_drag_index = None
+        self._iqr_drag_start_x = None
+        self.area_iqr_boxplot = tk.Canvas(
+            parent, height=70, bg="white",
+            highlightthickness=1, highlightbackground="#cccccc",
+        )
         self.area_iqr_boxplot.bind("<Configure>", lambda _e: self._redraw_area_iqr_boxplot())
+        self.area_iqr_boxplot.bind("<Motion>", self._update_iqr_boxplot_cursor)
+        self.area_iqr_boxplot.bind("<Button-1>", self._start_iqr_boxplot_drag)
+        self.area_iqr_boxplot.bind("<B1-Motion>", self._drag_iqr_boxplot_handle)
+        self.area_iqr_boxplot.bind("<ButtonRelease-1>", self._end_iqr_boxplot_drag)
+
+    def _sync_iqr_area_entries(self, *, force=False):
+        if not self.analysis_iqr_stats or "area" not in self.analysis_iqr_stats:
+            return
+        lower, upper = self._current_area_bounds(self.analysis_iqr_stats)
+        for spin, entry, bound in zip(
+            self._iqr_bound_spins, self._iqr_bound_entries, (lower, upper)
+        ):
+            if force or self.focus_get() is not spin:
+                value = f"{bound:.8g}"
+                if entry.get() != value:
+                    entry.set(value)
+            spin.configure(
+                state="normal" if self.analysis_iqr_stats["area"][3] > 1e-9
+                else "disabled"
+            )
+
+    def _commit_iqr_area_entry(self, index: int):
+        entry = self._iqr_bound_entries[index]
+        try:
+            value = float(entry.get().strip())
+            if not math.isfinite(value):
+                raise ValueError("Area bound must be finite.")
+        except ValueError:
+            self._sync_iqr_area_entries(force=True)
+            return
+        self._set_iqr_area_bound(index, value)
+        self._sync_iqr_area_entries(force=True)
+
+    def _set_iqr_area_bound(self, index: int, area: float):
+        if not self.analysis_iqr_stats or "area" not in self.analysis_iqr_stats:
+            return
+        q1, median, q3, iqr = self._normalized_area_stat(
+            self.analysis_iqr_stats["area"]
+        )
+        if iqr <= 1e-9:
+            return  # An IQR multiplier cannot move a bound when IQR is zero.
+        if index == 0:
+            area = max(q1 - AREA_IQR_SLIDER_MAX * iqr, min(median, area))
+            multiplier = (q1 - area) / iqr
+            self.area_iqr_min_var.set(multiplier)
+        else:
+            area = min(q3 + AREA_IQR_SLIDER_MAX * iqr, max(median, area))
+            multiplier = (area - q3) / iqr
+            self.area_iqr_max_var.set(multiplier)
+
+    def _iqr_bracket_hit(self, event):
+        axis = self._iqr_plot_axis
+        if axis is None:
+            return None
+        _vmin, _vmax, _left, _right, x_min, x_max, top, bottom = axis
+        if not top - 8 <= event.y <= bottom + 8:
+            return None
+        hit_min = abs(event.x - x_min) <= 10
+        hit_max = abs(event.x - x_max) <= 10
+        if hit_min and hit_max:
+            if abs(x_max - x_min) < 1:
+                return -1  # Resolve coincident handles by drag direction.
+            return 0 if abs(event.x - x_min) <= abs(event.x - x_max) else 1
+        if hit_min:
+            return 0
+        if hit_max:
+            return 1
+        return None
+
+    def _update_iqr_boxplot_cursor(self, event):
+        active = self._iqr_bracket_hit(event) is not None
+        self.area_iqr_boxplot.configure(cursor="hand2" if active else "")
+
+    def _start_iqr_boxplot_drag(self, event):
+        if not self.analysis_iqr_stats or self.analysis_iqr_stats["area"][3] <= 1e-9:
+            return
+        self._iqr_drag_index = self._iqr_bracket_hit(event)
+        self._iqr_drag_start_x = event.x
+        if self._iqr_drag_index is not None:
+            self.area_iqr_boxplot.focus_set()
+
+    def _drag_iqr_boxplot_handle(self, event):
+        if self._iqr_drag_index is None or self._iqr_plot_axis is None:
+            return
+        if self._iqr_drag_index == -1:
+            if event.x == self._iqr_drag_start_x:
+                return
+            self._iqr_drag_index = 0 if event.x < self._iqr_drag_start_x else 1
+        vmin, vmax, left, right, _x_min, _x_max, _top, _bottom = self._iqr_plot_axis
+        fraction = max(0.0, min(1.0, (event.x - left) / max(1, right - left)))
+        area = vmin + fraction * (vmax - vmin)
+        self._set_iqr_area_bound(self._iqr_drag_index, area)
+
+    def _end_iqr_boxplot_drag(self, _event=None):
+        self._iqr_drag_index = None
+        self._iqr_drag_start_x = None
 
     def _toggle_area_outlier_method_controls(self):
         if self.area_iqr_frame is None or self.area_absolute_frame is None:
@@ -3376,14 +3490,14 @@ class CrossingReviewApp(ctk.CTk):
         if method not in {"iqr", "absolute"}:
             method = "iqr"
             self.area_outlier_method_var.set(method)
-        # Repacked from scratch so the analysis block keeps its place above the
-        # sliders whichever way the method is switched.
+        # Repack controls in their original order when the method changes.
         for frame in (self.analysis_run_frame, self.area_iqr_frame, self.area_absolute_frame):
             if frame is not None:
                 frame.pack_forget()
         if method == "absolute":
             if self.area_iqr_boxplot is not None:
                 self.area_iqr_boxplot.pack_forget()
+            self.area_iqr_bounds_row.pack_forget()
             self.area_absolute_frame.pack(fill="x")
             self.analysis_ready_var.set("analysis: not required (absolute bounds)")
             self._update_area_control_ranges()
@@ -3406,23 +3520,25 @@ class CrossingReviewApp(ctk.CTk):
         canvas = getattr(self, "area_iqr_boxplot", None)
         if canvas is None:
             return
-        if self.area_outlier_method_var.get() != "iqr":
-            if canvas.winfo_ismapped():
-                canvas.pack_forget()
+        if (self.area_outlier_method_var.get() != "iqr"
+                or not self.analysis_iqr_stats or "area" not in self.analysis_iqr_stats):
+            self._iqr_plot_axis = None
+            self._end_iqr_boxplot_drag()
+            canvas.pack_forget()
+            self.area_iqr_bounds_row.pack_forget()
             return
-        if not self.analysis_iqr_stats or "area" not in self.analysis_iqr_stats:
-            if canvas.winfo_ismapped():
-                canvas.pack_forget()
-            return
-        if not canvas.winfo_ismapped():
+        if not self.area_iqr_bounds_row.winfo_manager():
+            self.area_iqr_bounds_row.pack(fill="x", padx=6, pady=(2, 0))
+        if not canvas.winfo_manager():
             canvas.pack(fill="x", padx=6, pady=(2, 6))
+        self._sync_iqr_area_entries()
 
         canvas.delete("all")
         q1, median, q3, iqr = self._normalized_area_stat(self.analysis_iqr_stats["area"])
         lo, hi = self._bounds_from_fixed_stats(self.analysis_iqr_stats).get("area", (q1, q3))
 
         # A symmetric axis keeps the median exactly centered, including skewed data.
-        multiplier = getattr(self, "_area_iqr_range_max", 10.0)
+        multiplier = AREA_IQR_SLIDER_MAX
         span = max(median - (q1 - multiplier * iqr),
                    (q3 + multiplier * iqr) - median, 1.0, abs(median) * 0.1)
         vmin, vmax = median - span, median + span
@@ -3450,6 +3566,7 @@ class CrossingReviewApp(ctk.CTk):
 
         cut_top = box_top
         cut_bottom = box_bottom
+        self._iqr_plot_axis = (vmin, vmax, left, right, x_lo, x_hi, cut_top, cut_bottom)
         hook_len = 4
         # Lower cut: bracket opens inward to the right. Upper cut: bracket opens inward to the left.
         canvas.create_line(x_lo, cut_top, x_lo, cut_bottom, fill="#cc2222", width=2)
@@ -3469,8 +3586,9 @@ class CrossingReviewApp(ctk.CTk):
         delayed redraw, makes the restored boxplot deterministic.
         """
         if self.area_outlier_method_var.get() != "iqr":
-            if self.area_iqr_boxplot is not None and self.area_iqr_boxplot.winfo_ismapped():
+            if self.area_iqr_boxplot is not None:
                 self.area_iqr_boxplot.pack_forget()
+            self.area_iqr_bounds_row.pack_forget()
             return
         if not self.analysis_iqr_stats or "area" not in self.analysis_iqr_stats:
             return
