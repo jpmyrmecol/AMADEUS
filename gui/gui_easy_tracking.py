@@ -36,6 +36,7 @@ try:
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from .config_path_recovery import prepare_config_for_gui
     from .canvas_file_drop import install_canvas_file_drop
+    from .attention_border import RotatingBorderHighlight
     from .video_input import (
         VIDEO_DROP_SUFFIXES,
         ask_open_analysis_video,
@@ -55,6 +56,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_easy_track
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from config_path_recovery import prepare_config_for_gui
     from canvas_file_drop import install_canvas_file_drop
+    from attention_border import RotatingBorderHighlight
     from video_input import (
         VIDEO_DROP_SUFFIXES,
         ask_open_analysis_video,
@@ -289,6 +291,10 @@ class EasyTrackingGUI(ctk.CTk):
         self._active_config_path: str = ""
         self._stop_requested = False
         self._last_run_state = "idle"
+        self._workflow_segmentation_ready = False
+        self._workflow_progress_revealed = False
+        self._step1_details_open = True
+        self._action_glows: dict[str, RotatingBorderHighlight] = {}
         self._base_cfg: dict = {}
         self._loaded_cfg: dict = {}
         self._loaded_config_path: str = ""
@@ -424,10 +430,21 @@ class EasyTrackingGUI(ctk.CTk):
         self._build_video_prompt(self._video_prompt_host)
         video_area = ctk.CTkFrame(left, fg_color="transparent")
         video_area.pack(fill="x")
+        self._step1_tab = ctk.CTkButton(
+            video_area, text="▸  Step 1: Select Videos", height=30,
+            fg_color="#343434", hover_color="#464646",
+            command=self._toggle_step1_details,
+            anchor="w",
+        )
         self._build_video_section(video_area)
         self._build_questions_section(left)
         self._build_action_buttons(left)
         self._build_progress_section(left)
+        self._action_glows = {
+            "enter": RotatingBorderHighlight(self, self._num_enter_button),
+            "processing": RotatingBorderHighlight(self, self._run_btn),
+            "results": RotatingBorderHighlight(self, self._open_results_btn),
+        }
         self._build_canvas_panel(right)
         self._video_drop_state = install_canvas_file_drop(
             self, pane,
@@ -564,17 +581,82 @@ class EasyTrackingGUI(ctk.CTk):
             self._left_controls.pack(fill="both", expand=True)
             self._video_frame.pack(fill="x", padx=12, pady=(10, 5))
 
+    def _toggle_step1_details(self) -> None:
+        if not self._workflow_segmentation_ready:
+            return
+        self._step1_details_open = not self._step1_details_open
+        self._update_step1_layout()
+
+    def _update_step1_layout(self) -> None:
+        """Collapse finished Step 1 to a small tab; let users reopen its settings."""
+        if not self._video_details_revealed:
+            return
+        if self._workflow_segmentation_ready:
+            if not self._step1_tab.winfo_manager():
+                self._step1_tab.pack(fill="x", padx=12, pady=(8, 2))
+            self._step1_tab.configure(
+                text=("▾" if self._step1_details_open else "▸") + "  Step 1: Select Videos"
+            )
+        else:
+            self._step1_tab.pack_forget()
+        if self._step1_details_open or not self._workflow_segmentation_ready:
+            if not self._video_frame.winfo_manager():
+                self._video_frame.pack(fill="x", padx=12, pady=(10, 5))
+        else:
+            self._video_frame.pack_forget()
+
+    def _results_exist(self) -> bool:
+        """Only actual tracking CSV output counts, not an empty results directory."""
+        session = self._get_session()
+        if not session:
+            return False
+        if self._without_direction.get():
+            session = os.path.join(session, "without_direction_estimation")
+        folder = os.path.join(session, "results")
+        if not os.path.isdir(folder):
+            return False
+        try:
+            for base, _dirs, filenames in os.walk(folder):
+                if any(name.lower().endswith(".csv") and os.path.getsize(os.path.join(base, name)) > 0
+                       for name in filenames):
+                    return True
+        except OSError:
+            return False
+        return False
+
     def _set_post_segmentation_visibility(self, visible: bool) -> None:
-        """Keep the tracking settings, Processing controls and Progress hidden until segmentation."""
-        for frame, pady in (
-            (self._settings_frame, 5),
-            (self._action_frame, 8),
-            (self._progress_frame, (5, 14)),
-        ):
-            if visible and not frame.winfo_manager():
+        """Display each stage only once its preceding interaction is finished."""
+        if visible and not self._workflow_segmentation_ready:
+            self._step1_details_open = False
+        self._workflow_segmentation_ready = visible
+        self._update_step1_layout()
+
+        def show(frame, enabled, pady):
+            if enabled and not frame.winfo_manager():
                 frame.pack(fill="x", padx=12, pady=pady)
-            elif not visible and frame.winfo_manager():
+            elif not enabled and frame.winfo_manager():
                 frame.pack_forget()
+
+        ready = visible and (self._num_confirmed or self._variable_count.get())
+        running = self._batch_proc is not None and self._batch_proc.poll() is None
+        has_results = visible and self._results_exist() and not running
+        progress_visible = visible and self._workflow_progress_revealed
+
+        show(self._settings_frame, visible, 5)
+        show(self._action_frame, ready, 8)
+        show(self._progress_frame, progress_visible, (5, 14))
+
+        if has_results:
+            if not self._open_results_btn.winfo_manager():
+                self._open_results_btn.pack(side="left", padx=(10, 0))
+        else:
+            self._open_results_btn.pack_forget()
+        for name, glow in self._action_glows.items():
+            glow.set_active(
+                (name == "enter" and visible and not ready and not has_results)
+                or (name == "processing" and ready and not running and not has_results)
+                or (name == "results" and has_results)
+            )
 
     # Step 1: Video
     def _build_video_section(self, parent: ctk.CTkFrame) -> None:
@@ -1228,7 +1310,10 @@ class EasyTrackingGUI(ctk.CTk):
         self._num_objects_sb.bind("<Return>", lambda _e: self._confirm_num_objects(), add="+")
         self._num_objects_sb.bind("<KP_Enter>", lambda _e: self._confirm_num_objects(), add="+")
         self._num_objects_sb.bind("<KeyRelease>", self._on_num_objects_key_release, add="+")
-        self._num_enter_button = ctk.CTkButton(row, text="Enter", width=70, command=self._confirm_num_objects)
+        self._num_enter_button = ctk.CTkButton(
+            row, text="Enter", width=70, command=self._confirm_num_objects,
+            border_width=3, border_color="#777777",
+        )
         self._num_enter_button.pack(side="left", padx=(6, 8))
         self._num_confirm_hint = ctk.CTkLabel(row, text="Press Enter to confirm", text_color="gray", anchor="w")
         self._num_confirm_hint.pack(side="left")
@@ -1301,11 +1386,13 @@ class EasyTrackingGUI(ctk.CTk):
         frame.pack(fill="x", padx=12, pady=8)
 
         row1 = ctk.CTkFrame(frame, corner_radius=0)
+        self._action_row = row1
         row1.pack(fill="x")
 
         self._run_btn = ctk.CTkButton(
             row1, text="Processing", width=180, height=42,
             font=("TkDefaultFont", 13, "bold"), command=self._run_easy_tracking,
+            border_width=3, border_color="#777777",
         )
         self._run_btn.pack(side="left", padx=(0, 10))
 
@@ -1356,11 +1443,9 @@ class EasyTrackingGUI(ctk.CTk):
         wrap.pack(fill="x", padx=8, pady=(0, 10))
 
         self._open_results_btn = ctk.CTkButton(
-            wrap, text="Open results", height=34,
+            self._action_row, text="Open results", height=36,
             command=self._open_results,
-        )
-        self._open_results_btn.grid(
-            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8)
+            border_width=3, border_color="#777777",
         )
 
         ctk.CTkLabel(
@@ -1458,6 +1543,8 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _refresh_preview_folder_buttons(self) -> None:
         session = self._get_session()
+        if hasattr(self, "_action_glows") and self._action_glows:
+            self._set_post_segmentation_visibility(self._workflow_segmentation_ready)
         resolved: dict[str, str] = {}
         patterns = self._preview_folder_patterns(session)
         for key, button in self._preview_folder_buttons.items():
