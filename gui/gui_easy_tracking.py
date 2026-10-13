@@ -1283,24 +1283,8 @@ class EasyTrackingGUI(ctk.CTk):
         frame = ctk.CTkFrame(parent, corner_radius=6)
         self._settings_frame = frame
         frame.pack(fill="x", padx=12, pady=5)
-        header = ctk.CTkFrame(frame, corner_radius=0)
-        header.pack(fill="x", padx=8, pady=(6, 2))
-        self._delete_tmp_files = tk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            header,
-            text="Delete tmp files",
-            variable=self._delete_tmp_files,
-            width=150,
-        ).pack(side="right", padx=(0, 28))
-        self._direction_mode_checkbox = ctk.CTkCheckBox(
-            header,
-            text="Without direction estimation [Beta]",
-            variable=self._without_direction,
-        )
-        self._direction_mode_checkbox.pack(side="right", padx=(0, 12))
-
         inner = ctk.CTkFrame(frame, corner_radius=0)
-        inner.pack(fill="x", padx=8, pady=(2, 10))
+        inner.pack(fill="x", padx=8, pady=(6, 10))
         question_label_width = 300
         question_option_gap = 14
         first_choice_width = 104
@@ -1324,6 +1308,29 @@ class EasyTrackingGUI(ctk.CTk):
             )
             radio.pack(side="left", padx=(0, padx_right))
             return radio
+
+        # Align all checkboxes with the first radio choice in the shared
+        # question-label column layout.
+        row = ctk.CTkFrame(inner, corner_radius=0)
+        row.pack(fill="x", pady=4)
+        pack_question_label(row, "")
+        self._direction_mode_checkbox = ctk.CTkCheckBox(
+            row,
+            text="Without direction estimation [Beta]",
+            variable=self._without_direction,
+        )
+        self._direction_mode_checkbox.pack(side="left")
+
+        self._delete_tmp_files = tk.BooleanVar(value=True)
+        row = ctk.CTkFrame(inner, corner_radius=0)
+        row.pack(fill="x", pady=4)
+        pack_question_label(row, "")
+        ctk.CTkCheckBox(
+            row,
+            text="Delete tmp files",
+            variable=self._delete_tmp_files,
+            width=150,
+        ).pack(side="left")
 
         # Animals count
         row = ctk.CTkFrame(inner, corner_radius=0)
@@ -1360,7 +1367,7 @@ class EasyTrackingGUI(ctk.CTk):
             text="Variable population [Beta]",
             variable=self._variable_count,
             command=self._on_variable_count_changed,
-        ).pack(side="left", padx=5)
+        ).pack(side="left")
 
         row = ctk.CTkFrame(inner, corner_radius=0)
         row.pack(fill="x", pady=4)
@@ -1372,7 +1379,7 @@ class EasyTrackingGUI(ctk.CTk):
             variable=self._single_animal_paste,
             command=self._on_single_animal_paste_changed,
         )
-        self._single_animal_paste_checkbox.pack(side="left", padx=5)
+        self._single_animal_paste_checkbox.pack(side="left")
 
         # Overlap
         row = ctk.CTkFrame(inner, corner_radius=0)
