@@ -2010,11 +2010,7 @@ class CrossingReviewApp(ctk.CTk):
         if not self._guidance_glows:
             return
         has_video_path = bool(self.video_path_var.get().strip())
-        # The initial action is to select a video. Keep Show background
-        # borderless until the video path is populated.
-        bg_border_width = 3 if has_video_path else 0
-        if self.bg_preview_button.cget("border_width") != bg_border_width:
-            self.bg_preview_button.configure(border_width=bg_border_width)
+        # RotatingBorderHighlight alone controls button border visibility.
         stage = self._guidance_stage if has_video_path else "video"
         if stage == "background" and not self._segmentation_needs_background():
             stage = self._guidance_stage = "threshold"
