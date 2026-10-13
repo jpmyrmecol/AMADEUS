@@ -118,7 +118,7 @@ def install_canvas_file_drop(
         state.diagnostics.append(entry)
         # Keep routine D&D diagnostics available in memory without filling CUI.
         # Registration failures remain visible because D&D is unavailable.
-        if message.startswith("initialization failed"):
+        if message.startswith(("initialization failed", "drop target failures=")):
             print(entry, flush=True)
 
     def reject(message: str) -> str:
@@ -185,15 +185,47 @@ def install_canvas_file_drop(
             window.after_idle(lambda path=selected_path: on_path(path))
             return COPY
 
-        for target in targets:
-            target.drop_target_register(DND_FILES)
-            target.dnd_bind("<<DropEnter>>", on_enter)
-            target.dnd_bind("<<DropLeave>>", on_leave)
-            target.dnd_bind("<<Drop>>", on_drop)
-        state.canvas_registered = True
-        log(f"drop targets registered={len(targets)}")
-        state.enabled = True
-        log("initialization succeeded")
+        registered_count = 0
+        failures: list[tuple[str, Exception]] = []
+        for index, target in enumerate(targets):
+            target_registered = False
+            target_name = str(target)
+            try:
+                target.drop_target_register(DND_FILES)
+                target_registered = True
+                target.dnd_bind("<<DropEnter>>", on_enter)
+                target.dnd_bind("<<DropLeave>>", on_leave)
+                target.dnd_bind("<<Drop>>", on_drop)
+            except Exception as exc:
+                if target_registered:
+                    try:
+                        target.drop_target_unregister()
+                    except Exception:
+                        pass
+                failures.append((target_name, exc))
+                continue
+
+            registered_count += 1
+            if index == 0:
+                state.canvas_registered = True
+
+        state.enabled = registered_count > 0
+        if state.enabled:
+            log(f"drop targets registered={registered_count}/{len(targets)}")
+            if failures:
+                first_target, first_error = failures[0]
+                log(
+                    f"drop target failures={len(failures)}; "
+                    f"first={first_target}: {first_error}"
+                )
+            else:
+                log("initialization succeeded")
+        else:
+            first_target, first_error = failures[0] if failures else ("", "unknown error")
+            log(
+                "initialization failed: no drop targets registered; "
+                f"first={first_target}: {first_error}"
+            )
     except Exception as exc:
         log(f"initialization failed: {exc}")
         log(f"canvas registered={state.canvas_registered}")
