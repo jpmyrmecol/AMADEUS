@@ -5073,10 +5073,15 @@ class CrossingReviewApp(ctk.CTk):
             and self._static_search_signature == self._static_search_key()
         )
 
-    def _apply_static_outliers(self, blobs: list[BlobMetrics], fid: int) -> list[BlobMetrics]:
-        if not self._static_search_is_current():
-            return blobs
-        matched_indices = self._static_exclusions.get(int(fid), ())
+    def _apply_static_outliers(
+        self, blobs: list[BlobMetrics], fid: int,
+        exclusions: Optional[dict[int, set[int]]] = None,
+    ) -> list[BlobMetrics]:
+        if exclusions is None:
+            if not self._static_search_is_current():
+                return blobs
+            exclusions = self._static_exclusions
+        matched_indices = exclusions.get(int(fid), ())
         for blob in blobs:
             if blob.blob_index in matched_indices and not blob.is_crossing:
                 blob.persistent_static_outlier = True
@@ -6016,6 +6021,19 @@ class CrossingReviewApp(ctk.CTk):
             self._rescue_single_animal_outliers(
                 out, result_match, frame_idx=frame_idx, image_shape=image_shape,
             )
+        # Match downstream Stage-1 MIN_ASPECT: 1.1 passes; < 1.1 is excluded.
+        for b in out:
+            b.low_obb_aspect_outlier = False
+            if b.result_generated or b.result_missing or b.manual_outlier:
+                continue
+            contour = np.asarray(b.contour, dtype=np.float32).reshape(-1, 1, 2)
+            if contour.shape[0] < 3:
+                continue
+            _center, (w, h), _angle = cv2.minAreaRect(contour)
+            if min(w, h) > 1e-6:
+                b.low_obb_aspect_outlier = max(w, h) / min(w, h) < DEFAULT_MIN_OBB_ASPECT
+                if b.low_obb_aspect_outlier:
+                    b.is_crossing = True
         if had_missing or any(b.result_generated for b in out):
             for index, b in enumerate(out):
                 b.blob_index = index
@@ -6316,7 +6334,7 @@ class CrossingReviewApp(ctk.CTk):
                 mask = _draw_blob_union_mask(mask.shape, classified)
             elif any(b.result_generated for b in classified):
                 mask = _draw_blob_union_mask(mask.shape, classified)
-            return mask, classified
+            return mask, self._apply_static_outliers(classified, self.current_frame)
         # Before analysis there are no fixed area bounds. Imported OBBs can
         # still identify entirely missed regions that must be removed.
         if self._result_match is not None:
@@ -6355,12 +6373,12 @@ class CrossingReviewApp(ctk.CTk):
         if show_overlay:
             overlay = np.zeros_like(base)
             for b in blobs:
-                color = OUTLIER_COLOR if b.is_crossing else OBB_COLOR
+                color = GREEN if b.persistent_static_outlier else (OUTLIER_COLOR if b.is_crossing else OBB_COLOR)
                 cv2.drawContours(overlay, [b.contour], -1, color, thickness=cv2.FILLED)
             base = cv2.addWeighted(base, 1.0, overlay, 0.35, 0)
 
         for b in blobs:
-            color = OUTLIER_COLOR if b.is_crossing else OBB_COLOR
+            color = GREEN if b.persistent_static_outlier else (OUTLIER_COLOR if b.is_crossing else OBB_COLOR)
             if show_contours:
                 cv2.drawContours(base, [b.contour], -1, color, 2, cv2.LINE_AA)
             cx_b = int(round(b.center_x))
@@ -6399,12 +6417,12 @@ class CrossingReviewApp(ctk.CTk):
         if self.show_overlay_var.get():
             overlay = np.zeros_like(base)
             for b in blobs:
-                color = OUTLIER_COLOR if b.is_crossing else OBB_COLOR
+                color = GREEN if b.persistent_static_outlier else (OUTLIER_COLOR if b.is_crossing else OBB_COLOR)
                 cv2.drawContours(overlay, [b.contour], -1, color, thickness=cv2.FILLED)
             base = cv2.addWeighted(base, 1.0, overlay, 0.35, 0)
 
         for b in blobs:
-            color = OUTLIER_COLOR if b.is_crossing else OBB_COLOR
+            color = GREEN if b.persistent_static_outlier else (OUTLIER_COLOR if b.is_crossing else OBB_COLOR)
             if self.show_contours_var.get():
                 cv2.drawContours(base, [b.contour], -1, color, 2, cv2.LINE_AA)
             cx = int(round(b.center_x))
