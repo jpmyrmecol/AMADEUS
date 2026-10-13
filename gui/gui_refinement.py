@@ -696,6 +696,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.tk_image = None
         self._canvas_image_id: int | None = None
         self.edited_keys: set[tuple[int, int]] = set()
+        # Frames whose only unsaved change is an outstanding front/rear flip.
+        self.flip_only_edited_keys: set[tuple[int, int]] = set()
         self.position_edited_keys: set[tuple[int, int]] = set()
         self.direction_reversed_keys: set[tuple[int, int]] = set()
         self.refinement_obb_df: pd.DataFrame | None = None
@@ -1081,6 +1083,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.last_save_path = None
         self.save_count = 0
         self.edited_keys.clear()
+        self.flip_only_edited_keys.clear()
         self.position_edited_keys.clear()
         self.direction_reversed_keys.clear()
         self.refinement_obb_df = None
@@ -2228,6 +2231,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.last_save_path = self._refined_source_overwrite_path
         self.save_count = 0
         self.edited_keys.clear()
+        self.flip_only_edited_keys.clear()
         self.selected_tids.clear()
         self._close_swap_popup()
         if not preserve_view:
@@ -3072,6 +3076,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.position_edited_keys.discard((fi, int(tid)))
         else:
             self.position_edited_keys.add((fi, int(tid)))
+            # A manual point edit must survive a later second flip.
+            self.flip_only_edited_keys.discard((fi, int(tid)))
         self.df.at[fi, fx] = fx_v
         self.df.at[fi, fy] = fy_v
         self.df.at[fi, rx] = rx_v
@@ -3133,6 +3139,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.current_id = int(tid_b)
         self.id_var.set(int(tid_b))
         for f in range(start_frame, end_frame):
+            # Swapping identities is an edit even if an earlier flip is undone.
+            self.flip_only_edited_keys.discard((int(f), int(tid_a)))
+            self.flip_only_edited_keys.discard((int(f), int(tid_b)))
             self.edited_keys.add((int(f), int(tid_a)))
             self.edited_keys.add((int(f), int(tid_b)))
         self.update_info_panel()
@@ -3172,7 +3181,14 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.current_id = int(tid)
         self.id_var.set(int(tid))
         for f in range(start_frame, end_frame):
-            self.edited_keys.add((int(f), int(tid)))
+            key = (int(f), int(tid))
+            if key in self.flip_only_edited_keys:
+                # A second flip restores the saved state when no other edit occurred.
+                self.flip_only_edited_keys.remove(key)
+                self.edited_keys.discard(key)
+            elif key not in self.edited_keys:
+                self.flip_only_edited_keys.add(key)
+                self.edited_keys.add(key)
         self.update_info_panel()
         self.redraw_current_frame()
         self.refresh_candidate_tree()
@@ -3547,6 +3563,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
             return False
 
         self.edited_keys.clear()
+        self.flip_only_edited_keys.clear()
         self.refinement_pose_np = self.df_np.copy()
         self.save_count += 1
         self._companion_save_active = True
