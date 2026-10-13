@@ -47,7 +47,6 @@ except ImportError:  # Preserve direct execution with: python gui/gui_segmentati
 
 ensure_import_paths(PROJECT_ROOT)
 from gui.color import OBB_COLOR, OUTLIER_COLOR, ROI_COLOR, WHITE, GREEN
-from main.persistent_static_blobs import PersistentStaticScanner
 from gui.video_input import (
     VIDEO_DROP_SUFFIXES,
     VIDEO_FILETYPES,
@@ -1869,10 +1868,13 @@ class CrossingReviewApp(ctk.CTk):
             self.static_options_frame, "Max center drift / body length",
             self.static_max_movement_var, 0.0, 1.0, 0.01, is_float=True,
         )
-        ctk.CTkButton(
+        self.static_search_button = ctk.CTkButton(
             self.static_options_frame, text="Search",
             command=self.search_persistent_static_blobs,
-        ).pack(fill="x", padx=6, pady=(4, 4))
+        )
+        self.static_search_button.pack(fill="x", padx=6, pady=(4, 4))
+        self._static_search_glow = RotatingBorderHighlight(self, self.static_search_button)
+        self._static_search_glow.set_active(bool(self.static_exclusion_enabled_var.get()))
         ctk.CTkLabel(
             self.static_options_frame, textvariable=self.static_search_status_var,
             anchor="w", wraplength=330, justify="left",
@@ -5096,7 +5098,11 @@ class CrossingReviewApp(ctk.CTk):
             "Not searched — press Search before Processing"
             if self.static_exclusion_enabled_var.get() else "Disabled"
         )
-        if had_results and self.reader is not None and not getattr(self, "_loading_video", False):
+        if hasattr(self, "_static_search_glow"):
+            self._static_search_glow.set_active(bool(self.static_exclusion_enabled_var.get()))
+        if (had_results and self.reader is not None
+                and not getattr(self, "_loading_video", False)
+                and not self._applying_config):
             self.redraw_current_frame()
 
     def _static_search_key(self) -> tuple:
@@ -5153,6 +5159,7 @@ class CrossingReviewApp(ctk.CTk):
             )
             return
         try:
+            from main.persistent_static_blobs import PersistentStaticScanner
             window = int(self.static_frame_window_var.get())
             presence = float(self.static_presence_var.get())
             min_iou = float(self.static_iou_var.get())
@@ -5177,6 +5184,7 @@ class CrossingReviewApp(ctk.CTk):
         self._static_search_signature = None
         self._static_exclusions.clear()
         self.static_search_status_var.set("Searching...")
+        self._static_search_glow.set_active(False)
         self._prefetch_cancel.set()
         self.reader.clear_cache()
         error: list[Exception | None] = [None]
@@ -5219,15 +5227,18 @@ class CrossingReviewApp(ctk.CTk):
         ok = self._with_progress_popup("Persistent static blobs", "Searching...", work)
         if not ok:
             self.static_search_status_var.set("Search cancelled or failed — press Search again")
+            self._static_search_glow.set_active(True)
             if error[0] is not None:
                 messagebox.showerror("Persistent static blobs", str(error[0]))
             return
         if snapshot_key != self._static_search_key():
             self.static_search_status_var.set("Settings changed — press Search again")
+            self._static_search_glow.set_active(bool(self.static_exclusion_enabled_var.get()))
             return
 
         self._static_exclusions = scanner.excluded
         self._static_search_signature = snapshot_key
+        self._static_search_glow.set_active(False)
         self.static_search_status_var.set(
             f"Found {scanner.excluded_count} blob occurrences "
             f"in {scanner.qualifying_windows} qualifying windows."
@@ -6071,7 +6082,9 @@ class CrossingReviewApp(ctk.CTk):
             self._rescue_single_animal_outliers(
                 out, result_match, frame_idx=frame_idx, image_shape=image_shape,
             )
-        # Match downstream Stage-1 MIN_ASPECT: 1.1 passes; < 1.1 is excluded.
+        # Mirror downstream Stage-1 MIN_ASPECT and min_area OBB geometry:
+        # equality with 1.1 is accepted.
+        from main.obb_fitting import fit_obb
         for b in out:
             b.low_obb_aspect_outlier = False
             if b.result_generated or b.result_missing or b.manual_outlier:
@@ -6079,7 +6092,9 @@ class CrossingReviewApp(ctk.CTk):
             contour = np.asarray(b.contour, dtype=np.float32).reshape(-1, 1, 2)
             if contour.shape[0] < 3:
                 continue
-            _center, (w, h), _angle = cv2.minAreaRect(contour)
+            (_center, (w, h), _angle), _axis = fit_obb(
+                contour.reshape(-1, 2), "min_area",
+            )
             if min(w, h) > 1e-6:
                 b.low_obb_aspect_outlier = max(w, h) / min(w, h) < DEFAULT_MIN_OBB_ASPECT
                 if b.low_obb_aspect_outlier:
