@@ -1882,7 +1882,7 @@ class CrossingReviewApp(ctk.CTk):
             self.static_frame_window_var, self.static_presence_var,
             self.static_iou_var, self.static_max_movement_var,
         ):
-            var.trace_add("write", lambda *_: self._on_static_search_changed())
+            var.trace_add("write", lambda *_: self._on_static_parameters_changed())
 
         expansion = self.region_expansion_section
         self._pack_scale_entry(expansion, "Expand region (px)", self.region_expand_px_var,
@@ -5077,17 +5077,26 @@ class CrossingReviewApp(ctk.CTk):
             self.static_options_frame.pack_forget()
 
     def _on_static_search_changed(self) -> None:
+        """Enabled checkbox changes optional-section visibility."""
         if not hasattr(self, "static_options_frame"):
             return
         self._toggle_static_options()
+        self._on_static_parameters_changed()
+        if self.reader is not None and not getattr(self, "_loading_video", False):
+            self._set_workflow_stage("static")
+
+    def _on_static_parameters_changed(self) -> None:
+        """Invalidate only the search data; never rebuild the sidebar on drag."""
+        if not hasattr(self, "static_search_status_var"):
+            return
+        had_results = self._static_search_signature is not None
         self._static_search_signature = None
         self._static_exclusions.clear()
         self.static_search_status_var.set(
             "Not searched — press Search before Processing"
             if self.static_exclusion_enabled_var.get() else "Disabled"
         )
-        if self.reader is not None and not getattr(self, "_loading_video", False):
-            self._set_workflow_stage("static")
+        if had_results and self.reader is not None and not getattr(self, "_loading_video", False):
             self.redraw_current_frame()
 
     def _static_search_key(self) -> tuple:
