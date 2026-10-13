@@ -1590,7 +1590,11 @@ class CrossingReviewApp(ctk.CTk):
 
         ctk.CTkLabel(top, text="Video").grid(row=0, column=0, sticky="w")
         ctk.CTkEntry(top, textvariable=self.video_path_var).grid(row=0, column=1, sticky="ew", padx=8)
-        ctk.CTkButton(top, text="Reference", command=self.browse_video).grid(row=0, column=2)
+        self.video_reference_button = ctk.CTkButton(
+            top, text="Reference", command=self.browse_video,
+            border_width=3, border_color="#777777",
+        )
+        self.video_reference_button.grid(row=0, column=2)
         top.grid_columnconfigure(1, weight=1)
 
         main = ctk.CTkFrame(self, corner_radius=0)
@@ -1674,7 +1678,7 @@ class CrossingReviewApp(ctk.CTk):
         self.bg_preview_button = ctk.CTkButton(
             self.bg_controls_frame, text="Show background",
             command=self.show_background_popup, state="disabled",
-            border_width=3, border_color="#777777",
+            border_width=0, border_color="#777777",
         )
         self.bg_preview_button.pack(fill="x", padx=6, pady=(2, 6))
         self.frame_ranges_button = ctk.CTkButton(seg, text="Change Frame Ranges...", command=self.change_frame_ranges, state="disabled")
@@ -1926,6 +1930,7 @@ class CrossingReviewApp(ctk.CTk):
         self._refresh_segmentation_controls()
         self._refresh_segmentation_controls()
         self._guidance_glows = {
+            "video": RotatingBorderHighlight(self, self.video_reference_button),
             "background": RotatingBorderHighlight(self, self.bg_preview_button),
             "threshold": RotatingBorderHighlight(self, self.threshold_done_button),
             "analysis": RotatingBorderHighlight(self, self.analysis_start_button),
@@ -2004,7 +2009,13 @@ class CrossingReviewApp(ctk.CTk):
     def _refresh_guidance_ui(self):
         if not self._guidance_glows:
             return
-        stage = self._guidance_stage
+        has_video_path = bool(self.video_path_var.get().strip())
+        # The initial action is to select a video. Keep Show background
+        # borderless until the video path is populated.
+        bg_border_width = 3 if has_video_path else 0
+        if self.bg_preview_button.cget("border_width") != bg_border_width:
+            self.bg_preview_button.configure(border_width=bg_border_width)
+        stage = self._guidance_stage if has_video_path else "video"
         if stage == "background" and not self._segmentation_needs_background():
             stage = self._guidance_stage = "threshold"
         if stage in ("outlier", "processing") and not self.outlier_section_revealed:
@@ -3641,6 +3652,7 @@ class CrossingReviewApp(ctk.CTk):
         return COPY
 
     def _bind_traces(self):
+        self.video_path_var.trace_add("write", lambda *_: self._refresh_guidance_ui())
         self.segmentation_mode_var.trace_add("write", lambda *_: self._on_segmentation_mode_changed())
         self.bg_method_var.trace_add("write", lambda *_: self._on_background_method_changed())
         self.roi_enabled_var.trace_add("write", lambda *_: self._toggle_roi_params())
