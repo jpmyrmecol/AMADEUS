@@ -46,7 +46,10 @@ except ImportError:  # Preserve direct execution with: python gui/gui_segmentati
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
 
 ensure_import_paths(PROJECT_ROOT)
-from gui.color import OBB_COLOR, OUTLIER_COLOR, ROI_COLOR, WHITE, GREEN
+from gui.color import (
+    OBB_COLOR, OUTLIER_COLOR, ROI_COLOR, WHITE,
+    STATIC_OUTLIER_COLOR, TEMPORAL_MERGE_COLOR,
+)
 from gui.video_input import (
     VIDEO_DROP_SUFFIXES,
     VIDEO_FILETYPES,
@@ -85,6 +88,10 @@ RESULT_CSV_EXTS = [("Result CSV files", "*.csv"), ("All files", "*.*")]
 
 # Imported-result overlay: magenta stays readable next to the cyan/orange blobs.
 RESULT_OBB_COLOR = (255, 0, 255)
+_TEMPORAL_LEVEL_NAMES = {1: "medium", 2: "high"}
+TEMPORAL_EVENTS_CSV = "temporal_merge_events.csv"
+# Sentinel: an argument that was not passed (None explicitly means disabled).
+_UNSET = object()
 # Fraction of a blob that its single imported OBB must cover for the blob to be
 # accepted as one large animal instead of an area outlier.
 DEFAULT_RESULT_OBB_COVERAGE = 0.7
@@ -412,6 +419,8 @@ class BlobMetrics:
     height_outlier: bool = False
     low_obb_aspect_outlier: bool = False
     persistent_static_outlier: bool = False
+    temporal_merge_outlier: bool = False   # excluded by temporal merge evidence
+    temporal_merge_level: int = 0          # 2 high, 1 medium candidate, 0 none
     manual_outlier: bool = False
     is_crossing: bool = False
     result_obb_count: int = 0        # imported OBBs owned by this blob
@@ -454,6 +463,9 @@ class _SegConfig:
     protected_area_bounds: Optional[tuple[float, float]] = None
     single_blob_smoothing_enabled: bool = False
     single_blob_smoothing_level: int = 3
+    # Backend chosen once per snapshot, so one run never switches between the
+    # CPU and GPU paths when the deferred torch import completes mid-run.
+    use_gpu: bool = False
 
 
 def _fill_binary_holes(mask: np.ndarray) -> np.ndarray:
@@ -498,7 +510,7 @@ def _segment_mask_with_settings(
         diff_threshold=int(diff_threshold),
         background_bgr=background_bgr,
     )
-    if _CUDA_AVAILABLE and _torch is not None and _mode_requires_background(mode):
+    if local_cfg.use_gpu and _torch is not None and _mode_requires_background(mode):
         mask = _segment_diff_gpu(frame_bgr, local_cfg)
     else:
         mask = _segment_cpu(frame_bgr, local_cfg)
@@ -1160,6 +1172,8 @@ def _segmentation_pickle_blob(blob: BlobMetrics, source_index: Optional[int] = N
         exclusion = "manual"
     elif blob.persistent_static_outlier:
         exclusion = "persistent_static"
+    elif blob.temporal_merge_outlier:
+        exclusion = "temporal_merge"
     elif blob.low_obb_aspect_outlier:
         exclusion = "low_obb_aspect"
     elif blob.result_obb_count > 1:
@@ -1174,11 +1188,128 @@ def _segmentation_pickle_blob(blob: BlobMetrics, source_index: Optional[int] = N
         exclusion = "result_overlap"
     if exclusion:
         item.segmentation_exclusion = exclusion
+    if blob.temporal_merge_level:
+        # Provenance survives a persistent_static primary reason; Medium
+        # candidates are recorded but never excluded unless chosen.
+        item.temporal_merge = _TEMPORAL_LEVEL_NAMES.get(int(blob.temporal_merge_level), "")
+        item.temporal_merge_excluded = bool(blob.temporal_merge_outlier)
     if blob.result_obb_count:
         item.result_obb_count = int(blob.result_obb_count)
     if source_index is not None:
         item.segmentation_source_index = int(source_index)
     return item
+
+
+@dataclass
+class _TemporalSearchState:
+    """Immutable outcome of one temporal-merge Search (graph kept for re-evaluation)."""
+    geometry_key: tuple
+    kinds_key: tuple
+    eval_key: tuple
+    reclassifiable: bool
+    start: int
+    end: int
+    graph: object
+    result: object
+    params: object
+
+
+@dataclass
+class _FilterPlan:
+    """Optional exclusion filters for one preview, Export or Processing run.
+
+    ``mode="apply"`` uses Search results only on frames whose blob digest
+    matches the Search. ``mode="processing"`` uses them only when every frame
+    matches and otherwise recomputes both filters on Processing's own blobs,
+    so an exclusion can never land on a different blob.
+    ``static`` is (exclusions, digests, first frame, scanner arguments).
+    """
+    mode: str
+    static: Optional[tuple] = None
+    temporal: Optional[_TemporalSearchState] = None
+    stats: dict = field(default_factory=dict)
+
+
+def _apply_temporal_levels(blobs: list, result, fid: int, base_crossing: list[bool]) -> None:
+    """Mark candidates by list position; exclude only blobs that were normal."""
+    levels = result.levels.get(int(fid))
+    if not levels:
+        return
+    excluded = result.excluded.get(int(fid), ())
+    for position, level in levels.items():
+        if position >= len(blobs):
+            continue
+        blob = blobs[position]
+        blob.temporal_merge_level = int(level)
+        if position in excluded and not base_crossing[position]:
+            blob.temporal_merge_outlier = True
+            blob.is_crossing = True
+
+
+def _apply_filter_plan_to_frame(blobs: list, fid: int, plan: "_FilterPlan", apply_static) -> bool:
+    """Apply verified Search results to one frame; True if a digest differed."""
+    from main.frame_scan import frame_blob_digest
+
+    base = [bool(b.is_crossing) for b in blobs]
+    digest = None
+    mismatch = False
+    if plan.static is not None:
+        exclusions, digests, start, _args = plan.static
+        index = int(fid) - int(start)
+        if digests is not None and 0 <= index < len(digests):
+            digest = frame_blob_digest(blobs)
+            if digest == int(digests[index]):
+                apply_static(blobs, fid, exclusions, base)
+            else:
+                mismatch = True
+    if plan.temporal is not None:
+        state = plan.temporal
+        index = int(fid) - int(state.start)
+        if 0 <= index < state.graph.frame_count:
+            if digest is None:
+                digest = frame_blob_digest(blobs)
+            if digest == int(state.graph.digests[index]):
+                _apply_temporal_levels(blobs, state.result, fid, base)
+            else:
+                mismatch = True
+    return mismatch
+
+
+class _FrameContext:
+    """ROI-edge pixels and segmentation context of each frame for temporal nodes.
+
+    The context id changes where an ROI or Additional Outlier frame range
+    starts or ends; the graph builder creates no edges across such a change.
+    """
+
+    def __init__(self, cfg: "_SegConfig", image_shape: tuple):
+        self.cfg = cfg
+        self.shape = (int(image_shape[0]), int(image_shape[1]))
+        self._lock = threading.Lock()
+        self._borders: dict = {}
+
+    def _key(self, fid: int) -> tuple:
+        rois = tuple(i for i, roi in enumerate(self.cfg.roi_sets) if roi_is_active(roi, fid))
+        extra = tuple(
+            i for i, item in enumerate(self.cfg.additional_outlier_sets)
+            if item.get("enabled", False) and int(item.get("frame_start", 0)) <= fid
+            and (int(item.get("frame_end", -1)) < 0 or fid <= int(item.get("frame_end", -1))))
+        return rois, extra
+
+    def nodes(self, fid: int, blobs: list, digest: int):
+        from main.temporal_merge_blobs import extract_frame_nodes, roi_border_pixels
+
+        rois, extra = self._key(int(fid))
+        with self._lock:
+            known = rois in self._borders
+            border = self._borders.get(rois)
+        if not known:
+            mask = _build_roi_mask_for_frame(self.cfg.roi_sets, self.shape, int(fid), self.cfg.roi_reverse)
+            border = roi_border_pixels(mask)
+            with self._lock:
+                self._borders[rois] = border
+        return extract_frame_nodes(int(fid), blobs, self.shape, border_pixels=border,
+                                   digest=digest, context=hash((rois, extra)))
 
 
 def _result_region_covered_at_most_half(region, foreground: np.ndarray) -> bool:
@@ -1260,6 +1391,62 @@ def _result_obb_overlap_candidates(
         if overlap > 0:
             candidates.append((index, overlap))
     return candidates
+
+
+def _blob_color(blob: BlobMetrics) -> tuple:
+    """Fill/contour color: static green, temporal violet, other outliers orange."""
+    if blob.persistent_static_outlier:
+        return STATIC_OUTLIER_COLOR
+    if blob.temporal_merge_outlier:
+        return TEMPORAL_MERGE_COLOR
+    return OUTLIER_COLOR if blob.is_crossing else OBB_COLOR
+
+
+def _draw_dashed_contour(image: np.ndarray, contour: np.ndarray, color, thickness: int = 2,
+                         dash: float = 6.0, gap: float = 4.0) -> None:
+    """OpenCV has no dashed polyline; draw alternating pieces along the outline."""
+    points = np.asarray(contour, dtype=np.float64).reshape(-1, 2)
+    if len(points) < 2:
+        return
+    closed = np.vstack([points, points[:1]])
+    lengths = np.hypot(*np.diff(closed, axis=0).T)
+    total = float(lengths.sum())
+    if total <= 0:
+        return
+    cumulative = np.r_[0.0, np.cumsum(lengths)]
+    period = dash + gap
+    position = 0.0
+    while position < total:
+        stops = np.linspace(position, min(position + dash, total), 4)
+        xs = np.interp(stops, cumulative, closed[:, 0])
+        ys = np.interp(stops, cumulative, closed[:, 1])
+        piece = np.round(np.stack([xs, ys], axis=1)).astype(np.int32).reshape(-1, 1, 2)
+        cv2.polylines(image, [piece], False, color, thickness, cv2.LINE_AA)
+        position += period
+
+
+def _draw_blob_overlays(base: np.ndarray, blobs: list, show_overlay: bool,
+                        show_contours: bool, show_centers: bool) -> np.ndarray:
+    """Shared by the preview and Export so both always show the same colors.
+
+    Temporal-merge candidates that are not excluded keep their normal color
+    and get a dashed violet outline, even with contours hidden.
+    """
+    if show_overlay:
+        overlay = np.zeros_like(base)
+        for b in blobs:
+            cv2.drawContours(overlay, [b.contour], -1, _blob_color(b), thickness=cv2.FILLED)
+        base = cv2.addWeighted(base, 1.0, overlay, 0.35, 0)
+
+    for b in blobs:
+        candidate = bool(b.temporal_merge_level) and not b.is_crossing
+        if candidate and (show_overlay or show_contours):
+            _draw_dashed_contour(base, b.contour, TEMPORAL_MERGE_COLOR, 2, dash=8.0, gap=5.0)
+        elif show_contours:
+            cv2.drawContours(base, [b.contour], -1, _blob_color(b), 2, cv2.LINE_AA)
+        if show_centers:
+            cv2.circle(base, (int(round(b.center_x)), int(round(b.center_y))), 2, WHITE, -1, cv2.LINE_AA)
+    return base
 
 
 def _draw_result_obbs(image_bgr: np.ndarray, obbs: "Optional[np.ndarray]") -> None:
@@ -1403,6 +1590,21 @@ class CrossingReviewApp(ctk.CTk):
         self.static_search_status_var = tk.StringVar(value="Not searched")
         self._static_search_signature: Optional[tuple] = None
         self._static_exclusions: dict[int, set[int]] = {}
+        self._static_digests: "Optional[np.ndarray]" = None
+        self._static_scan_start = 0
+
+        # Temporal merge filter. Frame counts are re-derived from the video FPS
+        # on load (0.5 s horizon, max(3 frames, 0.1 s) confirmation).
+        self.temporal_merge_enabled_var = tk.BooleanVar(value=False)
+        self.temporal_merge_mode_var = tk.StringVar(value="bilateral")
+        self.temporal_merge_horizon_var = tk.IntVar(value=15)
+        self.temporal_merge_confirm_var = tk.IntVar(value=3)
+        self.temporal_merge_tau_manual_var = tk.BooleanVar(value=False)
+        self.temporal_merge_tau_var = tk.DoubleVar(value=0.5)
+        self.temporal_search_status_var = tk.StringVar(value="Disabled")
+        self._temporal_search: Optional[_TemporalSearchState] = None
+        self._filter_preview_mismatch = False
+        self._last_filter_stats: dict = {}
 
         self.result_import_enabled_var = tk.BooleanVar(value=False)
         self.result_import_path_var = tk.StringVar(value="")
@@ -1687,6 +1889,7 @@ class CrossingReviewApp(ctk.CTk):
         self.additional_outlier_section = section("Additional Outlier (Optional)")
         self.single_blob_smoothing_section = section("Single-animal Smoothing (Optional)")
         self.static_blob_section = section("Exclude persistent static blobs (Optional)")
+        self.temporal_blob_section = section("Exclude temporal merges (Optional)")
 
         seg = self.seg_section
         self._pack_combobox(seg, "Segmentation mode", self.segmentation_mode_var, ["background_diff", "dark_region", "bright_region", "dark_region_and_background_diff", "bright_region_and_background_diff"])
@@ -1885,6 +2088,64 @@ class CrossingReviewApp(ctk.CTk):
             self.static_iou_var, self.static_max_movement_var,
         ):
             var.trace_add("write", lambda *_: self._on_static_parameters_changed())
+
+        temporal_section = self.temporal_blob_section
+        ctk.CTkCheckBox(
+            temporal_section, text="Enabled",
+            variable=self.temporal_merge_enabled_var,
+            command=self._on_temporal_enabled_changed,
+        ).pack(anchor="w", padx=6, pady=(4, 4))
+        self.temporal_options_frame = ctk.CTkFrame(temporal_section, corner_radius=0)
+        mode_row = ctk.CTkFrame(self.temporal_options_frame, corner_radius=0)
+        mode_row.pack(fill="x", padx=6, pady=(2, 4))
+        ctk.CTkLabel(mode_row, text="Exclude", width=60, anchor="w").pack(side="left")
+        ctk.CTkRadioButton(
+            mode_row, text="Bilateral only", variable=self.temporal_merge_mode_var, value="bilateral",
+        ).pack(side="left", padx=(0, 10))
+        ctk.CTkRadioButton(
+            mode_row, text="Include one-sided", variable=self.temporal_merge_mode_var, value="one_sided",
+        ).pack(side="left")
+        # Integer frame counts and the manual threshold are typed directly; no
+        # sliders, so the section stays short enough to show its Search button.
+        self._pack_scale_entry(
+            self.temporal_options_frame, "One-sided horizon (frames)",
+            self.temporal_merge_horizon_var, 1, 600, 1, show_slider=False,
+        )
+        self._pack_scale_entry(
+            self.temporal_options_frame, "Confirmation (frames)",
+            self.temporal_merge_confirm_var, 2, 120, 1, show_slider=False,
+        )
+        self._pack_scale_entry(
+            self.temporal_options_frame, "Manual containment",
+            self.temporal_merge_tau_var, 0.1, 0.9, 0.01, is_float=True,
+            enable_var=self.temporal_merge_tau_manual_var, show_slider=False,
+        )
+        search_row = ctk.CTkFrame(self.temporal_options_frame, corner_radius=0)
+        search_row.pack(fill="x", padx=6, pady=(4, 2))
+        self.temporal_search_button = ctk.CTkButton(
+            search_row, text="Search", command=self.search_temporal_merges,
+        )
+        self.temporal_search_button.pack(side="left", expand=True, fill="x")
+        # Jump to the previous/next High or Medium interval to inspect it.
+        ctk.CTkButton(
+            search_row, text="<", width=36, command=lambda: self._goto_temporal_event(-1),
+        ).pack(side="left", padx=(6, 2))
+        ctk.CTkButton(
+            search_row, text=">", width=36, command=lambda: self._goto_temporal_event(1),
+        ).pack(side="left")
+        self._temporal_search_glow = RotatingBorderHighlight(self, self.temporal_search_button)
+        self._temporal_search_glow.set_active(bool(self.temporal_merge_enabled_var.get()))
+        ctk.CTkLabel(
+            self.temporal_options_frame, textvariable=self.temporal_search_status_var,
+            anchor="w", wraplength=360, justify="left",
+        ).pack(fill="x", padx=6, pady=(0, 4))
+        self._toggle_temporal_options()
+        for var in (
+            self.temporal_merge_mode_var, self.temporal_merge_horizon_var,
+            self.temporal_merge_confirm_var, self.temporal_merge_tau_manual_var,
+            self.temporal_merge_tau_var,
+        ):
+            var.trace_add("write", lambda *_: self._on_temporal_parameters_changed())
 
         expansion = self.region_expansion_section
         self._pack_scale_entry(expansion, "Expand region (px)", self.region_expand_px_var,
@@ -2110,6 +2371,7 @@ class CrossingReviewApp(ctk.CTk):
             (getattr(self, "additional_outlier_section", None), True),
             (getattr(self, "single_blob_smoothing_section", None), True),
             (getattr(self, "static_blob_section", None), True),
+            (getattr(self, "temporal_blob_section", None), True),
         ]
 
         # Reset the pack order before restoring visible sections. This keeps
@@ -2129,6 +2391,8 @@ class CrossingReviewApp(ctk.CTk):
             # An enabled saved filter must expose its required Search button,
             # even when optional settings are otherwise collapsed.
             if section is getattr(self, "static_blob_section", None) and self.static_exclusion_enabled_var.get():
+                optional = False
+            if section is getattr(self, "temporal_blob_section", None) and self.temporal_merge_enabled_var.get():
                 optional = False
             if optional and not show_optional:
                 continue
@@ -2193,6 +2457,12 @@ class CrossingReviewApp(ctk.CTk):
             "static_presence": self.static_presence_var,
             "static_min_iou": self.static_iou_var,
             "static_max_movement": self.static_max_movement_var,
+            "temporal_merge_enabled": self.temporal_merge_enabled_var,
+            "temporal_merge_mode": self.temporal_merge_mode_var,
+            "temporal_merge_horizon_frames": self.temporal_merge_horizon_var,
+            "temporal_merge_confirm_frames": self.temporal_merge_confirm_var,
+            "temporal_merge_tau_manual": self.temporal_merge_tau_manual_var,
+            "temporal_merge_tau": self.temporal_merge_tau_var,
             "area_outlier_method": self.area_outlier_method_var,
             "area_iqr_min": self.area_iqr_min_var,
             "area_iqr_max": self.area_iqr_max_var,
@@ -2421,6 +2691,15 @@ class CrossingReviewApp(ctk.CTk):
             self.static_iou_var.set(0.8)
         if "static_max_movement" not in settings:
             self.static_max_movement_var.set(0.2)
+        # Configs written before the temporal merge filter keep it disabled.
+        self.temporal_merge_enabled_var.set(bool(settings.get("temporal_merge_enabled", False)))
+        mode = str(settings.get("temporal_merge_mode", "bilateral"))
+        self.temporal_merge_mode_var.set(mode if mode in ("bilateral", "one_sided") else "bilateral")
+        self.temporal_merge_tau_manual_var.set(bool(settings.get("temporal_merge_tau_manual", False)))
+        try:
+            self.temporal_merge_tau_var.set(min(0.9, max(0.1, float(settings.get("temporal_merge_tau", 0.5)))))
+        except (TypeError, ValueError):
+            self.temporal_merge_tau_var.set(0.5)
         # Loading an older session must not inherit smoothing from the last one.
         self.single_blob_smoothing_enabled_var.set(bool(settings.get("single_blob_smoothing_enabled", False)))
         self.single_blob_smoothing_level_var.set(max(1, min(20, int(settings.get("single_blob_smoothing_level", 3)))))
@@ -2437,15 +2716,27 @@ class CrossingReviewApp(ctk.CTk):
         if "static_frame_window" not in settings and self.reader is not None:
             fps = float(self.reader.fps) if self.reader.fps and self.reader.fps > 0 else 30.0
             self.static_frame_window_var.set(max(2, int(round(0.5 * fps))))
+        horizon, confirm = self._default_temporal_frames()
+        for key, var, default, lower, upper in (
+                ("temporal_merge_horizon_frames", self.temporal_merge_horizon_var, horizon, 1, 600),
+                ("temporal_merge_confirm_frames", self.temporal_merge_confirm_var, confirm, 2, 120)):
+            try:
+                value = int(settings[key]) if key in settings else default
+            except (TypeError, ValueError):
+                value = default
+            var.set(max(lower, min(upper, value)))
         # Search results are intentionally not trusted from a saved config:
         # the current video must be searched again before exclusion.
         self._static_search_signature = None
         self._static_exclusions.clear()
+        self._static_digests = None
         self._toggle_static_options()
         self.static_search_status_var.set(
             "Not searched — press Search before Processing"
             if self.static_exclusion_enabled_var.get() else "Disabled"
         )
+        self._toggle_temporal_options()
+        self._reset_temporal_search()
         self._toggle_area_outlier_method_controls()
 
         image_shape = (self.reader.height, self.reader.width) if self.reader is not None else None
@@ -3070,7 +3361,7 @@ class CrossingReviewApp(ctk.CTk):
         var.trace_add("write", lambda *_: combo.set(var.get()))
         combo.pack(side="left", fill="x", expand=True)
 
-    def _pack_scale_entry(self, parent, label, var, lo, hi, resolution, is_float: bool = False, enable_var: Optional[tk.BooleanVar] = None, entry_prefix: str = "", slider_lo=None, slider_hi=None, end_sentinel: Optional[int] = None):
+    def _pack_scale_entry(self, parent, label, var, lo, hi, resolution, is_float: bool = False, enable_var: Optional[tk.BooleanVar] = None, entry_prefix: str = "", slider_lo=None, slider_hi=None, end_sentinel: Optional[int] = None, show_slider: bool = True):
         outer = ctk.CTkFrame(parent, corner_radius=0)
         outer.pack(fill="x", padx=6, pady=3)
 
@@ -3175,7 +3466,8 @@ class CrossingReviewApp(ctk.CTk):
                               to=hi if slider_hi is None else slider_hi,
                               orientation="horizontal", command=on_slider)
         scale.set(float(default_value))
-        scale.pack(fill="x", pady=(2, 0))
+        if show_slider:
+            scale.pack(fill="x", pady=(2, 0))
 
         def reset_to_default(_event=None):
             try:
@@ -4016,10 +4308,14 @@ class CrossingReviewApp(ctk.CTk):
         self.static_frame_window_var.set(max(2, int(round(0.5 * fps))))
         self._static_search_signature = None
         self._static_exclusions.clear()
+        self._static_digests = None
         self.static_search_status_var.set(
             "Not searched — press Search before Processing"
             if self.static_exclusion_enabled_var.get() else "Disabled"
         )
+        self.temporal_merge_horizon_var.set(max(1, int(round(0.5 * fps))))
+        self.temporal_merge_confirm_var.set(max(3, int(round(0.1 * fps))))
+        self._reset_temporal_search()
         self.current_frame = 0
         self.frame_var.set(0)
         self.frame_spin.configure(from_=0, to=max(0, self.frame_count - 1))
@@ -5094,12 +5390,12 @@ class CrossingReviewApp(ctk.CTk):
         had_results = self._static_search_signature is not None
         self._static_search_signature = None
         self._static_exclusions.clear()
+        self._static_digests = None
         self.static_search_status_var.set(
             "Not searched — press Search before Processing"
             if self.static_exclusion_enabled_var.get() else "Disabled"
         )
-        if hasattr(self, "_static_search_glow"):
-            self._static_search_glow.set_active(bool(self.static_exclusion_enabled_var.get()))
+        self._refresh_search_glows()
         if (had_results and self.reader is not None
                 and not getattr(self, "_loading_video", False)
                 and not self._applying_config):
@@ -5132,119 +5428,396 @@ class CrossingReviewApp(ctk.CTk):
     def _apply_static_outliers(
         self, blobs: list[BlobMetrics], fid: int,
         exclusions: Optional[dict[int, set[int]]] = None,
+        base_crossing: Optional[list[bool]] = None,
     ) -> list[BlobMetrics]:
         if exclusions is None:
             if not self._static_search_is_current():
                 return blobs
             exclusions = self._static_exclusions
         matched_indices = exclusions.get(int(fid), ())
-        for blob in blobs:
-            if blob.blob_index in matched_indices and not blob.is_crossing:
+        for position, blob in enumerate(blobs):
+            crossing = base_crossing[position] if base_crossing is not None else blob.is_crossing
+            if blob.blob_index in matched_indices and not crossing:
                 blob.persistent_static_outlier = True
                 blob.is_crossing = True
         return blobs
 
-    def search_persistent_static_blobs(self) -> None:
-        """Examine consecutive original frames without retaining their images."""
-        if not self.static_exclusion_enabled_var.get() or self.reader is None:
+    # -- temporal merge filter ------------------------------------------------
+    def _toggle_temporal_options(self) -> None:
+        if self.temporal_merge_enabled_var.get():
+            self.temporal_options_frame.pack(fill="x", pady=(0, 4))
+        else:
+            self.temporal_options_frame.pack_forget()
+
+    def _on_temporal_enabled_changed(self) -> None:
+        if not hasattr(self, "temporal_options_frame"):
             return
-        if self.progress_popup is not None:
+        self._toggle_temporal_options()
+        self._on_temporal_parameters_changed()
+        if self.reader is not None and not getattr(self, "_loading_video", False):
+            self._set_workflow_stage("temporal")
+
+    def _on_temporal_parameters_changed(self) -> None:
+        """Mark the evaluation stale; the stored graph is kept for re-evaluation."""
+        if not hasattr(self, "temporal_search_status_var"):
             return
-        if self.analysis_is_stale or (
-            self._needs_area_analysis() and not self.analysis_iqr_stats
-        ):
-            messagebox.showwarning(
-                "Persistent static blobs",
-                "Run Analyze with the current segmentation settings first.",
-            )
-            return
+        self._refresh_search_glows()
+        self._update_temporal_status()
+        if (self._temporal_search is not None and self.reader is not None
+                and not getattr(self, "_loading_video", False) and not self._applying_config):
+            self.redraw_current_frame()
+
+    def _reset_temporal_search(self) -> None:
+        self._temporal_search = None
+        if hasattr(self, "temporal_search_status_var"):
+            self._update_temporal_status()
+        self._refresh_search_glows()
+
+    def _default_temporal_frames(self) -> tuple[int, int]:
+        fps = float(self.reader.fps) if self.reader is not None and self.reader.fps and self.reader.fps > 0 else 30.0
+        return max(1, int(round(0.5 * fps))), max(3, int(round(0.1 * fps)))
+
+    def _temporal_params(self):
+        from main.temporal_merge_blobs import TemporalMergeParams
+        tau = float(self.temporal_merge_tau_var.get()) if self.temporal_merge_tau_manual_var.get() else None
+        params = TemporalMergeParams(
+            horizon_frames=int(self.temporal_merge_horizon_var.get()),
+            confirm_frames=int(self.temporal_merge_confirm_var.get()),
+            tau=tau,
+            include_one_sided=self.temporal_merge_mode_var.get() == "one_sided",
+        )
+        params.validate()
+        return params
+
+    def _temporal_eval_key(self) -> tuple:
         try:
-            from main.persistent_static_blobs import PersistentStaticScanner
-            window = int(self.static_frame_window_var.get())
-            presence = float(self.static_presence_var.get())
-            min_iou = float(self.static_iou_var.get())
-            max_drift = float(self.static_max_movement_var.get())
-            if not 2 <= window <= 2000:
-                raise ValueError("Frame window must be between 2 and 2000.")
-            scanner = PersistentStaticScanner(window, presence, min_iou, max_drift)
-            start = max(0, int(self.training_frame_start_var.get()))
-            end = self._resolved_frame_end(int(self.training_frame_end_var.get()))
-            if end - start + 1 < window:
-                raise ValueError("Frame window exceeds the selected training-frame range.")
-            snapshot_key = self._static_search_key()
+            p = self._temporal_params()
+        except (ValueError, TypeError, tk.TclError):
+            return ("invalid",)
+        return (p.horizon_frames, p.confirm_frames, p.tau, p.include_one_sided)
+
+    def _search_frame_range(self) -> tuple[int, int]:
+        start = max(0, int(self.training_frame_start_var.get()))
+        return start, self._resolved_frame_end(int(self.training_frame_end_var.get()))
+
+    def _additional_sets_in_range(self, start: int, end: int) -> bool:
+        self._sync_additional_outlier_vars_to_set()
+        for item in self.additional_outlier_sets:
+            if not item.get("enabled", False):
+                continue
+            fs, fe = int(item.get("frame_start", 0)), int(item.get("frame_end", -1))
+            if fs <= end and (fe < 0 or fe >= start):
+                return True
+        return False
+
+    def _temporal_geometry_dependent(self) -> bool:
+        """True when blob shapes themselves depend on the area bounds."""
+        start, end = self._search_frame_range()
+        return bool(
+            self.single_blob_smoothing_enabled_var.get()
+            or (self.result_import_enabled_var.get() and self.result_obb_import is not None)
+            or self._additional_sets_in_range(start, end)
+        )
+
+    def _current_area_bounds_or_none(self) -> Optional[tuple[float, float]]:
+        try:
+            bounds = self._bounds_from_fixed_stats(self.analysis_iqr_stats).get("area")
+        except (ValueError, TypeError):
+            return None
+        return (float(bounds[0]), float(bounds[1])) if bounds else None
+
+    def _temporal_geometry_key(self) -> tuple:
+        """Everything that changes blob geometry or order (needs a rescan)."""
+        start, end = self._search_frame_range()
+        signature = list(self._segmentation_signature())
+        dependent = self._temporal_geometry_dependent()
+        if not dependent:
+            # Protected-area bounds only reach the geometry through an enabled
+            # Additional Outlier Set (excluded above), so ignore them here.
+            signature[-2] = None
+        smoothing = bool(self.single_blob_smoothing_enabled_var.get())
+        return (
+            os.path.normcase(os.path.abspath(self.video_path_var.get().strip())),
+            int(self.frame_count), start, end, tuple(signature),
+            smoothing, int(self.single_blob_smoothing_level_var.get()) if smoothing else 0,
+            self._classifier_signature() if dependent else None,
+            self._current_area_bounds_or_none() if dependent else None,
+        )
+
+    def _temporal_kinds_key(self) -> tuple:
+        """Resolved numeric area bounds decide which nodes are normal."""
+        return (self._current_area_bounds_or_none(),)
+
+    def _temporal_search_is_current(self) -> bool:
+        state = self._temporal_search
+        return bool(
+            self.temporal_merge_enabled_var.get() and state is not None
+            and state.geometry_key == self._temporal_geometry_key()
+            and state.kinds_key == self._temporal_kinds_key()
+            and state.eval_key == self._temporal_eval_key()
+        )
+
+    def _temporal_graph_reusable(self) -> bool:
+        state = self._temporal_search
+        if state is None or state.geometry_key != self._temporal_geometry_key():
+            return False
+        return state.reclassifiable or state.kinds_key == self._temporal_kinds_key()
+
+    def _refresh_search_glows(self) -> None:
+        if self._applying_config or getattr(self, "_loading_video", False):
+            # Keys read Tk state that is only half restored here.
+            if hasattr(self, "_static_search_glow"):
+                self._static_search_glow.set_active(bool(self.static_exclusion_enabled_var.get()))
+            if hasattr(self, "_temporal_search_glow"):
+                self._temporal_search_glow.set_active(bool(self.temporal_merge_enabled_var.get()))
+            return
+        if hasattr(self, "_static_search_glow"):
+            self._static_search_glow.set_active(
+                bool(self.static_exclusion_enabled_var.get()) and not self._static_search_is_current())
+        if hasattr(self, "_temporal_search_glow"):
+            self._temporal_search_glow.set_active(
+                bool(self.temporal_merge_enabled_var.get()) and not self._temporal_search_is_current())
+
+    def _update_temporal_status(self) -> None:
+        if not self.temporal_merge_enabled_var.get():
+            self.temporal_search_status_var.set("Disabled")
+            return
+        state = self._temporal_search
+        if state is None:
+            self.temporal_search_status_var.set("Not searched — press Search before Processing")
+            return
+        if self._applying_config or getattr(self, "_loading_video", False):
+            return
+        if not self._temporal_search_is_current():
+            note = "re-evaluation only" if self._temporal_graph_reusable() else "rescan required"
+            self.temporal_search_status_var.set(f"Settings changed — press Search ({note})")
+            return
+        self.temporal_search_status_var.set(self._temporal_summary_text(state.result))
+
+    @staticmethod
+    def _temporal_summary_text(result, detailed: bool = False) -> str:
+        """One line for the sidebar (it has a fixed height); details for the status bar."""
+        counts, diag = result.counts, result.diagnostics
+        text = (f"High {counts['high_intervals']} / Medium {counts['medium_intervals']} / "
+                f"Uncertain {counts['uncertain_intervals']} · excluded {counts['excluded_blobs']}")
+        if not diag.get("reliable"):
+            text = "Unreliable overlap, nothing excluded · " + text
+        if detailed:
+            text += (f" blobs (high {counts['high_blobs']}, medium {counts['medium_blobs']}) · "
+                     f"containment {diag.get('tau', 0):.2f} {diag.get('tau_mode', 'auto')}, "
+                     f"P10 {diag.get('self_containment_p10')}")
+            if diag.get("warnings"):
+                text += " · " + diag["warnings"][0]
+        return text
+
+    def _search_filter_snapshot(self) -> "_FilterPlan":
+        """Current, verified Search results for preview and Export (apply only)."""
+        static = None
+        if self._static_search_is_current() and self._static_digests is not None:
+            static = (self._static_exclusions, self._static_digests, self._static_scan_start, None)
+        temporal = self._temporal_search if self._temporal_search_is_current() else None
+        return _FilterPlan(mode="apply", static=static, temporal=temporal)
+
+    def _apply_preview_filters(self, blobs: list[BlobMetrics], fid: int) -> list[BlobMetrics]:
+        plan = self._search_filter_snapshot()
+        self._filter_preview_mismatch = _apply_filter_plan_to_frame(blobs, fid, plan, self._apply_static_outliers)
+        return blobs
+
+    def _goto_temporal_event(self, direction: int) -> None:
+        state = self._temporal_search
+        if state is None or self.reader is None:
+            return
+        frames = state.result.event_frames()
+        if not frames:
+            self.set_status("No temporal merge candidates to show.")
+            return
+        current = int(self.current_frame)
+        if direction > 0:
+            target = next((f for f in frames if f > current), frames[0])
+        else:
+            target = next((f for f in reversed(frames) if f < current), frames[-1])
+        self.set_frame(target)
+
+    def _processing_filter_plan(self) -> _FilterPlan:
+        static = None
+        if self._static_search_is_current() and self._static_digests is not None:
+            args = (int(self.static_frame_window_var.get()), float(self.static_presence_var.get()),
+                    float(self.static_iou_var.get()), float(self.static_max_movement_var.get()))
+            static = (dict(self._static_exclusions), self._static_digests, self._static_scan_start, args)
+        temporal = self._temporal_search if self._temporal_search_is_current() else None
+        return _FilterPlan(mode="processing", static=static, temporal=temporal)
+
+    def _report_scan_progress(self, label: str, n: int, total: int, started: float, scale: float) -> None:
+        if not (n == 1 or n % 25 == 0 or n == total):
+            return
+        rate = n / max(1e-9, time.perf_counter() - started)
+        self._set_progress_popup(
+            f"{label}: {n}/{total} ({100 * n / total:.0f}%)\n"
+            f"speed={rate:.1f} fps / remaining={self._format_seconds((total - n) / max(rate, 1e-9))}",
+            scale * n / total,
+        )
+
+    def search_persistent_static_blobs(self) -> None:
+        self.search_optional_filters("static")
+
+    def search_temporal_merges(self) -> None:
+        self.search_optional_filters("temporal")
+
+    def search_optional_filters(self, requester: str) -> None:
+        """One ordered scan feeds every enabled filter whose results are stale.
+
+        Frames are decoded and segmented once even when both the
+        persistent-static and the temporal-merge filters need data. A
+        temporal parameter change only re-evaluates the stored graph.
+        """
+        if self.reader is None or self.progress_popup is not None:
+            return
+        static_on = bool(self.static_exclusion_enabled_var.get())
+        temporal_on = bool(self.temporal_merge_enabled_var.get())
+        if not (static_on or temporal_on):
+            return
+        title = "Temporal merges" if requester == "temporal" else "Persistent static blobs"
+        if self.analysis_is_stale or (self._needs_area_analysis() and not self.analysis_iqr_stats):
+            messagebox.showwarning(title, "Run Analyze with the current segmentation settings first.")
+            return
+        run_static = static_on and (requester == "static" or not self._static_search_is_current())
+        run_temporal = temporal_on and (requester == "temporal" or not self._temporal_search_is_current())
+        scan_temporal = run_temporal and not self._temporal_graph_reusable()
+        try:
+            start, end = self._search_frame_range()
+            if start > end:
+                raise ValueError("Invalid training-frame range.")
+            static_args = None
+            if run_static:
+                from main.persistent_static_blobs import PersistentStaticScanner
+                window = int(self.static_frame_window_var.get())
+                static_args = (window, float(self.static_presence_var.get()),
+                               float(self.static_iou_var.get()), float(self.static_max_movement_var.get()))
+                if not 2 <= window <= 2000:
+                    raise ValueError("Frame window must be between 2 and 2000.")
+                if end - start + 1 < window:
+                    raise ValueError("Frame window exceeds the selected training-frame range.")
+                PersistentStaticScanner(*static_args)  # validate thresholds now
+            params = self._temporal_params() if run_temporal else None
+            static_key = self._static_search_key() if run_static else None
+            geometry_key = self._temporal_geometry_key()
+            kinds_key = self._temporal_kinds_key()
+            eval_key = self._temporal_eval_key()
+            reclassifiable = not self._temporal_geometry_dependent()
             cfg = self._capture_seg_config()
             result_match = self._result_match
             bounds = self._bounds_from_fixed_stats(self.analysis_iqr_stats)
-            path = self.video_path_var.get().strip()
-            total = end - start + 1
-        except (ValueError, TypeError) as exc:
-            messagebox.showerror("Persistent static blobs", str(exc))
+            area_bounds = self._current_area_bounds_or_none()
+            image_shape = (int(self.reader.height), int(self.reader.width))
+        except (ValueError, TypeError, tk.TclError) as exc:
+            messagebox.showerror(title, str(exc))
             return
 
-        self._static_search_signature = None
-        self._static_exclusions.clear()
-        self.static_search_status_var.set("Searching...")
-        self._static_search_glow.set_active(False)
+        if run_static:
+            self._static_search_signature = None
+            self._static_exclusions = {}
+            self._static_digests = None
+            self.static_search_status_var.set("Searching...")
+        if run_temporal:
+            self.temporal_search_status_var.set("Searching..." if scan_temporal else "Evaluating...")
         self._prefetch_cancel.set()
         self.reader.clear_cache()
-        error: list[Exception | None] = [None]
+        outcome: dict[str, object] = {}
+        error: list[Optional[Exception]] = [None]
+        previous = self._temporal_search
 
         def work():
-            cap = cv2.VideoCapture(path)
-            if not cap.isOpened():
-                error[0] = RuntimeError(f"Cannot open video: {path}")
-                return False
+            from main.frame_scan import frame_blob_digest
+            from main.persistent_static_blobs import PersistentStaticScanner
+            from main.temporal_merge_blobs import (
+                TemporalMergeGraphBuilder, evaluate_temporal_merges,
+            )
             try:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-                for n, fid in enumerate(range(start, end + 1), 1):
+                graph = previous.graph if (run_temporal and not scan_temporal) else None
+                if run_static or scan_temporal:
+                    scanner = PersistentStaticScanner(*static_args) if run_static else None
+                    builder = TemporalMergeGraphBuilder(image_shape) if scan_temporal else None
+                    context = _FrameContext(cfg, image_shape) if scan_temporal else None
+                    total = end - start + 1
+                    digests = np.zeros(total, dtype=np.uint64)
+
+                    def segment(fid, frame):
+                        return _segment_blobs_with_config(frame, fid, cfg)
+
+                    started = time.perf_counter()
+                    label = "Searching optional filters"
+                    # Rasterizing runs here, next to classification: in a
+                    # second pool its per-blob Python work fought the
+                    # segmentation workers for the GIL and became ~30x slower.
+                    for n, (fid, blobs) in enumerate(self._ordered_frames(start, end, segment), 1):
+                        if self._progress_cancel:
+                            return False
+                        blobs = self._classify_frame(blobs, fid, cfg, bounds, result_match, image_shape)
+                        digest = frame_blob_digest(blobs)
+                        digests[fid - start] = digest
+                        if scanner is not None:
+                            scanner.add_frame(fid, blobs)
+                        if builder is not None:
+                            builder.add_frame(context.nodes(fid, blobs, digest))
+                        self._report_scan_progress(label, n, total, started, 90.0 if run_temporal else 100.0)
                     if self._progress_cancel:
                         return False
-                    ok, image = cap.read()
-                    if not ok or image is None:
-                        raise RuntimeError(f"Cannot decode frame {fid}.")
-                    blobs = _segment_blobs_with_config(image, fid, cfg)
-                    classified = self._classify_blobs(
-                        blobs, bounds, clone=False, result_match=result_match, frame_idx=fid,
-                    )
-                    if cfg.single_blob_smoothing_enabled:
-                        classified = _smooth_classified_blobs(classified, image.shape, cfg)
-                        classified = self._classify_blobs(
-                            classified, bounds, clone=False, result_match=result_match, frame_idx=fid,
-                        )
-                    scanner.add_frame(fid, classified)
-                    if n == 1 or n % 25 == 0 or n == total:
-                        self._set_progress_popup(
-                            f"Searching persistent static blobs: {n}/{total} ({100*n/total:.0f}%)",
-                            100.0 * n / total,
-                        )
+                    if scanner is not None:
+                        outcome["static"] = (scanner.excluded, digests, scanner.excluded_count,
+                                             scanner.qualifying_windows)
+                    if builder is not None:
+                        graph = builder.finish()
+                if run_temporal:
+                    self._set_progress_popup("Evaluating temporal merge evidence...", None)
+                    result = evaluate_temporal_merges(
+                        graph, params, area_bounds if reclassifiable else None)
+                    outcome["temporal"] = (graph, result)
                 return True
             except Exception as exc:
                 error[0] = exc
                 return False
-            finally:
-                cap.release()
 
-        ok = self._with_progress_popup("Persistent static blobs", "Searching...", work)
+        ok = self._with_progress_popup(title, "Searching...", work)
         if not ok:
-            self.static_search_status_var.set("Search cancelled or failed — press Search again")
-            self._static_search_glow.set_active(True)
+            if run_static:
+                self.static_search_status_var.set("Search cancelled or failed — press Search again")
+            if run_temporal:
+                self.temporal_search_status_var.set("Search cancelled or failed — press Search again")
+            self._refresh_search_glows()
             if error[0] is not None:
-                messagebox.showerror("Persistent static blobs", str(error[0]))
-            return
-        if snapshot_key != self._static_search_key():
-            self.static_search_status_var.set("Settings changed — press Search again")
-            self._static_search_glow.set_active(bool(self.static_exclusion_enabled_var.get()))
+                messagebox.showerror(title, str(error[0]))
             return
 
-        self._static_exclusions = scanner.excluded
-        self._static_search_signature = snapshot_key
-        self._static_search_glow.set_active(False)
-        self.static_search_status_var.set(
-            f"Found {scanner.excluded_count} blob occurrences "
-            f"in {scanner.qualifying_windows} qualifying windows."
-        )
+        if "static" in outcome:
+            if static_key != self._static_search_key():
+                self.static_search_status_var.set("Settings changed — press Search again")
+            else:
+                excluded, digests, count, windows = outcome["static"]
+                self._static_exclusions = excluded
+                self._static_digests = digests
+                self._static_scan_start = start
+                self._static_search_signature = static_key
+                self.static_search_status_var.set(
+                    f"Found {count} blob occurrences in {windows} qualifying windows.")
+        if "temporal" in outcome:
+            graph, result = outcome["temporal"]
+            if geometry_key != self._temporal_geometry_key():
+                self._temporal_search = None
+                self.temporal_search_status_var.set("Settings changed — press Search again")
+            else:
+                self._temporal_search = _TemporalSearchState(
+                    geometry_key=geometry_key, kinds_key=kinds_key, eval_key=eval_key,
+                    reclassifiable=reclassifiable, start=start, end=end,
+                    graph=graph, result=result, params=params,
+                )
+                self._update_temporal_status()
+        self._refresh_search_glows()
         self.redraw_current_frame()
-        self.set_status("Persistent static blob search completed")
+        if self._temporal_search is not None and "temporal" in outcome:
+            self.set_status("Temporal merges: " + self._temporal_summary_text(
+                self._temporal_search.result, detailed=True), auto_clear=False)
+        else:
+            self.set_status("Optional filter search completed")
 
     def _toggle_single_blob_smoothing_params(self):
         if self.single_blob_smoothing_enabled_var.get():
@@ -5957,6 +6530,8 @@ class CrossingReviewApp(ctk.CTk):
             height_outlier=blob.height_outlier,
             low_obb_aspect_outlier=blob.low_obb_aspect_outlier,
             persistent_static_outlier=blob.persistent_static_outlier,
+            temporal_merge_outlier=blob.temporal_merge_outlier,
+            temporal_merge_level=blob.temporal_merge_level,
             manual_outlier=blob.manual_outlier,
             is_crossing=blob.is_crossing,
             result_obb_count=blob.result_obb_count,
@@ -6047,12 +6622,18 @@ class CrossingReviewApp(ctk.CTk):
         bounds: Optional[dict[str, tuple[float, float]]] = None,
         *,
         clone: bool = True,
-        result_match: Optional["_ResultMatchConfig"] = None,
+        result_match=_UNSET,
         frame_idx: Optional[int] = None,
+        image_shape: Optional[tuple] = None,
     ) -> list[BlobMetrics]:
+        """Classify one frame's blobs.
+
+        Omitting ``result_match`` uses the live import; passing None means
+        disabled, so worker threads keep the snapshot they were given.
+        """
         if bounds is None:
             bounds = self.analysis_bounds
-        if result_match is None:
+        if result_match is _UNSET:
             result_match = self._result_match
         inputs = _restore_result_inputs(blobs)
         out = [self._clone_blob(b) for b in inputs] if clone else inputs
@@ -6078,7 +6659,8 @@ class CrossingReviewApp(ctk.CTk):
             b.result_source_frame = None
             b.is_crossing = bool(b.manual_outlier or b.area_outlier)
         if result_match is not None:
-            image_shape = (self.reader.height, self.reader.width) if self.reader is not None else None
+            if image_shape is None and self.reader is not None:
+                image_shape = (self.reader.height, self.reader.width)
             self._rescue_single_animal_outliers(
                 out, result_match, frame_idx=frame_idx, image_shape=image_shape,
             )
@@ -6399,7 +6981,7 @@ class CrossingReviewApp(ctk.CTk):
                 mask = _draw_blob_union_mask(mask.shape, classified)
             elif any(b.result_generated for b in classified):
                 mask = _draw_blob_union_mask(mask.shape, classified)
-            return mask, self._apply_static_outliers(classified, self.current_frame)
+            return mask, self._apply_preview_filters(classified, self.current_frame)
         # Before analysis there are no fixed area bounds. Imported OBBs can
         # still identify entirely missed regions that must be removed.
         if self._result_match is not None:
@@ -6431,26 +7013,11 @@ class CrossingReviewApp(ctk.CTk):
         result_obbs: "Optional[np.ndarray]" = None,
         roi_reverse: bool = False,
     ) -> np.ndarray:
-        """Render a single frame with ORANGE/CYAN overlay -- same visual as the GUI preview."""
+        """Render a single frame with the same blob colors as the GUI preview."""
         base = frame_bgr.copy()
         _draw_roi_polygons(base, roi_sets, frame_idx, roi_reverse)
 
-        if show_overlay:
-            overlay = np.zeros_like(base)
-            for b in blobs:
-                color = GREEN if b.persistent_static_outlier else (OUTLIER_COLOR if b.is_crossing else OBB_COLOR)
-                cv2.drawContours(overlay, [b.contour], -1, color, thickness=cv2.FILLED)
-            base = cv2.addWeighted(base, 1.0, overlay, 0.35, 0)
-
-        for b in blobs:
-            color = GREEN if b.persistent_static_outlier else (OUTLIER_COLOR if b.is_crossing else OBB_COLOR)
-            if show_contours:
-                cv2.drawContours(base, [b.contour], -1, color, 2, cv2.LINE_AA)
-            cx_b = int(round(b.center_x))
-            cy_b = int(round(b.center_y))
-            if show_centers:
-                cv2.circle(base, (cx_b, cy_b), 2, WHITE, -1, cv2.LINE_AA)
-
+        base = _draw_blob_overlays(base, blobs, show_overlay, show_contours, show_centers)
         _draw_result_obbs(base, result_obbs)
 
         return base
@@ -6460,6 +7027,7 @@ class CrossingReviewApp(ctk.CTk):
             return np.zeros((480, 640, 3), dtype=np.uint8)
 
         frame_bgr = self.frame_bgr_cache
+        self._filter_preview_mismatch = False
         _, blobs = self._classified_current_frame()
         self._current_blobs = blobs
         kept = sum(1 for b in blobs if not b.is_crossing)
@@ -6469,32 +7037,28 @@ class CrossingReviewApp(ctk.CTk):
 
         stale_text = " / stale" if self.analysis_is_stale and self.analysis_bounds else ""
         result_text = f" / result-single {rescued} / outlier OBBs {missing}" if self._result_match is not None else ""
+        temporal_text = ""
+        if self.temporal_merge_enabled_var.get() and self._temporal_search_is_current():
+            excluded = sum(1 for b in blobs if b.temporal_merge_outlier)
+            candidates = sum(1 for b in blobs if b.temporal_merge_level and not b.temporal_merge_outlier)
+            temporal_text = f" / temporal merges {excluded} (+{candidates} candidates)"
+        if self._filter_preview_mismatch:
+            temporal_text += " / filters n/a (segmentation differs from Search)"
         self.preview_title_var.set(
             f"frame {self.current_frame} / blobs {len(blobs)} / kept {kept} / "
-            f"outliers {outliers}{result_text}{stale_text}"
+            f"outliers {outliers}{result_text}{temporal_text}{stale_text}"
         )
+        self._refresh_search_glows()
+        if self.temporal_merge_enabled_var.get():
+            self._update_temporal_status()
 
         base = frame_bgr.copy()
 
         if draw_roi:
             _draw_roi_polygons(base, self.roi_sets, self.current_frame, self.roi_reverse_var.get())
 
-        if self.show_overlay_var.get():
-            overlay = np.zeros_like(base)
-            for b in blobs:
-                color = GREEN if b.persistent_static_outlier else (OUTLIER_COLOR if b.is_crossing else OBB_COLOR)
-                cv2.drawContours(overlay, [b.contour], -1, color, thickness=cv2.FILLED)
-            base = cv2.addWeighted(base, 1.0, overlay, 0.35, 0)
-
-        for b in blobs:
-            color = GREEN if b.persistent_static_outlier else (OUTLIER_COLOR if b.is_crossing else OBB_COLOR)
-            if self.show_contours_var.get():
-                cv2.drawContours(base, [b.contour], -1, color, 2, cv2.LINE_AA)
-            cx = int(round(b.center_x))
-            cy = int(round(b.center_y))
-            if self.show_centers_var.get():
-                cv2.circle(base, (cx, cy), 2, WHITE, -1, cv2.LINE_AA)
-
+        base = _draw_blob_overlays(
+            base, blobs, self.show_overlay_var.get(), self.show_contours_var.get(), self.show_centers_var.get())
         _draw_result_obbs(base, self._current_result_obbs())
 
         # IQR bounds are edited in the boxplot controls, not over the video.
@@ -6615,6 +7179,12 @@ class CrossingReviewApp(ctk.CTk):
                 lines.append(f"Source blob OBB coverage: {blob.result_obb_coverage * 100:.0f}%")
             if blob.result_area_outlier:
                 lines.append("Outside Result area bounds")
+        if blob.persistent_static_outlier:
+            lines.append("Persistent static blob")
+        if blob.temporal_merge_level:
+            level = _TEMPORAL_LEVEL_NAMES.get(int(blob.temporal_merge_level), "")
+            state = "excluded" if blob.temporal_merge_outlier else "candidate only"
+            lines.append(f"Temporal merge: {level} ({state})")
         lines.append("outlier" if blob.is_crossing else "non-outlier")
         if blob.result_single:
             lines.append("kept as one animal (imported OBB)")
@@ -7254,6 +7824,7 @@ class CrossingReviewApp(ctk.CTk):
             protected_area_bounds=protected_area_bounds,
             single_blob_smoothing_enabled=bool(self.single_blob_smoothing_enabled_var.get()),
             single_blob_smoothing_level=max(1, min(20, int(self.single_blob_smoothing_level_var.get()))),
+            use_gpu=bool(_CUDA_AVAILABLE and _torch is not None),
         )
 
     def _additional_outlier_backgrounds_for_config(self) -> dict[str, np.ndarray]:
@@ -7281,6 +7852,75 @@ class CrossingReviewApp(ctk.CTk):
                     backgrounds[method] = background
         return backgrounds
 
+    def _classify_frame(self, blobs, fid, cfg, bounds, result_match, image_shape) -> list[BlobMetrics]:
+        """Final per-frame classification shared by Search, Processing and Export."""
+        classified = self._classify_blobs(
+            blobs, bounds, clone=False, result_match=result_match, frame_idx=fid, image_shape=image_shape)
+        if cfg.single_blob_smoothing_enabled:
+            classified = _smooth_classified_blobs(classified, image_shape, cfg)
+            classified = self._classify_blobs(
+                classified, bounds, clone=False, result_match=result_match, frame_idx=fid,
+                image_shape=image_shape)
+        return classified
+
+    def _ordered_frames(self, start: int, end: int, process):
+        """Yield (frame, process(frame, image)) in frame order with bounded memory.
+
+        One sequential decoder thread feeds a worker pool batch by batch; the
+        preview reader is used only where the dedicated decoder fails.
+        """
+        from main.frame_scan import iter_frames_in_order
+
+        reader = self.reader
+        frame_bytes = max(1, int(reader.width) * int(reader.height) * 3)
+        memory_batch_limit = max(1, PROCESSING_BATCH_MAX_BYTES // frame_bytes)
+        batch_size = min(max(1, _EXPORT_WORKERS * 2), memory_batch_limit)
+        # Decoding the next batch ahead keeps two batches in memory. Shrink the
+        # batch so both fit the same ceiling, but never below one full round for
+        # the pool: with frames that large, keep the previous batch size, worker
+        # occupancy and peak memory instead, and decode on demand.
+        prefetch = memory_batch_limit // 2 >= _EXPORT_WORKERS
+        if prefetch:
+            batch_size = min(batch_size, memory_batch_limit // 2)
+        decode_cap = cv2.VideoCapture(reader.video_path)
+        position = [-1]
+
+        # Use a dedicated sequential decoder.  The preview reader copies and
+        # caches frames, which is useful interactively but unnecessarily
+        # expensive while processing the entire range.  Only the single decoder
+        # thread touches decode_cap and position.
+        def decode_batch(fids: "list[int]") -> "list[tuple[int, np.ndarray]]":
+            frames_data: list[tuple[int, np.ndarray]] = []
+            for fid in fids:
+                frame = None
+                if decode_cap.isOpened():
+                    if position[0] != fid:
+                        decode_cap.set(cv2.CAP_PROP_POS_FRAMES, int(fid))
+                    ok, decoded = decode_cap.read()
+                    if ok and decoded is not None and decoded.size > 0:
+                        frame = decoded
+                        position[0] = fid + 1
+                    else:
+                        position[0] = -1
+                if frame is None:
+                    frame = reader.read_bgr(fid)
+                frames_data.append((fid, frame))
+            return frames_data
+
+        # Reduce OpenCV's internal thread count so each Python thread runs a truly
+        # single-threaded cv2 call -- the thread pool then provides parallelism.
+        prev_threads = cv2.getNumThreads()
+        cv2.setNumThreads(1)
+        try:
+            yield from iter_frames_in_order(
+                range(int(start), int(end) + 1), decode_batch, process,
+                workers=_EXPORT_WORKERS, batch_size=batch_size, prefetch=prefetch,
+                cancelled=lambda: self._progress_cancel,
+            )
+        finally:
+            decode_cap.release()
+            cv2.setNumThreads(prev_threads)
+
     def _build_export_source_all_frames(
         self,
         progress_start: float = 10.0,
@@ -7290,11 +7930,11 @@ class CrossingReviewApp(ctk.CTk):
         cfg: Optional[_SegConfig] = None,
         bounds: Optional[dict[str, tuple[float, float]]] = None,
         progress_label: str = "Processing frames",
-        result_match: Optional["_ResultMatchConfig"] = None,
-        static_exclusions: Optional[dict[int, set[int]]] = None,
+        result_match=_UNSET,
+        filters: Optional[_FilterPlan] = None,
     ) -> dict[int, list[BlobMetrics]]:
-        if static_exclusions is None:
-            static_exclusions = self._static_exclusions if self._static_search_signature is not None else {}
+        if filters is None:
+            filters = self._search_filter_snapshot()
         if bounds is None:
             if self._needs_area_analysis() and not self.analysis_iqr_stats:
                 raise RuntimeError("Please run Analyze sampled frames first.")
@@ -7307,9 +7947,10 @@ class CrossingReviewApp(ctk.CTk):
             bounds = dict(bounds)
         if cfg is None:
             cfg = self._capture_seg_config()
-        if result_match is None:
+        if result_match is _UNSET:
             result_match = self._result_match
         source: dict[int, list[BlobMetrics]] = {}
+        digests: dict[int, int] = {}
         if frame_start is None:
             frame_start = int(self.training_frame_start_var.get())
         if frame_end is None:
@@ -7320,99 +7961,130 @@ class CrossingReviewApp(ctk.CTk):
             raise RuntimeError("Invalid export frame range.")
         total = max(1, end_frame - start_frame + 1)
         start_time = time.perf_counter()
-        frame_bytes = max(1, int(self.reader.width) * int(self.reader.height) * 3)
-        memory_batch_limit = max(1, PROCESSING_BATCH_MAX_BYTES // frame_bytes)
-        batch_size = min(max(1, _EXPORT_WORKERS * 2), memory_batch_limit)
-        # Decoding the next batch ahead keeps two batches in memory. Shrink the
-        # batch so both fit the same ceiling, but never below one full round for
-        # the pool: with frames that large, keep the previous batch size, worker
-        # occupancy and peak memory instead, and decode on demand.
-        prefetch = memory_batch_limit // 2 >= _EXPORT_WORKERS
-        if prefetch:
-            batch_size = min(batch_size, memory_batch_limit // 2)
+        image_shape = (int(self.reader.height), int(self.reader.width))
 
-        accel = "GPU" if _CUDA_AVAILABLE else f"CPUx{_EXPORT_WORKERS}"
+        accel = "GPU" if cfg.use_gpu else f"CPUx{_EXPORT_WORKERS}"
         self._set_progress_popup(
             f"{progress_label}: 0/{total} (0%)\nstarting {accel}...",
             progress_start,
         )
+        from main.frame_scan import frame_blob_digest
 
-        # Reduce OpenCV's internal thread count so each Python thread runs a truly
-        # single-threaded cv2 call -- the thread pool then provides parallelism.
-        prev_threads = cv2.getNumThreads()
-        cv2.setNumThreads(1)
-        decode_cap = cv2.VideoCapture(self.reader.video_path)
-        decode_pos = -1
+        def segment(fid: int, frame: np.ndarray):
+            return _segment_blobs_with_config(frame, fid, cfg)
 
-        # Use a dedicated sequential decoder.  The preview reader copies and
-        # caches frames, which is useful interactively but unnecessarily
-        # expensive while processing the entire range.  Only the single decoder
-        # thread running this function touches decode_cap and decode_pos.
-        def decode_batch(fids: "list[int]") -> "list[tuple[int, np.ndarray]]":
-            nonlocal decode_pos
-            frames_data: list[tuple[int, np.ndarray]] = []
-            for fid in fids:
-                frame = None
-                if decode_cap.isOpened():
-                    if decode_pos != fid:
-                        decode_cap.set(cv2.CAP_PROP_POS_FRAMES, int(fid))
-                    ok, decoded = decode_cap.read()
-                    if ok and decoded is not None and decoded.size > 0:
-                        frame = decoded
-                        decode_pos = fid + 1
-                    else:
-                        decode_pos = -1
-                if frame is None:
-                    frame = self.reader.read_bgr(fid)
-                frames_data.append((fid, frame))
-            return frames_data
-
-        batches = [list(range(b, min(b + batch_size, end_frame + 1)))
-                   for b in range(start_frame, end_frame + 1, batch_size)]
-        try:
-            with ThreadPoolExecutor(max_workers=_EXPORT_WORKERS) as executor, \
-                    ThreadPoolExecutor(max_workers=1) as decoder:
-                pending = None
-                for index, batch_fids in enumerate(batches):
-                    if self._progress_cancel:
-                        return {}
-                    if pending is None:
-                        pending = decoder.submit(decode_batch, batch_fids)
-                    frames_data = pending.result()
-                    # Decode the next batch while the pool segments this one.
-                    pending = (decoder.submit(decode_batch, batches[index + 1])
-                               if prefetch and index + 1 < len(batches) else None)
-                    futures = {
-                        executor.submit(_segment_blobs_with_config, frame, fid, cfg): fid
-                        for fid, frame in frames_data
-                    }
-                    for future in as_completed(futures):
-                        fid = futures[future]
-                        blobs = future.result()
-                        source[fid] = self._classify_blobs(
-                            blobs, bounds, clone=False, result_match=result_match, frame_idx=fid)
-                        if cfg.single_blob_smoothing_enabled:
-                            source[fid] = _smooth_classified_blobs(
-                                source[fid], (self.reader.height, self.reader.width), cfg)
-                            source[fid] = self._classify_blobs(
-                                source[fid], bounds, clone=False, result_match=result_match, frame_idx=fid)
-                        self._apply_static_outliers(source[fid], fid, static_exclusions)
-
-                    n = batch_fids[-1] + 1 - start_frame
-                    elapsed = max(1e-9, time.perf_counter() - start_time)
-                    fps = n / elapsed
-                    eta = max(0, total - n) / fps if fps > 0 else 0.0
-                    frame_pct = 100.0 * n / total
-                    pct = progress_start + (progress_end - progress_start) * n / total
-                    self._set_progress_popup(
-                        f"{progress_label}: {n}/{total} ({frame_pct:.0f}%)\n"
-                        f"speed={fps:.1f} fps / remaining={self._format_seconds(eta)}",
-                        pct,
-                    )
-        finally:
-            decode_cap.release()
-            cv2.setNumThreads(prev_threads)
+        # Workers only segment. Classification stays on this thread, as before:
+        # its Python loops hold the GIL and get slower, not faster, in threads.
+        report_every = max(1, _EXPORT_WORKERS * 2)
+        for n, (fid, blobs) in enumerate(self._ordered_frames(start_frame, end_frame, segment), 1):
+            if self._progress_cancel:
+                return {}
+            blobs = self._classify_frame(blobs, fid, cfg, bounds, result_match, image_shape)
+            source[fid] = blobs
+            digests[fid] = frame_blob_digest(blobs)
+            if n % report_every == 0 or n == total:
+                elapsed = max(1e-9, time.perf_counter() - start_time)
+                fps = n / elapsed
+                eta = max(0, total - n) / fps if fps > 0 else 0.0
+                frame_pct = 100.0 * n / total
+                pct = progress_start + (progress_end - progress_start) * n / total
+                self._set_progress_popup(
+                    f"{progress_label}: {n}/{total} ({frame_pct:.0f}%)\n"
+                    f"speed={fps:.1f} fps / remaining={self._format_seconds(eta)}",
+                    pct,
+                )
+        if self._progress_cancel:
+            return {}
+        self._apply_filters_to_source(source, digests, filters, cfg, image_shape)
         return source
+
+    def _apply_filters_to_source(
+        self, source: dict[int, list[BlobMetrics]], digests: dict[int, int],
+        plan: _FilterPlan, cfg: _SegConfig, image_shape: tuple,
+    ) -> None:
+        """Apply the static and temporal filters to the classified frames.
+
+        Processing reuses Search results only if every searched frame has the
+        same blob digest; otherwise (for example after a GPU fallback) both
+        filters are recomputed on these exact blobs. Export draws Search
+        results only on frames whose digest matches.
+        """
+        stats = plan.stats
+        frames = sorted(source)
+        stats["frames"] = len(frames)
+        if plan.static is None and plan.temporal is None:
+            return
+        if plan.mode == "apply":
+            mismatched = 0
+            for fid in frames:
+                mismatched += _apply_filter_plan_to_frame(source[fid], fid, plan, self._apply_static_outliers)
+            stats["mismatched_frames"] = mismatched
+            return
+
+        def matches(search_digests, first: int) -> int:
+            different = 0
+            for fid in frames:
+                index = fid - first
+                if not 0 <= index < len(search_digests) or int(search_digests[index]) != digests[fid]:
+                    different += 1
+            return different
+
+        base = {fid: [bool(b.is_crossing) for b in source[fid]] for fid in frames}
+        static_exclusions = None
+        if plan.static is not None:
+            exclusions, search_digests, first, args = plan.static
+            different = matches(search_digests, first)
+            stats["static_mismatched_frames"] = different
+            if different:
+                from main.persistent_static_blobs import PersistentStaticScanner
+                self._set_progress_popup("Search data differs from Processing; recomputing static blobs...", None)
+                scanner = PersistentStaticScanner(*args)
+                for fid in frames:
+                    if self._progress_cancel:
+                        return
+                    scanner.add_frame(fid, source[fid])
+                static_exclusions = scanner.excluded
+                stats["static_recomputed"] = True
+            else:
+                static_exclusions = exclusions
+                stats["static_recomputed"] = False
+            stats["static_search_count"] = sum(len(v) for v in exclusions.values())
+        temporal_result = None
+        if plan.temporal is not None:
+            state = plan.temporal
+            different = matches(state.graph.digests, state.start)
+            stats["temporal_mismatched_frames"] = different
+            if different:
+                from main.temporal_merge_blobs import TemporalMergeGraphBuilder, evaluate_temporal_merges
+                self._set_progress_popup("Search data differs from Processing; recomputing temporal merges...", None)
+                context = _FrameContext(cfg, image_shape)
+                builder = TemporalMergeGraphBuilder(image_shape)
+                with ThreadPoolExecutor(max_workers=_EXPORT_WORKERS) as pool:
+                    for start in range(0, len(frames), 64):
+                        chunk = frames[start:start + 64]
+                        nodes = list(pool.map(lambda f: context.nodes(f, source[f], digests[f]), chunk))
+                        for item in nodes:
+                            builder.add_frame(item)
+                        if self._progress_cancel:
+                            return
+                temporal_result = evaluate_temporal_merges(builder.finish(), state.params)
+                stats["temporal_recomputed"] = True
+            else:
+                temporal_result = state.result
+                stats["temporal_recomputed"] = False
+            stats["temporal_result"] = temporal_result
+            stats["temporal_search_excluded"] = state.result.excluded_count
+        static_count = 0
+        for fid in frames:
+            blobs = source[fid]
+            if static_exclusions is not None:
+                self._apply_static_outliers(blobs, fid, static_exclusions, base[fid])
+                static_count += sum(1 for b in blobs if b.persistent_static_outlier)
+            if temporal_result is not None:
+                _apply_temporal_levels(blobs, temporal_result, fid, base[fid])
+        stats["static_count"] = static_count
+        if temporal_result is not None:
+            stats["temporal_count"] = sum(1 for fid in frames for b in source[fid] if b.temporal_merge_outlier)
 
     def _save_background_png_to_path(self, path: str):
         if self.background_bgr is None:
@@ -7523,8 +8195,46 @@ class CrossingReviewApp(ctk.CTk):
             f"Elapsed                    : {elapsed_str}  ({elapsed_sec:.2f} s)",
             f"Output                     : {pickle_path}",
         ]
+        lines += self._filter_log_lines(getattr(self, "_last_filter_stats", {}) or {})
         with open(log_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
+
+    def _filter_log_lines(self, stats: dict) -> list[str]:
+        lines = []
+        if self.static_exclusion_enabled_var.get():
+            lines.append(f"Persistent static exclusion : {int(stats.get('static_count', 0))} blobs")
+            if stats.get("static_recomputed"):
+                lines.append(
+                    f"  recomputed on Processing blobs ({int(stats.get('static_mismatched_frames', 0))} frames "
+                    f"differed from Search; Search found {int(stats.get('static_search_count', 0))})")
+        else:
+            lines.append("Persistent static exclusion : disabled")
+        if not self.temporal_merge_enabled_var.get():
+            lines.append("Temporal merge exclusion   : disabled")
+            return lines
+        result = stats.get("temporal_result")
+        mode = "include one-sided" if self.temporal_merge_mode_var.get() == "one_sided" else "bilateral only"
+        lines.append(f"Temporal merge exclusion   : {int(stats.get('temporal_count', 0))} blobs ({mode})")
+        if result is None:
+            return lines
+        counts, diag = result.counts, result.diagnostics
+        lines += [
+            f"  high / medium / uncertain : {counts['high_intervals']} / {counts['medium_intervals']} / "
+            f"{counts['uncertain_intervals']} intervals",
+            f"  high / medium blobs       : {counts['high_blobs']} / {counts['medium_blobs']}",
+            f"  horizon / confirmation    : {int(self.temporal_merge_horizon_var.get())} / "
+            f"{int(self.temporal_merge_confirm_var.get())} frames",
+            f"  containment threshold     : {diag.get('tau')} ({diag.get('tau_mode')}; "
+            f"self-containment P10={diag.get('self_containment_p10')}, pairs={diag.get('calibration_pairs')})",
+            f"  reliable for exclusion    : {'yes' if diag.get('reliable') else 'no'}",
+            f"  events CSV                : {os.path.join(self._default_output_dir(), TEMPORAL_EVENTS_CSV)}",
+        ]
+        if stats.get("temporal_recomputed"):
+            lines.append(
+                f"  recomputed on Processing blobs ({int(stats.get('temporal_mismatched_frames', 0))} frames "
+                f"differed from Search; Search excluded {int(stats.get('temporal_search_excluded', 0))})")
+        lines += [f"  warning: {text}" for text in diag.get("warnings", [])]
+        return lines
 
     def run_processing(self):
         if self.progress_popup is not None:
@@ -7558,13 +8268,22 @@ class CrossingReviewApp(ctk.CTk):
                 "or disable the option before Processing.",
             )
             return
+        if self.temporal_merge_enabled_var.get() and not self._temporal_search_is_current():
+            messagebox.showwarning(
+                "Temporal merges",
+                "Search has not been completed for the current settings.\n"
+                "Open 'Exclude temporal merges' and press Search, "
+                "or disable the option before Processing.",
+            )
+            return
 
         self._prefetch_cancel.set()
         self.reader.clear_cache()
         try:
             # Capture GUI state once on the main thread.  The processing worker
             # can then run without cross-thread Tk variable access.
-            static_exclusions = dict(self._static_exclusions) if self._static_search_is_current() else {}
+            filters = self._processing_filter_plan()
+            output_dir = self._default_output_dir()
             cfg = self._capture_seg_config()
             result_match = self._result_match
             bounds = self._bounds_from_fixed_stats(self.analysis_iqr_stats)
@@ -7609,7 +8328,7 @@ class CrossingReviewApp(ctk.CTk):
                     bounds=bounds,
                     progress_label="Processing frames",
                     result_match=result_match,
-                    static_exclusions=static_exclusions,
+                    filters=filters,
                 )
                 if self._progress_cancel or not source:
                     return False
@@ -7649,6 +8368,10 @@ class CrossingReviewApp(ctk.CTk):
                     source=source,
                     metadata=pickle_metadata,
                 )
+                temporal_result = filters.stats.get("temporal_result")
+                if temporal_result is not None:
+                    self._set_progress_popup(f"{frames_complete}\nSaving temporal merge events...", None)
+                    temporal_result.write_csv(os.path.join(output_dir, TEMPORAL_EVENTS_CSV))
                 if launch_tracking:
                     self._set_progress_popup(f"{frames_complete}\nLaunching Easy Tracking...", None)
                     self._launch_easy_tracking(project_dir, video_path)
@@ -7669,6 +8392,7 @@ class CrossingReviewApp(ctk.CTk):
                 self.set_status("", auto_clear=False)
             return
         config_path, background_path, pickle_path, project_dir = completed[0]
+        self._last_filter_stats = filters.stats
         # Tell the invoking Easy Tracking GUI where the actual completed
         # segmentation was saved. An existing segmentation GUI config can
         # redirect output to a different session than the launch argument.
@@ -7904,6 +8628,11 @@ class CrossingReviewApp(ctk.CTk):
                 "Persistent static blobs", "Press Search before exporting labeled video.",
             )
             return
+        if self.temporal_merge_enabled_var.get() and not self._temporal_search_is_current():
+            messagebox.showwarning(
+                "Temporal merges", "Press Search before exporting labeled video.",
+            )
+            return
 
         options = self._show_export_labeled_video_dialog()
         if options is None:
@@ -7922,7 +8651,7 @@ class CrossingReviewApp(ctk.CTk):
         result_match = self._result_match
         show_result_obb = bool(self.result_import_show_obb_var.get())
         export_bounds = self._bounds_from_fixed_stats(self.analysis_iqr_stats)
-        static_exclusions = dict(self._static_exclusions) if self._static_search_is_current() else {}
+        filters = self._search_filter_snapshot()
         fps = self.reader.fps if self.reader.fps > 0 else 25.0
         h, w = self.reader.height, self.reader.width
 
@@ -7938,7 +8667,7 @@ class CrossingReviewApp(ctk.CTk):
                     bounds=export_bounds,
                     progress_label="Segmenting selected frames",
                     result_match=result_match,
-                    static_exclusions=static_exclusions,
+                    filters=filters,
                 )
                 if self._progress_cancel or not source:
                     return False
@@ -8001,7 +8730,12 @@ class CrossingReviewApp(ctk.CTk):
             return
         saved_path, saved_start, saved_end = completed[0]
         self.set_status(f"Labeled video saved: {saved_path}")
-        messagebox.showinfo("Completed", f"Labeled video saved:\n{saved_path}\nframes: {saved_start}-{saved_end}")
+        note = ""
+        mismatched = int(filters.stats.get("mismatched_frames", 0))
+        if mismatched:
+            note = (f"\n\n{mismatched} frame(s) segmented differently from the Search; "
+                    "optional filter colors were omitted there.")
+        messagebox.showinfo("Completed", f"Labeled video saved:\n{saved_path}\nframes: {saved_start}-{saved_end}{note}")
 
 
 def main():
