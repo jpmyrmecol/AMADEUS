@@ -345,7 +345,7 @@ def prepare_profile_environment(
 
 
 def ensure_linux_opencv_libgl() -> None:
-    """Check the mandatory OpenCV GL library without modifying the system."""
+    """Install Ubuntu libgl1 only when the mandatory OpenCV library is absent."""
     if not sys.platform.startswith("linux"):
         return
 
