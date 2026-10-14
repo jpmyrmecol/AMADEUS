@@ -413,6 +413,58 @@ def prepare_profile_environment(profile: str, previous_profile: str | None = Non
         shutil.rmtree(ENVIRONMENT_ROOT)
 
 
+def ensure_linux_opencv_libgl() -> None:
+    """Install Ubuntu's libgl1 only when OpenCV's libGL.so.1 is missing."""
+    if not sys.platform.startswith("linux"):
+        return
+
+    import ctypes
+
+    try:
+        ctypes.CDLL("libGL.so.1")
+        return
+    except OSError:
+        pass
+
+    import platform
+
+    if platform.freedesktop_os_release().get("ID") != "ubuntu":
+        raise RuntimeError(
+            "OpenCV needs libGL.so.1, which is missing. "
+            "Install the OpenGL runtime package for this Linux distribution."
+        )
+
+    apt_get = shutil.which("apt-get")
+    if apt_get is None:
+        raise RuntimeError("Ubuntu requires apt-get to install the missing libgl1 package.")
+    if os.geteuid() == 0:
+        prefix: list[str] = []
+    else:
+        sudo = shutil.which("sudo")
+        if sudo is None:
+            raise RuntimeError(
+                "OpenCV needs libGL.so.1. Install it with 'sudo apt update && "
+                "sudo apt install -y libgl1', then rerun AMADEUS."
+            )
+        prefix = [sudo]
+
+    print(
+        "[AMADEUS] OpenCV requires libGL.so.1; installing Ubuntu package libgl1 "
+        "(sudo may request your password)...",
+        flush=True,
+    )
+    subprocess.run([*prefix, apt_get, "update"], check=True)
+    subprocess.run([*prefix, apt_get, "install", "-y", "libgl1"], check=True)
+
+    try:
+        ctypes.CDLL("libGL.so.1")
+    except OSError as exc:
+        raise RuntimeError(
+            "libgl1 was installed but libGL.so.1 still cannot be loaded: "
+            f"{exc}"
+        ) from exc
+
+
 def verify_gui_environment() -> None:
     """Exercise CustomTkinter dropdowns under the supported Tk runtime."""
     code = """
@@ -905,6 +957,7 @@ def main() -> int:
         # any changes so an interrupted or failed setup is fully checked next time.
         READY_MARKER.unlink(missing_ok=True)
         check_uv_version(args.uv)
+        ensure_linux_opencv_libgl()
 
         profile = ""
         last_error: Exception | None = None
