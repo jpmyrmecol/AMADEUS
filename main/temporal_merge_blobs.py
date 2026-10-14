@@ -130,7 +130,10 @@ def _blob_flags(blob) -> int:
     manual = bool(getattr(blob, "manual_outlier", False))
     generated = bool(getattr(blob, "result_generated", False) or getattr(blob, "result_missing", False))
     flags = 0
-    if not bool(getattr(blob, "is_crossing", False)):
+    # Temporal tracking precedes Outlier Extraction: statistical area/shape
+    # exclusions must not erase an otherwise valid animal-history node.
+    # Only manual and synthetic regions cannot seed a confirmed animal.
+    if not (manual or generated):
         flags |= FLAG_NORMAL
     if manual or generated:
         flags |= FLAG_UNKNOWN
@@ -427,8 +430,10 @@ class TemporalMergeResult:
         return int(self.levels.get(int(frame), {}).get(int(blob_index), 0))
 
     def event_frames(self, minimum_level: int = LEVEL_MEDIUM) -> list[int]:
+        # All candidate types (including uncertain) share the violet overlay
+        # and must be navigable. Keep the legacy argument for compatibility.
         return sorted({int(row["first_flagged_frame"]) for row in self.intervals
-                       if row["level_code"] >= minimum_level and row["first_flagged_frame"] >= 0})
+                       if row["first_flagged_frame"] >= 0})
 
     def write_csv(self, path: str) -> None:
         columns = [
