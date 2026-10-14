@@ -426,19 +426,26 @@ class TemporalMergeResult:
         ]
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         temp = path + ".tmp"
-        with open(temp, "w", encoding="utf-8", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["# temporal merge diagnostics"] + [
-                f"{key}={value}" for key, value in self.diagnostics.items()
-                if not isinstance(value, (list, dict))] + [
-                f"warning={text}" for text in self.diagnostics.get("warnings", [])])
-            writer.writerow(columns)
-            for row in self.intervals:
-                writer.writerow([row.get(column, "") for column in columns])
-        os.replace(temp, path)
+        try:
+            with open(temp, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["# temporal merge diagnostics"] + [
+                    f"{key}={value}" for key, value in self.diagnostics.items()
+                    if not isinstance(value, (list, dict))] + [
+                    f"warning={text}" for text in self.diagnostics.get("warnings", [])])
+                writer.writerow(columns)
+                for row in self.intervals:
+                    writer.writerow([row.get(column, "") for column in columns])
+            os.replace(temp, path)
+        except OSError:
+            if os.path.exists(temp):
+                os.remove(temp)
+            raise
 
 
 def _inside(values: np.ndarray, bounds) -> np.ndarray:
+    """Same comparison as the GUI's float64 inside_bounds (float32 would round)."""
+    values = np.asarray(values, dtype=np.float64)
     lo, hi = float(bounds[0]), float(bounds[1])
     return (values >= lo) & (values <= hi)
 

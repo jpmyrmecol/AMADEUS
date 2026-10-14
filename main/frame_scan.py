@@ -3,14 +3,15 @@
 """Ordered, bounded-memory frame scanning shared by Search and Processing.
 
 Frames are decoded on one thread (sequential decoding is far cheaper than
-seeking) and processed by a worker pool one batch at a time. Results are
-handed to the caller in ascending frame order, so streaming detectors that
-need consecutive frames can consume a parallel scan. Only the current batch,
-plus the next decoded batch when prefetching, is ever held in memory.
+seeking) and processed by a worker pool batch by batch. Results are handed
+to the caller in ascending frame order, so streaming detectors that need
+consecutive frames can consume a parallel scan. Images of at most two batches
+(the one being processed and, when prefetching, the next decoded one) are
+held at a time.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from typing import Any, Callable, Iterator, Sequence
 
@@ -48,16 +49,27 @@ def iter_frames_in_order(
 
     ``decode_batch`` runs on a single decoder thread and must return one
     image for every requested frame. ``process`` runs on ``workers`` threads.
-    Workers complete in any order (``as_completed``); results are buffered
-    only until their batch is complete and then released in frame order.
+    A batch is submitted to the pool before the previous batch's results are
+    handed out, so the caller's per-frame work overlaps the workers. At most
+    one decoded batch waits ahead (with ``prefetch``) besides the batch being
+    processed.
     """
     frame_ids = [int(fid) for fid in frame_ids]
     batch_size = max(1, int(batch_size))
     batches = [frame_ids[start:start + batch_size]
                for start in range(0, len(frame_ids), batch_size)]
+
+    def submitted(batch, frames):
+        futures = {fid: executor.submit(process, fid, image) for fid, image in frames}
+        missing = [fid for fid in batch if fid not in futures]
+        if missing:
+            raise RuntimeError(f"Frame {missing[0]} was not decoded.")
+        return [(fid, futures[fid]) for fid in batch]
+
     with ThreadPoolExecutor(max_workers=max(1, int(workers))) as executor, \
             ThreadPoolExecutor(max_workers=1) as decoder:
         pending = None
+        previous: list = []
         for index, batch in enumerate(batches):
             if cancelled():
                 return
@@ -67,13 +79,12 @@ def iter_frames_in_order(
             # Decode the next batch while the pool processes this one.
             pending = (decoder.submit(decode_batch, batches[index + 1])
                        if prefetch and index + 1 < len(batches) else None)
-            futures = {executor.submit(process, fid, image): fid for fid, image in frames}
+            current = submitted(batch, frames)
             del frames
-            results: dict[int, Any] = {}
-            for future in as_completed(futures):
-                results[futures[future]] = future.result()
-            futures.clear()
-            for fid in batch:
-                if fid not in results:
-                    raise RuntimeError(f"Frame {fid} was not decoded.")
-                yield fid, results.pop(fid)
+            for fid, future in previous:
+                yield fid, future.result()
+                if cancelled():
+                    return
+            previous = current
+        for fid, future in previous:
+            yield fid, future.result()

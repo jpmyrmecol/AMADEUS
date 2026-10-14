@@ -2728,7 +2728,7 @@ class CrossingReviewApp(ctk.CTk):
         # Search results are intentionally not trusted from a saved config:
         # the current video must be searched again before exclusion.
         self._static_search_signature = None
-        self._static_exclusions.clear()
+        self._static_exclusions = {}
         self._static_digests = None
         self._toggle_static_options()
         self.static_search_status_var.set(
@@ -4307,7 +4307,7 @@ class CrossingReviewApp(ctk.CTk):
         fps = float(reader.fps) if reader.fps and reader.fps > 0 else 30.0
         self.static_frame_window_var.set(max(2, int(round(0.5 * fps))))
         self._static_search_signature = None
-        self._static_exclusions.clear()
+        self._static_exclusions = {}
         self._static_digests = None
         self.static_search_status_var.set(
             "Not searched — press Search before Processing"
@@ -5389,7 +5389,7 @@ class CrossingReviewApp(ctk.CTk):
             return
         had_results = self._static_search_signature is not None
         self._static_search_signature = None
-        self._static_exclusions.clear()
+        self._static_exclusions = {}
         self._static_digests = None
         self.static_search_status_var.set(
             "Not searched — press Search before Processing"
@@ -5614,7 +5614,8 @@ class CrossingReviewApp(ctk.CTk):
         """Current, verified Search results for preview and Export (apply only)."""
         static = None
         if self._static_search_is_current() and self._static_digests is not None:
-            static = (self._static_exclusions, self._static_digests, self._static_scan_start, None)
+            # Copies: a worker may read these while the user edits settings.
+            static = (dict(self._static_exclusions), self._static_digests, self._static_scan_start, None)
         temporal = self._temporal_search if self._temporal_search_is_current() else None
         return _FilterPlan(mode="apply", static=static, temporal=temporal)
 
@@ -5645,7 +5646,14 @@ class CrossingReviewApp(ctk.CTk):
                     float(self.static_iou_var.get()), float(self.static_max_movement_var.get()))
             static = (dict(self._static_exclusions), self._static_digests, self._static_scan_start, args)
         temporal = self._temporal_search if self._temporal_search_is_current() else None
-        return _FilterPlan(mode="processing", static=static, temporal=temporal)
+        plan = _FilterPlan(mode="processing", static=static, temporal=temporal)
+        # The log reports the settings this run used, not later GUI edits.
+        plan.stats.update(
+            static_enabled=static is not None,
+            temporal_enabled=temporal is not None,
+            temporal_params=temporal.params if temporal is not None else None,
+        )
+        return plan
 
     def _report_scan_progress(self, label: str, n: int, total: int, started: float, scale: float) -> None:
         if not (n == 1 or n % 25 == 0 or n == total):
@@ -8201,7 +8209,7 @@ class CrossingReviewApp(ctk.CTk):
 
     def _filter_log_lines(self, stats: dict) -> list[str]:
         lines = []
-        if self.static_exclusion_enabled_var.get():
+        if stats.get("static_enabled"):
             lines.append(f"Persistent static exclusion : {int(stats.get('static_count', 0))} blobs")
             if stats.get("static_recomputed"):
                 lines.append(
@@ -8209,11 +8217,12 @@ class CrossingReviewApp(ctk.CTk):
                     f"differed from Search; Search found {int(stats.get('static_search_count', 0))})")
         else:
             lines.append("Persistent static exclusion : disabled")
-        if not self.temporal_merge_enabled_var.get():
+        params = stats.get("temporal_params")
+        if not stats.get("temporal_enabled") or params is None:
             lines.append("Temporal merge exclusion   : disabled")
             return lines
         result = stats.get("temporal_result")
-        mode = "include one-sided" if self.temporal_merge_mode_var.get() == "one_sided" else "bilateral only"
+        mode = "include one-sided" if params.include_one_sided else "bilateral only"
         lines.append(f"Temporal merge exclusion   : {int(stats.get('temporal_count', 0))} blobs ({mode})")
         if result is None:
             return lines
@@ -8222,12 +8231,13 @@ class CrossingReviewApp(ctk.CTk):
             f"  high / medium / uncertain : {counts['high_intervals']} / {counts['medium_intervals']} / "
             f"{counts['uncertain_intervals']} intervals",
             f"  high / medium blobs       : {counts['high_blobs']} / {counts['medium_blobs']}",
-            f"  horizon / confirmation    : {int(self.temporal_merge_horizon_var.get())} / "
-            f"{int(self.temporal_merge_confirm_var.get())} frames",
+            f"  horizon / confirmation    : {int(params.horizon_frames)} / "
+            f"{int(params.confirm_frames)} frames",
             f"  containment threshold     : {diag.get('tau')} ({diag.get('tau_mode')}; "
             f"self-containment P10={diag.get('self_containment_p10')}, pairs={diag.get('calibration_pairs')})",
             f"  reliable for exclusion    : {'yes' if diag.get('reliable') else 'no'}",
-            f"  events CSV                : {os.path.join(self._default_output_dir(), TEMPORAL_EVENTS_CSV)}",
+            f"  events CSV                : {os.path.join(self._default_output_dir(), TEMPORAL_EVENTS_CSV)}"
+            + (f" (NOT WRITTEN: {stats['csv_error']})" if stats.get("csv_error") else ""),
         ]
         if stats.get("temporal_recomputed"):
             lines.append(
@@ -8371,7 +8381,11 @@ class CrossingReviewApp(ctk.CTk):
                 temporal_result = filters.stats.get("temporal_result")
                 if temporal_result is not None:
                     self._set_progress_popup(f"{frames_complete}\nSaving temporal merge events...", None)
-                    temporal_result.write_csv(os.path.join(output_dir, TEMPORAL_EVENTS_CSV))
+                    try:
+                        temporal_result.write_csv(os.path.join(output_dir, TEMPORAL_EVENTS_CSV))
+                    except OSError as exc:
+                        # The pickle is complete; a locked report file must not fail the run.
+                        filters.stats["csv_error"] = str(exc)
                 if launch_tracking:
                     self._set_progress_popup(f"{frames_complete}\nLaunching Easy Tracking...", None)
                     self._launch_easy_tracking(project_dir, video_path)
