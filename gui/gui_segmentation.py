@@ -8,6 +8,7 @@ import importlib.metadata
 import platform
 import sys
 import csv
+import hashlib
 import json
 import math
 import pickle
@@ -2358,7 +2359,7 @@ class CrossingReviewApp(ctk.CTk):
             (getattr(self, "seg_section", None), False),
             (getattr(self, "roi_section", None), True),
             (getattr(self, "region_expansion_section", None), True),
-            (getattr(self, "temporal_blob_section", None), False),
+            (getattr(self, "temporal_blob_section", None), True),
             (getattr(self, "ana_section", None), False),
             (getattr(self, "result_section", None), True),
             (getattr(self, "additional_outlier_section", None), True),
@@ -2728,8 +2729,8 @@ class CrossingReviewApp(ctk.CTk):
         if "static_frame_window" not in settings and self.reader is not None:
             fps = float(self.reader.fps) if self.reader.fps and self.reader.fps > 0 else 30.0
             self.static_frame_window_var.set(max(2, int(round(0.5 * fps))))
-        # Search results are intentionally not trusted from a saved config:
-        # the current video must be searched again before exclusion.
+        # Static Search remains transient; temporal Search is restored from
+        # a validated disk cache after all video/ROI/background settings load.
         self._static_search_signature = None
         self._static_exclusions = {}
         self._static_digests = None
@@ -2876,6 +2877,7 @@ class CrossingReviewApp(ctk.CTk):
             except Exception as exc:
                 self.set_status(f"Background build failed: {exc}")
 
+        self._restore_temporal_search_cache()
         self._set_workflow_stage("all")
         self._update_analysis_dependent_buttons()
         self._schedule_area_iqr_boxplot_redraw()
@@ -3103,6 +3105,8 @@ class CrossingReviewApp(ctk.CTk):
             self._apply_config(config)
         finally:
             self._applying_config = False
+        self._update_temporal_status()
+        self._refresh_search_glows()
         if (
             self._additional_outlier_needs_background()
             and not self._additional_outlier_background_methods().issubset(
@@ -5528,6 +5532,103 @@ class CrossingReviewApp(ctk.CTk):
             return None
         return (float(bounds[0]), float(bounds[1])) if bounds else None
 
+    def _temporal_cache_path(self) -> str:
+        """Keep the Search graph next to its JSON config, not in the video."""
+        config = os.path.abspath(self.config_path or self._default_config_path())
+        return os.path.splitext(config)[0] + ".temporal_search.npz"
+
+    def _temporal_cache_fingerprint(self) -> str:
+        """Stable cross-session key; reject changed videos, settings and code.
+
+        _temporal_geometry_key intentionally contains runtime-only identifiers
+        (a background object's id and an edit revision); normalize those
+        while hashing the actual background image instead.
+        """
+        if self.reader is None:
+            raise ValueError("Load a video before saving temporal Search.")
+        video = os.path.abspath(self.video_path_var.get().strip())
+        st = os.stat(video)
+        # Inspect both ends so equal-sized/re-timestamped videos are unlikely
+        # to reuse a Search for unrelated footage.
+        video_hash = hashlib.blake2b(digest_size=16)
+        with open(video, "rb") as stream:
+            video_hash.update(stream.read(65536))
+            if st.st_size > 65536:
+                stream.seek(max(0, st.st_size - 65536))
+                video_hash.update(stream.read(65536))
+        key = list(self._temporal_geometry_key())
+        signature = list(key[4])
+        signature[-3] = None  # additional_outlier_revision: per-session only
+        if self.background_bgr is not None:
+            bg = np.ascontiguousarray(self.background_bgr)
+            signature[-1] = (
+                bg.shape, hashlib.blake2b(bg.tobytes(), digest_size=16).hexdigest())
+        else:
+            signature[-1] = None
+        key[4] = tuple(signature)
+        key[0] = (os.path.basename(video), int(st.st_size),
+                  int(st.st_mtime_ns), video_hash.hexdigest())
+        # A changed importer or segmentation implementation must not silently
+        # apply stale blob indices, even if visible controls have not changed.
+        source_hash = hashlib.blake2b(digest_size=16)
+        for source in (Path(__file__), PROJECT_ROOT / "main" / "temporal_merge_blobs.py",
+                       PROJECT_ROOT / "main" / "frame_scan.py"):
+            with open(source, "rb") as stream:
+                for block in iter(lambda: stream.read(262144), b""):
+                    source_hash.update(block)
+        if self.result_import_enabled_var.get():
+            imported = self.result_import_path_var.get().strip()
+            if imported and os.path.isfile(imported):
+                csv_stat = os.stat(imported)
+                key.append((int(csv_stat.st_size), int(csv_stat.st_mtime_ns)))
+        payload = repr((1, tuple(key), source_hash.hexdigest())).encode("utf-8")
+        return hashlib.blake2b(payload, digest_size=20).hexdigest()
+
+    def _save_temporal_search_cache(self) -> None:
+        """Persist only a current, enabled Search after saving its config."""
+        state = self._temporal_search
+        if state is None or not self._temporal_search_is_current():
+            return
+        from main.temporal_merge_cache import save_temporal_merge_cache
+
+        save_temporal_merge_cache(
+            self._temporal_cache_path(), state.graph, state.result, state.params,
+            self._temporal_cache_fingerprint(),
+        )
+
+    def _restore_temporal_search_cache(self) -> None:
+        """Restore verified Search data on config load; never trust stale blobs."""
+        if (not self.temporal_merge_enabled_var.get() or self.reader is None
+                or not self.config_path):
+            return
+        from main.temporal_merge_cache import load_temporal_merge_cache
+
+        try:
+            fingerprint = self._temporal_cache_fingerprint()
+            params = self._temporal_params()
+            cached = load_temporal_merge_cache(
+                self._temporal_cache_path(), fingerprint, params)
+            if cached is None:
+                return
+            graph, result = cached
+            start, end = self._search_frame_range()
+            if (graph.first_frame != start or graph.frame_count != end - start + 1
+                    or graph.image_shape != (int(self.reader.height), int(self.reader.width))):
+                return
+            self._temporal_search = _TemporalSearchState(
+                geometry_key=self._temporal_geometry_key(),
+                kinds_key=self._temporal_kinds_key(),
+                eval_key=self._temporal_eval_key(),
+                reclassifiable=not self._temporal_geometry_dependent(),
+                start=start, end=end, graph=graph, result=result, params=params,
+            )
+            self.temporal_search_status_var.set(
+                "Saved Search loaded — " + self._temporal_summary_text(result))
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            self._temporal_search = None
+            self.temporal_search_status_var.set(
+                f"Saved Search unavailable ({exc}); press Search")
+
     def _temporal_geometry_key(self) -> tuple:
         """Everything that changes blob geometry or order (needs a rescan)."""
         start, end = self._search_frame_range()
@@ -5824,6 +5925,12 @@ class CrossingReviewApp(ctk.CTk):
                     graph=graph, result=result, params=params,
                 )
                 self._update_temporal_status()
+                try:
+                    self._save_config_to_default_path()
+                    self._set_progress_popup("Saving temporal Search cache...", None)
+                    self._save_temporal_search_cache()
+                except (OSError, ValueError, TypeError) as exc:
+                    self.set_status(f"Temporal Search completed but could not save cache: {exc}")
         self._refresh_search_glows()
         self.redraw_current_frame()
         if "temporal" in outcome and not self.outlier_section_revealed:
