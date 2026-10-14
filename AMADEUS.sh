@@ -178,6 +178,13 @@ if [ "$(uname -s)" = Darwin ]; then
     setup_python="$AMADEUS_PYTHON"
 else
     setup_python=3.12
+    for minor in 12 11 10; do
+        candidate="$(command -v "python3.$minor" || true)"
+        if [ -n "$candidate" ]; then
+            setup_python="$candidate"
+            break
+        fi
+    done
 fi
 # Setup may rebuild .venv; keep the bootstrap interpreter outside that environment.
 if ! env -u VIRTUAL_ENV "$UV_EXE" --quiet run --no-project --isolated --python "$setup_python" python tools/setup_environment.py --uv "$UV_EXE"; then
