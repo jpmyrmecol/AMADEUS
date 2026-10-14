@@ -5569,8 +5569,8 @@ class CrossingReviewApp(ctk.CTk):
         )
 
     def _temporal_kinds_key(self) -> tuple:
-        """Resolved numeric area bounds decide which nodes are normal."""
-        return (self._current_area_bounds_or_none(),)
+        """Temporal evidence precedes statistical outliers and has no area-bound dependency."""
+        return ()
 
     def _temporal_search_is_current(self) -> bool:
         state = self._temporal_search
@@ -5708,10 +5708,15 @@ class CrossingReviewApp(ctk.CTk):
         if not (static_on or temporal_on):
             return
         title = "Temporal merges" if requester == "temporal" else "Persistent static blobs"
-        if self.analysis_is_stale or (self._needs_area_analysis() and not self.analysis_iqr_stats):
+        analysis_ready = not self.analysis_is_stale and (
+            not self._needs_area_analysis() or bool(self.analysis_iqr_stats))
+        if requester != "temporal" and not analysis_ready:
             messagebox.showwarning(title, "Run Analyze with the current segmentation settings first.")
             return
-        run_static = static_on and (requester == "static" or not self._static_search_is_current())
+        # Temporal Search is deliberately available before Outlier Extraction.
+        # Static filtering retains its existing dependence on Analyze.
+        run_static = static_on and analysis_ready and (
+            requester == "static" or not self._static_search_is_current())
         run_temporal = temporal_on and (requester == "temporal" or not self._temporal_search_is_current())
         scan_temporal = run_temporal and not self._temporal_graph_reusable()
         try:
@@ -5800,8 +5805,7 @@ class CrossingReviewApp(ctk.CTk):
                         graph = builder.finish()
                 if run_temporal:
                     self._set_progress_popup("Evaluating temporal merge evidence...", None)
-                    result = evaluate_temporal_merges(
-                        graph, params, area_bounds if reclassifiable else None)
+                    result = evaluate_temporal_merges(graph, params)
                     outcome["temporal"] = (graph, result)
                 return True
             except Exception as exc:
@@ -6858,6 +6862,11 @@ class CrossingReviewApp(ctk.CTk):
     def _run_analysis(self):
         if self.reader is None:
             return
+        # Temporal merging is the preceding step when enabled. Require its
+        # current graph before fitting area outlier limits from samples.
+        if self.temporal_merge_enabled_var.get() and not self._temporal_search_is_current():
+            messagebox.showwarning("Analysis", "Run Exclude temporal merges > Search before Analyze.")
+            return
         if self._segmentation_needs_background() and self.background_bgr is None:
             messagebox.showerror("Error", "In this mode, please compute the background first.")
             return
@@ -6880,6 +6889,7 @@ class CrossingReviewApp(ctk.CTk):
         # Snapshot every Tk-backed setting before entering the worker thread.
         cfg = self._capture_seg_config()
         result_match = self._result_match
+        temporal_state = self._temporal_search if self._temporal_search_is_current() else None
         area_method = self.area_outlier_method_var.get()
         area_iqr_min = float(self.area_iqr_min_var.get())
         area_iqr_max = float(self.area_iqr_max_var.get())
@@ -6922,11 +6932,27 @@ class CrossingReviewApp(ctk.CTk):
                 f"{frames_complete}\nComputing sampled-frame statistics...",
                 None,
             )
-            all_blobs = [
-                blob
-                for blobs in blobs_by_frame.values()
-                for blob in blobs
-            ]
+            # Exclude every violet temporal candidate from the single-animal
+            # population used to calibrate Outlier Extraction. Position maps
+            # are safe only when the Search digest matches the sample.
+            from main.frame_scan import frame_blob_digest
+            all_blobs = []
+            for fid, blobs in blobs_by_frame.items():
+                skip = ()
+                if temporal_state is not None:
+                    idx = int(fid) - int(temporal_state.start)
+                    if not 0 <= idx < temporal_state.graph.frame_count:
+                        raise RuntimeError("Temporal Search does not cover the analyzed frame range.")
+                    if frame_blob_digest(blobs) != int(temporal_state.graph.digests[idx]):
+                        raise RuntimeError(
+                            "Temporal Search and Analyze use different blob geometry; "
+                            "re-run Search with the current segmentation settings.")
+                    skip = temporal_state.result.levels.get(int(fid), ())
+                all_blobs.extend(blob for i, blob in enumerate(blobs) if i not in skip)
+            if not all_blobs:
+                raise RuntimeError(
+                    "No non-temporal blobs remain for Outlier Extraction statistics. "
+                    "Choose a different frame range or use Absolute bounds.")
             iqr_stats_fixed = self._compute_iqr_stats(all_blobs)
 
             if area_method == "absolute":
