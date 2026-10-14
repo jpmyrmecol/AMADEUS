@@ -39,7 +39,7 @@ Use the [installers on the website](https://amadeus.jpmyrmecol.com/#install), or
 | macOS on Apple Silicon | Open `AMADEUS.command` |
 | Linux / WSL2 | Run `bash AMADEUS.sh` |
 
-AMADEUS requires **Python 3.12.x** on all supported operating systems. The launchers select Python 3.12, and setup rebuilds the default managed `.venv` if it was created with Python 3.10 or 3.11. macOS additionally requires Tcl/Tk 8.6.
+AMADEUS accepts **Python 3.10–3.12 on Windows and Linux**, retaining a compatible existing Python. macOS requires **Python 3.12 with Tcl/Tk 8.6**. Linux requires **Tk 8.6 with the Xft font backend**. Ubuntu setup installs `python3-tk` and `libxft2` only when the distribution Python needs them; it installs `libgl1` only if OpenCV needs the missing library. These required system installations may request sudo. On systems without a compatible Tk runtime, setup reports the missing requirement.
 
 For platform requirements, installation details, and troubleshooting, see the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html).
 
