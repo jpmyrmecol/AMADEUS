@@ -88,7 +88,7 @@ RESULT_CSV_EXTS = [("Result CSV files", "*.csv"), ("All files", "*.*")]
 
 # Imported-result overlay: magenta stays readable next to the cyan/orange blobs.
 RESULT_OBB_COLOR = (255, 0, 255)
-_TEMPORAL_LEVEL_NAMES = {1: "medium", 2: "high"}
+_TEMPORAL_LEVEL_NAMES = {1: "medium", 2: "high", 3: "uncertain"}
 TEMPORAL_EVENTS_CSV = "temporal_merge_events.csv"
 # Sentinel: an argument that was not passed (None explicitly means disabled).
 _UNSET = object()
@@ -1405,29 +1405,6 @@ def _blob_color(blob: BlobMetrics) -> tuple:
     if blob.persistent_static_outlier:
         return STATIC_OUTLIER_COLOR
     return OUTLIER_COLOR if blob.is_crossing else OBB_COLOR
-
-
-def _draw_dashed_contour(image: np.ndarray, contour: np.ndarray, color, thickness: int = 2,
-                         dash: float = 6.0, gap: float = 4.0) -> None:
-    """OpenCV has no dashed polyline; draw alternating pieces along the outline."""
-    points = np.asarray(contour, dtype=np.float64).reshape(-1, 2)
-    if len(points) < 2:
-        return
-    closed = np.vstack([points, points[:1]])
-    lengths = np.hypot(*np.diff(closed, axis=0).T)
-    total = float(lengths.sum())
-    if total <= 0:
-        return
-    cumulative = np.r_[0.0, np.cumsum(lengths)]
-    period = dash + gap
-    position = 0.0
-    while position < total:
-        stops = np.linspace(position, min(position + dash, total), 4)
-        xs = np.interp(stops, cumulative, closed[:, 0])
-        ys = np.interp(stops, cumulative, closed[:, 1])
-        piece = np.round(np.stack([xs, ys], axis=1)).astype(np.int32).reshape(-1, 1, 2)
-        cv2.polylines(image, [piece], False, color, thickness, cv2.LINE_AA)
-        position += period
 
 
 def _draw_blob_overlays(base: np.ndarray, blobs: list, show_overlay: bool,
@@ -5483,7 +5460,8 @@ class CrossingReviewApp(ctk.CTk):
         self._toggle_temporal_options()
         self._on_temporal_parameters_changed()
         if self.reader is not None and not getattr(self, "_loading_video", False):
-            self._set_workflow_stage("temporal")
+            self._set_workflow_stage(
+                "temporal" if self.temporal_merge_enabled_var.get() else "analysis")
 
     def _on_temporal_parameters_changed(self) -> None:
         """Mark the evaluation stale; the stored graph is kept for re-evaluation."""
@@ -5848,6 +5826,8 @@ class CrossingReviewApp(ctk.CTk):
                 self._update_temporal_status()
         self._refresh_search_glows()
         self.redraw_current_frame()
+        if "temporal" in outcome and not self.outlier_section_revealed:
+            self._set_workflow_stage("analysis")
         if self._temporal_search is not None and "temporal" in outcome:
             self.set_status("Temporal merges: " + self._temporal_summary_text(
                 self._temporal_search.result, detailed=True), auto_clear=False)
