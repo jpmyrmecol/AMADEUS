@@ -1888,8 +1888,8 @@ class CrossingReviewApp(ctk.CTk):
         self.result_section = section("Result OBB Import (Optional)")
         self.additional_outlier_section = section("Additional Outlier (Optional)")
         self.single_blob_smoothing_section = section("Single-animal Smoothing (Optional)")
-        self.static_blob_section = section("Exclude persistent static blobs (Optional) [Beta]")
-        self.temporal_blob_section = section("Exclude temporal merges (Optional) [Beta]")
+        self.static_blob_section = section("Exclude persistent static blobs (Optional, Beta)")
+        self.temporal_blob_section = section("Exclude temporal merges (Optional, Beta)")
 
         seg = self.seg_section
         self._pack_combobox(seg, "Segmentation mode", self.segmentation_mode_var, ["background_diff", "dark_region", "bright_region", "dark_region_and_background_diff", "bright_region_and_background_diff"])
