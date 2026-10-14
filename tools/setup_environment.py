@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "gui"))
 from tools.runtime_profiles import PROFILES, check_support
-from tools.python_runtime import check_python_runtime, python_base_prefix, select_python_runtime
+from tools.python_runtime import check_python_runtime, python_base_executable, select_python_runtime
 from main.compute_telemetry import query_nvidia_driver_info
 from splash_ipc import signal_stop  # noqa: E402
 
@@ -323,8 +323,8 @@ def prepare_profile_environment(
         )
     if not rebuild and venv_python().exists():
         try:
-            running_base = python_base_prefix(str(venv_python()))
-            selected_base = python_base_prefix(python)
+            running_base = python_base_executable(str(venv_python()))
+            selected_base = python_base_executable(python)
             running_minor = subprocess.check_output(
                 [str(venv_python()), "-c",
                  "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
