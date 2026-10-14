@@ -684,8 +684,6 @@ def install_amadeus_command() -> Path:
             'cd /d "%AMADEUS_ROOT%"\n'
             'call "%AMADEUS_ROOT%\\.venv\\Scripts\\activate.bat"\n'
             "if errorlevel 1 exit /b 1\n"
-            'set /p AMADEUS_INSTALLED_VERSION=<"%AMADEUS_ROOT%\\VERSION"\n'
-            'echo [AMADEUS] Version: v%AMADEUS_INSTALLED_VERSION%\n'
             'echo [AMADEUS] Location: %AMADEUS_ROOT%\n'
             'set "AMADEUS_SPLASH_TOKEN=%RANDOM%%RANDOM%%RANDOM%"\n'
             'start "AMADEUS Splash" /min "%AMADEUS_ROOT%\\.venv\\Scripts\\python.exe" "%AMADEUS_ROOT%\\gui\\splash_standalone.py" "%AMADEUS_SPLASH_TOKEN%" "4"\n'
@@ -720,7 +718,6 @@ def install_amadeus_command() -> Path:
     command_path.write_text(
         "#!/usr/bin/env sh\n"
         f"cd {shlex.quote(str(PROJECT_ROOT))}\n"
-        'printf "[AMADEUS] Version: v%s\\n" "$(tr -d \'[:space:]\' < VERSION)"\n'
         'echo "[AMADEUS] Location: $PWD"\n'
         f"{shlex.quote(str(ENVIRONMENT_ROOT / 'bin' / 'amadeus'))} \"$@\"\n"
         "status=$?\n"
