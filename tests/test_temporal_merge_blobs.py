@@ -4,12 +4,14 @@
 
 import unittest
 from types import SimpleNamespace
+from dataclasses import fields
 
 import numpy as np
 
 from main.temporal_merge_blobs import (
     TemporalMergeGraphBuilder,
     TemporalMergeParams,
+    CONFIRM_FRAMES,
     evaluate_temporal_merges,
     extract_frame_nodes,
 )
@@ -41,7 +43,7 @@ def _graph(episodes):
 class TemporalMergeHighSensitivityTests(unittest.TestCase):
     def setUp(self):
         self.params = TemporalMergeParams(
-            horizon_frames=30, confirm_frames=2, tau=0.30, include_one_sided=True
+            tau=0.30, include_one_sided=True
         )
         # Just one pixel between separate bodies, far below one body length.
         self.separate = ((20, 25, 30, 35), (32, 25, 42, 35))
@@ -83,7 +85,7 @@ class TemporalMergeHighSensitivityTests(unittest.TestCase):
             (60, self.separate),
         ])
         params = TemporalMergeParams(
-            horizon_frames=200, confirm_frames=2, tau=0.30, include_one_sided=True
+            tau=0.30, include_one_sided=True
         )
         result = evaluate_temporal_merges(graph, params)
         self.assertTrue(result.diagnostics["reliable"])
@@ -145,9 +147,9 @@ class TemporalMergeHighSensitivityTests(unittest.TestCase):
             self.assertIn(0, result.excluded.get(fid, set()))
             self.assertNotIn(1, result.excluded.get(fid, set()))
 
-    def test_one_sided_merge_beyond_horizon_needs_its_mass(self):
-        # One-sided evidence lasts beyond H while the blob keeps its mass;
-        # shrinking to one body (an animal may have left unseen) ends it.
+    def test_one_sided_merge_keeps_evidence_as_long_as_mass_remains(self):
+        # One-sided evidence persists without a duration limit while mass
+        # remains; shrinking to one body ends the claim.
         shrunk = ((20, 25, 30, 35),)
         graph = _graph([(60, self.separate), (50, self.merged), (40, shrunk)])
         result = evaluate_temporal_merges(graph, self.params)
@@ -178,6 +180,64 @@ class TemporalMergeHighSensitivityTests(unittest.TestCase):
             self.assertNotIn(1, result.excluded.get(fid, set()))
         for fid in range(92, 152):
             self.assertNotIn(2, result.excluded.get(fid, set()))
+
+    def test_fixed_confirmation_and_no_horizon_parameter(self):
+        names = {field.name for field in fields(TemporalMergeParams)}
+        self.assertEqual(CONFIRM_FRAMES, 2)
+        self.assertNotIn("horizon_frames", names)
+        self.assertNotIn("confirm_frames", names)
+        self.assertEqual(TemporalMergeParams().share_rounding, 0.25)
+        self.assertEqual(TemporalMergeParams().one_sided_mass_ratio, 0.60)
+
+    def test_one_sided_evidence_survives_very_long_merge(self):
+        # After a long merged interval with no later split, the chain's
+        # retained mass, not an elapsed-frame cutoff, controls exclusion.
+        graph = _graph([(60, self.separate), (400, self.merged)])
+        result = evaluate_temporal_merges(graph, self.params)
+        self.assertTrue(result.diagnostics["reliable"])
+        for fid in (60, 89, 200, 350, 459):
+            self.assertEqual(result.level(fid, 0), 1)
+            self.assertIn(0, result.excluded.get(fid, set()))
+
+    def test_one_sided_mass_ratio_setting_affects_exclusion(self):
+        smaller = ((20, 25, 30, 35),)
+        graph = _graph([(60, self.separate), (50, self.merged), (40, smaller)])
+        strict = evaluate_temporal_merges(
+            graph, TemporalMergeParams(tau=0.30, include_one_sided=True,
+                                       one_sided_mass_ratio=0.60))
+        lenient = evaluate_temporal_merges(
+            graph, TemporalMergeParams(tau=0.30, include_one_sided=True,
+                                       one_sided_mass_ratio=0.40))
+        self.assertNotIn(0, strict.excluded.get(140, set()))
+        self.assertIn(0, lenient.excluded.get(140, set()))
+
+    def test_share_rounding_setting_affects_two_animal_group(self):
+        # About 61.5% of three animals' mass: floor(3*s+0.25)=2
+        # but floor(3*s+0)=1. Only the large split product is excluded.
+        third = (44, 25, 54, 35)
+        pair = (20, 25, 36, 35)
+        graph = _graph([
+            (60, (self.separate[0], self.separate[1], third)),
+            (10, ((20, 25, 54, 35),)),
+            (70, (pair, third)),
+        ])
+        default = evaluate_temporal_merges(
+            graph, TemporalMergeParams(tau=0.30, include_one_sided=True,
+                                       share_rounding=0.25))
+        conservative = evaluate_temporal_merges(
+            graph, TemporalMergeParams(tau=0.30, include_one_sided=True,
+                                       share_rounding=0.0))
+        self.assertIn(0, default.excluded.get(90, set()))
+        self.assertNotIn(0, conservative.excluded.get(90, set()))
+        self.assertNotIn(1, default.excluded.get(90, set()))
+
+    def test_invalid_mass_settings_are_rejected(self):
+        for bad in (-0.1, 1.01):
+            with self.assertRaises(ValueError):
+                TemporalMergeParams(share_rounding=bad).validate()
+        for bad in (0.0, 1.01):
+            with self.assertRaises(ValueError):
+                TemporalMergeParams(one_sided_mass_ratio=bad).validate()
 
     def test_morphological_shrink_before_merge_retains_confirmation(self):
         shrunk = ((20, 25, 26, 35), self.separate[1])
