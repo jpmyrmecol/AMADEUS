@@ -1,0 +1,8 @@
+# Enforce native line endings for command scripts on checkout.
+# CMD label discovery (CALL :label) requires CRLF consistently.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Unix/macOS shell entry points must remain LF.
+*.sh text eol=lf
+*.command text eol=lf
