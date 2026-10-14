@@ -5600,7 +5600,7 @@ class CrossingReviewApp(ctk.CTk):
     def _temporal_summary_text(result, detailed: bool = False) -> str:
         """One line for the sidebar (it has a fixed height); details for the status bar."""
         counts, diag = result.counts, result.diagnostics
-        candidates = counts['high_blobs'] + counts['medium_blobs']
+        candidates = sum(len(items) for items in result.levels.values())
         text = f"Temporal merges {candidates} · excluded {counts['excluded_blobs']}"
         if not diag.get("reliable"):
             text = "Unreliable overlap, nothing excluded · " + text
@@ -6912,8 +6912,8 @@ class CrossingReviewApp(ctk.CTk):
                 f"{frames_complete}\nComputing sampled-frame statistics...",
                 None,
             )
-            # Exclude every violet temporal candidate from the single-animal
-            # population used to calibrate Outlier Extraction. Position maps
+            # Exclude temporal crossings (not unconfirmed candidates) from
+            # the single-animal population used to calibrate Outlier Extraction. Position maps
             # are safe only when the Search digest matches the sample.
             from main.frame_scan import frame_blob_digest
             all_blobs = []
@@ -6927,7 +6927,7 @@ class CrossingReviewApp(ctk.CTk):
                         raise RuntimeError(
                             "Temporal Search and Analyze use different blob geometry; "
                             "re-run Search with the current segmentation settings.")
-                    skip = temporal_state.result.levels.get(int(fid), ())
+                    skip = temporal_state.result.excluded.get(int(fid), ())
                 all_blobs.extend(blob for i, blob in enumerate(blobs) if i not in skip)
             if not all_blobs:
                 raise RuntimeError(
