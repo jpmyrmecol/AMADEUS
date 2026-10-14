@@ -1871,7 +1871,7 @@ class CrossingReviewApp(ctk.CTk):
 
         self.seg_section = section("Background / Segmentation", expanded=True)
         self.roi_section = section("ROI (Optional)")
-        self.region_expansion_section = section("Region Expansion (Optional)")
+        self.region_expansion_section = section("Region Expansion (Optional, Beta)")
         self.ana_section = section("Outlier Extraction", expanded=True)
         self.analysis_gate_frame = ctk.CTkFrame(parent, corner_radius=0)
         ctk.CTkLabel(
@@ -1885,9 +1885,9 @@ class CrossingReviewApp(ctk.CTk):
             border_width=3, border_color="#777777",
         )
         self.analysis_start_button.pack(fill="x", padx=6, pady=(0, 6))
-        self.result_section = section("Result OBB Import (Optional)")
-        self.additional_outlier_section = section("Additional Outlier (Optional)")
-        self.single_blob_smoothing_section = section("Single-animal Smoothing (Optional)")
+        self.result_section = section("Result OBB Import (Optional, Beta)")
+        self.additional_outlier_section = section("Additional Outlier (Optional, Beta)")
+        self.single_blob_smoothing_section = section("Single-animal Smoothing (Optional, Beta)")
         self.static_blob_section = section("Exclude persistent static blobs (Optional, Beta)")
         self.temporal_blob_section = section("Exclude temporal merges (Optional, Beta)")
 
