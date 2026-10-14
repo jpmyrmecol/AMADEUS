@@ -55,6 +55,20 @@ def python_base_executable(python: str) -> str:
     ).strip()
 
 
+def stable_base_python(python: str) -> str:
+    """Return the persistent base executable; never accept uv's temporary build env."""
+    try:
+        base = Path(python_base_executable(python)).resolve(strict=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(f"Python is not usable: {python}") from exc
+    normalized = base.as_posix().lower()
+    if "/builds-v0/" in normalized or "/.tmp" in normalized or "/tmp/" in normalized:
+        raise RuntimeError(
+            f"Refusing a temporary Python as AMADEUS venv base: {base}"
+        )
+    return str(base)
+
+
 def _candidates() -> list[str]:
     if sys.platform == "darwin":
         candidates = [
@@ -108,18 +122,21 @@ def select_python_runtime(
     """Preserve existing compatible Python, then try system Python before installing Tk."""
     if requested:
         try:
-            check_python_runtime(requested, required_minor)
-        except subprocess.CalledProcessError as exc:
+            base = stable_base_python(requested)
+            check_python_runtime(base, required_minor)
+        except (subprocess.CalledProcessError, RuntimeError) as exc:
             raise RuntimeError(
-                f"Selected Python is incompatible: {requested}\n{exc.stderr}"
+                f"Selected Python is incompatible: {requested}\n"
+                f"{getattr(exc, 'stderr', '') or exc}"
             ) from exc
-        return requested
+        return base
 
     if existing.is_file():
         try:
-            check_python_runtime(str(existing), required_minor)
-            return str(existing)
-        except subprocess.CalledProcessError:
+            base = stable_base_python(str(existing))
+            check_python_runtime(base, required_minor)
+            return base
+        except (subprocess.CalledProcessError, RuntimeError):
             print("[AMADEUS] Existing Python/Tk is incompatible; selecting a supported Python.",
                   flush=True)
 
@@ -127,11 +144,12 @@ def select_python_runtime(
     for attempt in range(2):
         for candidate in _candidates():
             try:
-                check_python_runtime(candidate, required_minor)
-                print(f"[AMADEUS] Selected Python: {candidate}", flush=True)
-                return candidate
-            except subprocess.CalledProcessError as exc:
-                errors.append(f"{candidate}: {(exc.stderr or '').strip()[-220:]}")
+                base = stable_base_python(candidate)
+                check_python_runtime(base, required_minor)
+                print(f"[AMADEUS] Selected Python: {base}", flush=True)
+                return base
+            except (subprocess.CalledProcessError, RuntimeError) as exc:
+                errors.append(f"{candidate}: {(getattr(exc, 'stderr', '') or str(exc)).strip()[-220:]}")
         if attempt or not _install_ubuntu_tk():
             break
 
