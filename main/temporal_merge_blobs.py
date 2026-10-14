@@ -986,7 +986,7 @@ class _Evaluation:
             kind = self.start_kind[c] if forward else self.end_kind[c]
             t = int(self.frame[head])
             anc: dict = {}
-            if self.edge[head] or self.unknown[head] or self.result_single[head]:
+            if self.edge[head] or self.unknown[head]:
                 ev = _fresh(c)
             elif kind == ("merge" if forward else "split"):
                 ev, anc = self._combine(c, head, forward, boundary, lineage)
@@ -1024,8 +1024,6 @@ class _Evaluation:
         but part of the mass flowing to another blob, a nearby unexplained
         birth/death, or a blob too small for its largest member is.
         """
-        if self.result_single[v]:
-            return "result_single"
         if self.area[v] < CONTAINMENT_AREA_RATIO * ev.max_area:
             return "area_floor"
         secondary_limit = max(AMBIGUOUS_FRACTION * self.tau, SECONDARY_LINK_FLOOR)
@@ -1306,24 +1304,24 @@ class _Evaluation:
         high = (nf >= 2) & (nb >= 2)
         med_f = (nf >= 2) & f_direct & (f_frame >= 0)
         med_b = (nb >= 2) & b_direct & (b_frame >= 0)
-        # Beyond H a blob must also keep its mass: an animal that left unseen
-        # takes its area along, while occlusion alone shrinks a group less.
+        # One-sided evidence requires retained mass throughout the chain.
+        # Elapsed time alone does not invalidate an established merge.
         med_f &= self._keeps_mass(med_f, at_end=False)
         med_b &= self._keeps_mass(med_b, at_end=True)
         medium = (med_f | med_b) & ~high
         level = np.zeros(n, dtype=np.int8)
-        target = flaggable & ~self.result_single
+        target = flaggable
         level[high & target] = LEVEL_HIGH
         level[medium & target] = LEVEL_MEDIUM
         evidence = (nf >= 2) | (nb >= 2)
-        uncertain = evidence & flaggable & (level == 0) & ~self.result_single
+        uncertain = evidence & flaggable & (level == 0)
         # Expose every temporal merge candidate, including uncertain ones,
         # with the same violet appearance. Only verified exclusions affect
         # the actual training mask.
         level[uncertain] = LEVEL_UNCERTAIN
         # Interval confidence also counts blobs that are already outliers
         # (for example side-by-side merges caught by the area bounds).
-        consistent = ~self.result_single & ~self.unknown & ~self.edge
+        consistent = ~self.unknown & ~self.edge
         evidence_level = np.zeros(n, dtype=np.int8)
         evidence_level[medium & consistent] = LEVEL_MEDIUM
         evidence_level[high & consistent] = LEVEL_HIGH
@@ -1333,14 +1331,14 @@ class _Evaluation:
         if not auto:
             self.diag["warnings"].append(
                 "Automatic exclusion is disabled for this video: consecutive-frame overlap is "
-                "not reliable enough. Candidates are shown but not excluded.")
+                "not reliable enough. Temporal candidates are shown in violet but not excluded.")
         levels: dict[int, dict[int, int]] = {}
         excluded: dict[int, set[int]] = {}
         for node in np.flatnonzero(level):
             fid = int(self.frame[node]) + g.first_frame
             code = int(level[node])
             levels.setdefault(fid, {})[int(self.local[node])] = code
-            if auto and (code == LEVEL_HIGH or (exclude_medium and code == LEVEL_MEDIUM)):
+            if auto and (code == LEVEL_HIGH or (exclude_medium and code in (LEVEL_MEDIUM, LEVEL_UNCERTAIN))):
                 excluded.setdefault(fid, set()).add(int(self.local[node]))
         rows = self._report(level, evidence_level, uncertain, nf, nb, f_event, b_event, auto, exclude_medium)
         counts = {
@@ -1411,7 +1409,7 @@ class _Evaluation:
             if not auto:
                 excluded_nodes = nodes[:0]
             else:
-                excluded_nodes = nodes[(lv == LEVEL_HIGH) | (lv == LEVEL_MEDIUM)] if exclude_medium else high
+                excluded_nodes = nodes[lv > 0] if exclude_medium else high
             events = by_chain.get(c, [])
             merge = next((e for e in events if e["type"] == "merge"), None)
             split = next((e for e in events if e["type"] == "split"), None)
