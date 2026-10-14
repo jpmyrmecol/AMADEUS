@@ -2861,7 +2861,7 @@ class CrossingReviewApp(ctk.CTk):
 
         if legacy_additional_config:
             self.analysis_blobs_by_frame.clear()
-        self.analysis_outlier_frames.clear()
+            self.analysis_outlier_frames.clear()
             self.analysis_frames = []
             self.analysis_signature = None
             self.analysis_bounds = {}
