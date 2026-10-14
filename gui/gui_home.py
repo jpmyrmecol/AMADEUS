@@ -33,6 +33,7 @@ try:
         signal_stop,
     )
     from .splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
+    from .splash_geometry import SPLASH_LOGO_WIDTH_RATIO, configure_splash_window
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon, tk_font_spec
 except ImportError:  # Preserve direct execution with: python gui/gui_home.py
     from app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
@@ -48,6 +49,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_home.py
         signal_stop,
     )
     from splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
+    from splash_geometry import SPLASH_LOGO_WIDTH_RATIO, configure_splash_window
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon, tk_font_spec
 
 ctk.set_appearance_mode("dark")
@@ -137,13 +139,7 @@ def show_splash(root: ctk.CTk, reveal: bool = False) -> tk.Toplevel:
     """Show a fullscreen black window with the AMADEUS logo centered on it."""
     splash = tk.Toplevel(root)
     splash.configure(bg=SPLASH_BG)
-    screen_w = splash.winfo_screenwidth()
-    screen_h = splash.winfo_screenheight()
-    if sys.platform.startswith("linux"):
-        splash.overrideredirect(True)
-        splash.geometry(f"{screen_w}x{screen_h}+0+0")
-    else:
-        splash.attributes("-fullscreen", True)
+    screen_w, screen_h = configure_splash_window(splash)
     splash.attributes("-topmost", True)
 
     canvas = tk.Canvas(splash, width=screen_w, height=screen_h, bg=SPLASH_BG, highlightthickness=0, bd=0)
@@ -152,9 +148,12 @@ def show_splash(root: ctk.CTk, reveal: bool = False) -> tk.Toplevel:
 
     logo_path = gui_asset("logo_amadeus_splash.png")
     if logo_path.is_file():
-        # Pre-sized to match splash_standalone.py's rendering exactly, so the
-        # logo doesn't jump when handing off from that process.
-        photo = ImageTk.PhotoImage(Image.open(logo_path), master=splash)
+        with Image.open(logo_path) as source:
+            source = source.convert("RGBA")
+            target_w = max(1, round(screen_w * SPLASH_LOGO_WIDTH_RATIO))
+            target_h = max(1, round(source.height * (target_w / source.width)))
+            logo = source.resize((target_w, target_h), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(logo, master=splash)
         canvas.AMADEUS_SPLASH_PHOTO = photo  # keep a reference alive
         cx, cy = screen_w / 2, screen_h / 2
         canvas.create_image(cx, cy, image=photo)

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from PIL import Image, ImageTk
 
+from splash_geometry import SPLASH_LOGO_WIDTH_RATIO, configure_splash_window
 from splash_ipc import (
     closed_file_path,
     dismissed_file_path,
@@ -23,7 +24,6 @@ from splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
 POLL_MS = 100
 SAFETY_TIMEOUT_MS = 120_000
 SPLASH_BG = "black"
-SPLASH_LOGO_WIDTH_RATIO = 0.40  # logo width as a fraction of screen width
 
 
 def main() -> None:
@@ -55,15 +55,7 @@ def main() -> None:
 
     root = tk.Tk()
     root.configure(bg=SPLASH_BG)
-    screen_w = root.winfo_screenwidth()
-    screen_h = root.winfo_screenheight()
-    if sys.platform.startswith("linux"):
-        # WSLg/X11 can handle pointer events unreliably on Tk fullscreen
-        # windows. Use an equally sized borderless window instead.
-        root.overrideredirect(True)
-        root.geometry(f"{screen_w}x{screen_h}+0+0")
-    else:
-        root.attributes("-fullscreen", True)
+    screen_w, screen_h = configure_splash_window(root)
     root.attributes("-topmost", True)
     is_closed = False
 

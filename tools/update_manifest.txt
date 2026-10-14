@@ -34,6 +34,7 @@ gui/preview_playback_timing.py
 gui/project_paths.py
 gui/reverse_playback_buffer.py
 gui/runtime.py
+gui/splash_geometry.py
 gui/splash_ipc.py
 gui/splash_reveal.py
 gui/splash_standalone.py
