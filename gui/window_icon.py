@@ -34,27 +34,58 @@ def tk_font_spec(
     point_size: int,
     weight: str = "normal",
 ):
-    """Return a Linux font whose measured size and weight match the Home baseline.
+    """Return consistently sized Home fonts across Linux Tk font backends.
 
-    Windows and macOS keep their existing tuple behavior. On Linux, use the
-    Roboto family bundled with CustomTkinter when available; its Xft metrics
-    closely match the Windows Arial Home text. Keep Tk's native point sizing,
-    except for the measured 13-point corner text, where Roboto 12 matches the
-    Windows 19-pixel line height and 51-pixel "Update" width.
+    Xft provides scalable fonts; preserve the existing Roboto sizing there.
+    Some Linux builds of Tk 9 report the old "x11" font system instead,
+    where requested point sizes can render as tiny bitmap fonts. Calibrate
+    the *measured* line height against the Windows 96-DPI baseline in that
+    case rather than relying on nominal point sizes.
     """
     if not sys.platform.startswith("linux"):
         return family, point_size, weight
 
-    linux_family = family
-    linux_size = point_size
-    if family.casefold() == "arial":
-        families = {name.casefold(): name for name in tkfont.families(root)}
-        if "roboto" in families:
-            linux_family = families["roboto"]
-            if point_size == 13 and weight == "normal":
-                linux_size = 12
+    try:
+        backend = str(root.tk.call("tk::pkgconfig", "get", "fontsystem")).lower()
+    except tk.TclError:
+        backend = ""
 
-    return tkfont.Font(root=root, family=linux_family, size=linux_size, weight=weight)
+    if backend != "x11":
+        linux_family = family
+        linux_size = point_size
+        if family.casefold() == "arial":
+            families = {name.casefold(): name for name in tkfont.families(root)}
+            if "roboto" in families:
+                linux_family = families["roboto"]
+                if point_size == 13 and weight == "normal":
+                    linux_size = 12
+        return tkfont.Font(root=root, family=linux_family, size=linux_size, weight=weight)
+
+    target_px = max(1, round(point_size * 96.0 / 72.0))
+    font = tkfont.Font(root=root, family=family, size=point_size, weight=weight)
+
+    # Restore the measured-size correction originally used before the Xft
+    # runtime was added. Bound the search to avoid excessive Tk font probes.
+    low, high = 1, max(256, point_size * 8)
+    while low < high:
+        mid = (low + high) // 2
+        font.configure(size=mid)
+        measured = int(font.metrics("linespace"))
+        if measured < target_px:
+            low = mid + 1
+        else:
+            high = mid
+
+    candidates = range(max(1, low - 3), low + 4)
+    best_size = min(candidates, key=lambda size: _font_height_error(font, size, target_px))
+    font.configure(size=best_size)
+    return font
+
+
+def _font_height_error(font: tkfont.Font, size: int, target_px: int) -> int:
+    font.configure(size=size)
+    return abs(int(font.metrics("linespace")) - target_px)
+
 
 def configure_taskbar_identity() -> None:
     if os.name != "nt":
