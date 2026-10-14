@@ -278,7 +278,7 @@ def sync_environment(uv_executable: str, profile: str, python: str) -> None:
         "torchvision",
     ]
     environment = os.environ.copy()
-    # The bootstrap interpreter uses a temporary uv environment, not this project venv.
+    # The installer runs under a stable system Python, outside the managed .venv.
     environment.pop("VIRTUAL_ENV", None)
     environment["UV_PROJECT_ENVIRONMENT"] = str(ENVIRONMENT_ROOT)
     subprocess.run(command, cwd=PROJECT_ROOT, env=environment, check=True)
@@ -313,7 +313,10 @@ def prepare_profile_environment(
     if previous_profile is None:
         previous_profile = _ready_marker_profile()
     current = PROFILES[profile]
-    rebuild = bool(
+    # A broken interpreter symlink (e.g. a deleted uv temporary build) needs
+    # a clean recreation even when the accelerator profile has not changed.
+    rebuild = bool(ENVIRONMENT_ROOT.exists() and not venv_python().is_file())
+    rebuild = rebuild or bool(
         previous_profile is None and current.install_dependencies and venv_python().exists()
     )
     if previous_profile is not None and previous_profile != profile:
@@ -321,7 +324,7 @@ def prepare_profile_environment(
         rebuild = bool(
             (previous and previous.install_dependencies) or current.install_dependencies
         )
-    if not rebuild and venv_python().exists():
+    if not rebuild and venv_python().is_file():
         try:
             running_base = python_base_executable(str(venv_python()))
             selected_base = python_base_executable(python)
@@ -942,6 +945,14 @@ def main() -> int:
         verify_gui_environment()
         prepare_ffmpeg()
         install_amadeus_command()
+        # This must be executable after setup exits, with no ephemeral
+        # Python directory in its shebang or interpreter symlink.
+        if not venv_python().is_file():
+            raise RuntimeError("AMADEUS .venv Python is missing or points to a deleted interpreter.")
+        from tools.python_runtime import stable_base_python
+        stable_base_python(str(venv_python()))
+        subprocess.run([str(venv_python()), "-c",
+                        "import sys; assert sys.prefix != sys.base_prefix"], check=True)
         READY_MARKER.write_text(json.dumps(ready_identity(profile)), encoding="utf-8")
     except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
