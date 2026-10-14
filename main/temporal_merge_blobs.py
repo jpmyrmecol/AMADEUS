@@ -66,7 +66,7 @@ Decisions (only blobs that are normal after classification are flagged)
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import csv
 import itertools
 import math
@@ -365,7 +365,8 @@ class TemporalMergeGraph:
 
 LEVEL_MEDIUM = 1
 LEVEL_HIGH = 2
-LEVEL_NAMES = {LEVEL_MEDIUM: "medium", LEVEL_HIGH: "high"}
+LEVEL_UNCERTAIN = 3   # visually the same violet candidate, not an automatic exclusion
+LEVEL_NAMES = {LEVEL_MEDIUM: "medium", LEVEL_HIGH: "high", LEVEL_UNCERTAIN: "uncertain"}
 
 # Internal constants. Areas are relative to S_lo, the lower single-animal
 # scale (10th percentile of clean single-blob track medians, so small morphs
@@ -510,12 +511,10 @@ class _Evaluation:
         counts = np.diff(graph.offsets).astype(np.int64)
         self.frame = np.repeat(np.arange(graph.frame_count, dtype=np.int32), counts)
         self.local = (np.arange(n, dtype=np.int64) - graph.offsets[:-1][self.frame]).astype(np.int32)
+        # Temporal merge evidence must not depend on the later statistical
+        # Outlier Extraction bounds. Keep the optional argument only for
+        # backward API compatibility.
         flags = graph.flags.copy()
-        if area_bounds is not None:
-            crossing = ((flags & (FLAG_MANUAL | FLAG_LOW_ASPECT | FLAG_UNKNOWN)) != 0) \
-                | ~_inside(graph.contour_area, area_bounds)
-            flags = np.where(crossing, flags & ~np.uint8(FLAG_NORMAL),
-                             flags | np.uint8(FLAG_NORMAL)).astype(np.uint8)
         self.area = graph.area.astype(np.float32)
         self.normal = (flags & FLAG_NORMAL) != 0
         self.edge = (flags & FLAG_BORDER) != 0
@@ -984,6 +983,8 @@ class _Evaluation:
             anc: dict = {}
             if self.edge[head] or self.unknown[head] or self.result_single[head]:
                 ev = _fresh(c)
+            elif forward and kind == "scan_start":
+                ev = self._initial_pair_evidence(c, head)
             elif kind == ("merge" if forward else "split"):
                 ev, anc = self._combine(c, head, forward, boundary, lineage)
             elif kind in (("split", "complex") if forward else ("merge", "complex")):
@@ -1012,6 +1013,43 @@ class _Evaluation:
                 node_ev[v] = len(store) - 1
             boundary[c] = ev
         return store, node_ev
+
+    def _initial_pair_evidence(self, c: int, head: int) -> _Evidence:
+        """Conservative lower bound for a pair already touching at scan start.
+
+        Never infer a pair from its size alone. Require a stable start chain
+        that later participates in a confirmed merge with an independent
+        contemporaneous single animal. Its pre-contact area must be clearly
+        larger than that partner's. This also allows the new three-animal
+        evidence to conserve a pair when the third animal subsequently leaves.
+        """
+        base = _fresh(c)
+        if self.end_kind[c] != "merge" or self._confirmed(c, True):
+            return base
+        end = int(self.ch_end[c])
+        comp = int(self.pc[end])
+        if comp < 0:
+            return base
+        arms = [int(x) for x in self.parents(comp) if int(self.chain[x]) != c]
+        if len(arms) != 1:
+            return base
+        partner = int(self.chain[arms[0]])
+        if self._confirmed(partner, True):
+            return base
+        large = self._mass(c, True)
+        small = self._mass(partner, True)
+        if small <= 0 or large < 1.75 * small:
+            return base
+        # Treat the group conservatively as *at least* two animals.
+        t = int(self.frame[head])
+        event = len(self.events)
+        self.events.append({
+            "id": event, "direction": "forward", "type": "initial_pair",
+            "frame": t + self.g.first_frame, "node": head, "chain": c,
+            "arms": [], "pairs": [], "n": 2, "source": "initial_pair_mass",
+            "reasons": [], "detail": f"start_mass={large:.1f}, independent_partner={small:.1f}",
+        })
+        return _Evidence(frozenset((c, -1 - c)), True, t, event, large / 2.0)
 
     def _exit(self, u: int, v: int, ev: _Evidence, forward: bool, table: dict) -> str:
         """Why the count may have dropped between consecutive chain nodes u -> v.
@@ -1312,7 +1350,11 @@ class _Evaluation:
         level[high & target] = LEVEL_HIGH
         level[medium & target] = LEVEL_MEDIUM
         evidence = (nf >= 2) | (nb >= 2)
-        uncertain = evidence & flaggable & (level == 0)
+        uncertain = evidence & flaggable & (level == 0) & ~self.result_single
+        # Expose every temporal merge candidate, including uncertain ones,
+        # with the same violet appearance. Only verified exclusions affect
+        # the actual training mask.
+        level[uncertain] = LEVEL_UNCERTAIN
         # Interval confidence also counts blobs that are already outliers
         # (for example side-by-side merges caught by the area bounds).
         consistent = ~self.result_single & ~self.unknown & ~self.edge
@@ -1332,7 +1374,7 @@ class _Evaluation:
             fid = int(self.frame[node]) + g.first_frame
             code = int(level[node])
             levels.setdefault(fid, {})[int(self.local[node])] = code
-            if auto and (code == LEVEL_HIGH or exclude_medium):
+            if auto and (code == LEVEL_HIGH or (exclude_medium and code == LEVEL_MEDIUM)):
                 excluded.setdefault(fid, set()).add(int(self.local[node]))
         rows = self._report(level, evidence_level, uncertain, nf, nb, f_event, b_event, auto, exclude_medium)
         counts = {
@@ -1403,7 +1445,7 @@ class _Evaluation:
             if not auto:
                 excluded_nodes = nodes[:0]
             else:
-                excluded_nodes = nodes[lv > 0] if exclude_medium else high
+                excluded_nodes = nodes[(lv == LEVEL_HIGH) | (lv == LEVEL_MEDIUM)] if exclude_medium else high
             events = by_chain.get(c, [])
             merge = next((e for e in events if e["type"] == "merge"), None)
             split = next((e for e in events if e["type"] == "split"), None)
