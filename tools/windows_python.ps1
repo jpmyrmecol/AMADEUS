@@ -18,8 +18,10 @@ function Resolve-CompatiblePython([string]$Candidate) {
     try {
         # The Python command must actually execute; a WindowsApps alias is
         # not sufficient. Require an installed interpreter in the supported range.
-        $version = & $Candidate -c 'import sys; print("valid" if (3, 10) <= sys.version_info[:2] <= (3, 12) else "invalid")' 2>$null
-        if ($LASTEXITCODE -ne 0 -or ([string]$version).Trim() -ne 'valid') {
+        # Windows PowerShell 5.1 can strip nested double quotes from
+        # native-command arguments. Use exit status; no nested quotes are needed.
+        & $Candidate -c 'import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] <= (3, 12) else 1)' 1>$null 2>$null
+        if ($LASTEXITCODE -ne 0) {
             return $null
         }
 
@@ -32,8 +34,8 @@ function Resolve-CompatiblePython([string]$Candidate) {
             -not (Test-Path -LiteralPath $basePath -PathType Leaf)) {
             return $null
         }
-        $check = & $basePath -c 'import sys; print("valid" if (3, 10) <= sys.version_info[:2] <= (3, 12) else "invalid")' 2>$null
-        if ($LASTEXITCODE -ne 0 -or ([string]$check).Trim() -ne 'valid') {
+        & $basePath -c 'import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] <= (3, 12) else 1)' 1>$null 2>$null
+        if ($LASTEXITCODE -ne 0) {
             return $null
         }
         return ([IO.Path]::GetFullPath($basePath))
