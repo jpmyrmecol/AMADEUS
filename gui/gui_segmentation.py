@@ -1170,10 +1170,10 @@ def _segmentation_pickle_blob(blob: BlobMetrics, source_index: Optional[int] = N
         exclusion = "synthetic"
     elif blob.manual_outlier:
         exclusion = "manual"
-    elif blob.persistent_static_outlier:
-        exclusion = "persistent_static"
     elif blob.temporal_merge_outlier:
         exclusion = "temporal_merge"
+    elif blob.persistent_static_outlier:
+        exclusion = "persistent_static"
     elif blob.low_obb_aspect_outlier:
         exclusion = "low_obb_aspect"
     elif blob.result_obb_count > 1:
@@ -1231,7 +1231,12 @@ class _FilterPlan:
 
 
 def _apply_temporal_levels(blobs: list, result, fid: int, base_crossing: list[bool]) -> None:
-    """Mark candidates by list position; exclude only blobs that were normal."""
+    """Apply temporal merges before Outlier Extraction, regardless of area labels.
+
+    All temporal candidates render violet; an exclusion is applied when
+    the graph's reliability gate permits it. The legacy base_crossing
+    argument cannot veto an earlier temporal decision.
+    """
     levels = result.levels.get(int(fid))
     if not levels:
         return
@@ -1241,7 +1246,7 @@ def _apply_temporal_levels(blobs: list, result, fid: int, base_crossing: list[bo
             continue
         blob = blobs[position]
         blob.temporal_merge_level = int(level)
-        if position in excluded and not base_crossing[position]:
+        if position in excluded:
             blob.temporal_merge_outlier = True
             blob.is_crossing = True
 
@@ -1394,11 +1399,11 @@ def _result_obb_overlap_candidates(
 
 
 def _blob_color(blob: BlobMetrics) -> tuple:
-    """Fill/contour color: static green, temporal violet, other outliers orange."""
+    """Temporal violet takes precedence; only newly excluded blobs are orange."""
+    if blob.temporal_merge_level:
+        return TEMPORAL_MERGE_COLOR
     if blob.persistent_static_outlier:
         return STATIC_OUTLIER_COLOR
-    if blob.temporal_merge_outlier:
-        return TEMPORAL_MERGE_COLOR
     return OUTLIER_COLOR if blob.is_crossing else OBB_COLOR
 
 
@@ -1427,11 +1432,7 @@ def _draw_dashed_contour(image: np.ndarray, contour: np.ndarray, color, thicknes
 
 def _draw_blob_overlays(base: np.ndarray, blobs: list, show_overlay: bool,
                         show_contours: bool, show_centers: bool) -> np.ndarray:
-    """Shared by the preview and Export so both always show the same colors.
-
-    Temporal-merge candidates that are not excluded keep their normal color
-    and get a dashed violet outline, even with contours hidden.
-    """
+    """Shared by preview and Export: temporal violet, later outliers orange."""
     if show_overlay:
         overlay = np.zeros_like(base)
         for b in blobs:
@@ -1439,10 +1440,7 @@ def _draw_blob_overlays(base: np.ndarray, blobs: list, show_overlay: bool,
         base = cv2.addWeighted(base, 1.0, overlay, 0.35, 0)
 
     for b in blobs:
-        candidate = bool(b.temporal_merge_level) and not b.is_crossing
-        if candidate and (show_overlay or show_contours):
-            _draw_dashed_contour(base, b.contour, TEMPORAL_MERGE_COLOR, 2, dash=8.0, gap=5.0)
-        elif show_contours:
+        if show_contours:
             cv2.drawContours(base, [b.contour], -1, _blob_color(b), 2, cv2.LINE_AA)
         if show_centers:
             cv2.circle(base, (int(round(b.center_x)), int(round(b.center_y))), 2, WHITE, -1, cv2.LINE_AA)
@@ -1873,6 +1871,8 @@ class CrossingReviewApp(ctk.CTk):
         self.seg_section = section("Background / Segmentation", expanded=True)
         self.roi_section = section("ROI (Optional)")
         self.region_expansion_section = section("Region Expansion (Optional, Beta)")
+        # Temporal merges are detected before statistical Outlier Extraction.
+        self.temporal_blob_section = section("Exclude temporal merges (Optional, Beta)")
         self.ana_section = section("Outlier Extraction", expanded=True)
         self.analysis_gate_frame = ctk.CTkFrame(parent, corner_radius=0)
         ctk.CTkLabel(
@@ -1890,7 +1890,6 @@ class CrossingReviewApp(ctk.CTk):
         self.additional_outlier_section = section("Additional Outlier (Optional, Beta)")
         self.single_blob_smoothing_section = section("Single-animal Smoothing (Optional, Beta)")
         self.static_blob_section = section("Exclude persistent static blobs (Optional, Beta)")
-        self.temporal_blob_section = section("Exclude temporal merges (Optional, Beta)")
 
         seg = self.seg_section
         self._pack_combobox(seg, "Segmentation mode", self.segmentation_mode_var, ["background_diff", "dark_region", "bright_region", "dark_region_and_background_diff", "bright_region_and_background_diff"])
@@ -2382,12 +2381,12 @@ class CrossingReviewApp(ctk.CTk):
             (getattr(self, "seg_section", None), False),
             (getattr(self, "roi_section", None), True),
             (getattr(self, "region_expansion_section", None), True),
+            (getattr(self, "temporal_blob_section", None), False),
             (getattr(self, "ana_section", None), False),
             (getattr(self, "result_section", None), True),
             (getattr(self, "additional_outlier_section", None), True),
             (getattr(self, "single_blob_smoothing_section", None), True),
             (getattr(self, "static_blob_section", None), True),
-            (getattr(self, "temporal_blob_section", None), True),
         ]
 
         # Reset the pack order before restoring visible sections. This keeps
@@ -5623,13 +5622,12 @@ class CrossingReviewApp(ctk.CTk):
     def _temporal_summary_text(result, detailed: bool = False) -> str:
         """One line for the sidebar (it has a fixed height); details for the status bar."""
         counts, diag = result.counts, result.diagnostics
-        text = (f"High {counts['high_intervals']} / Medium {counts['medium_intervals']} / "
-                f"Uncertain {counts['uncertain_intervals']} · excluded {counts['excluded_blobs']}")
+        candidates = counts['high_blobs'] + counts['medium_blobs']
+        text = f"Temporal merges {candidates} · excluded {counts['excluded_blobs']}"
         if not diag.get("reliable"):
             text = "Unreliable overlap, nothing excluded · " + text
         if detailed:
-            text += (f" blobs (high {counts['high_blobs']}, medium {counts['medium_blobs']}) · "
-                     f"containment {diag.get('tau', 0):.2f} {diag.get('tau_mode', 'auto')}, "
+            text += (f" · containment {diag.get('tau', 0):.2f} {diag.get('tau_mode', 'auto')}, "
                      f"P10 {diag.get('self_containment_p10')}")
             if diag.get("warnings"):
                 text += " · " + diag["warnings"][0]
@@ -6682,6 +6680,9 @@ class CrossingReviewApp(ctk.CTk):
         area_bounds = bounds.get("area", (-float("inf"), float("inf"))) if bounds else (-float("inf"), float("inf"))
 
         for b in out:
+            # Avoid stale temporal states from earlier classification passes.
+            b.temporal_merge_outlier = False
+            b.temporal_merge_level = 0
             b.area_outlier = not inside_bounds(b.area, area_bounds)
             b.bbox_area_outlier = False
             b.width_outlier = False
@@ -7100,7 +7101,7 @@ class CrossingReviewApp(ctk.CTk):
         if self.temporal_merge_enabled_var.get() and self._temporal_search_is_current():
             excluded = sum(1 for b in blobs if b.temporal_merge_outlier)
             candidates = sum(1 for b in blobs if b.temporal_merge_level and not b.temporal_merge_outlier)
-            temporal_text = f" / temporal merges {excluded} (+{candidates} candidates)"
+            temporal_text = f" / temporal merges {excluded}" + (f" (+{candidates} not excluded)" if candidates else "")
         if self._filter_preview_mismatch:
             temporal_text += " / filters n/a (segmentation differs from Search)"
         self.preview_title_var.set(
@@ -7241,9 +7242,8 @@ class CrossingReviewApp(ctk.CTk):
         if blob.persistent_static_outlier:
             lines.append("Persistent static blob")
         if blob.temporal_merge_level:
-            level = _TEMPORAL_LEVEL_NAMES.get(int(blob.temporal_merge_level), "")
-            state = "excluded" if blob.temporal_merge_outlier else "candidate only"
-            lines.append(f"Temporal merge: {level} ({state})")
+            state = "crossing" if blob.temporal_merge_outlier else "candidate only (not excluded)"
+            lines.append(f"Temporal merge: {state}")
         lines.append("outlier" if blob.is_crossing else "non-outlier")
         if blob.result_single:
             lines.append("kept as one animal (imported OBB)")
