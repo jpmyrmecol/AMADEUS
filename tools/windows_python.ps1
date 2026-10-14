@@ -24,7 +24,8 @@ if ($launcher) {
         try {
             $path = & $launcher.Source ("-3." + $minor) -c 'import sys; print(sys.executable)' 2>$null
             if ($LASTEXITCODE -ne 0 -or -not $path) { continue }
-            $found = Test-Python ([string]$path).Trim()
+            $resolved = ([string]$path).Trim()
+            $found = Test-Python $resolved
             if ($found) { Write-Output $found; exit 0 }
         } catch { }
     }
