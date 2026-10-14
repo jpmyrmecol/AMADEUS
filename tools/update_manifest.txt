@@ -125,4 +125,5 @@ tools/setup_environment.py
 tools/update_manifest.txt
 tools/update_worker.py
 tools/uv_bootstrap.ps1
+tools/windows_python.ps1
 uv.lock
