@@ -32,18 +32,18 @@ Evaluation (re-runnable on the stored graph)
       both arms must coexist as separate, normal, substantial blobs for k frames.
       No minimum OBB gap is required. Recent common split ancestry prevents
       fragments of the same animal from being counted twice.
-    * arms descending from the same recent split (within min(2H, max(10, 2k))
-      frames) are one group and contribute the count before that split,
+    * arms descending from the same recent split (within a short fixed
+      fragmentation window) are one group and contribute the count before that split,
       never a sum, so a fragmenting animal that rejoins keeps its count.
-    * a merge followed by a split within H, and complex exchanges, are
-      bridged by a unique one-to-one match of substantial blobs, compared by
+    * a merge followed by a split, and complex exchanges, are bridged by
+      a unique one-to-one match of substantial blobs, compared by
       their median areas next to the contact (a body touching another one
       already looks larger in the contact frames). The matched blob keeps the
       arm's identity (its history counts towards confirmation and
       independence) and its count.
     * otherwise a known count is shared by mass: a blob that takes a share s
       of the mass leaving a split (or, backward, entering a merge) holds
-      floor(n * s + 0.25) of the n known animals, as disjoint atoms. Two
+      floor(n * s + share_rounding) of the n known animals, as disjoint atoms. Two
       animals parting stay one each; three parting as a pair and a single
       leave the pair with a count of 2.
     * along a chain the count is kept (occlusion hides area, not animals)
@@ -57,13 +57,12 @@ Decisions (only blobs that are normal after classification are flagged)
     High    forward and backward evidence >= 2 at the blob; excluded only when
             the overlap calibration is reliable (>= 100 unambiguous pairs,
             self-containment P10 >= 0.5, continuation rate >= 0.85).
-    Medium  one-sided evidence >= 2 that has not passed an ROI edge: within H
-            frames of its event, and beyond H while the blob keeps at least
-            0.6 of its mass next to that event (an animal leaving unseen, for
-            example into a hole, takes its area along). Excluded only in
-            "include one-sided" mode with reliable calibration.
-    Other evidence (one-sided after an ROI edge or a mass loss, conflicts,
-    failed events) is reported as uncertain and never excluded.
+    Medium  one-sided evidence >= 2 that has not passed an ROI edge and
+            preserves the configured minimum fraction of the chain's
+            reference mass. No arbitrary time horizon is imposed. Excluded
+            only in "include one-sided" mode with reliable calibration.
+    Other evidence (after an ROI edge or a mass loss, conflicts and failed
+    events) is reported as uncertain and never excluded.
 """
 from __future__ import annotations
 
@@ -379,11 +378,12 @@ AMBIGUOUS_FRACTION = 0.5         # a substantial second link suggests mass went 
 SECONDARY_LINK_FLOOR = 0.25      # avoid making low containment thresholds *more* restrictive
 EXIT_RADIUS = 3.0                # births/deaths within 3 L_ref may be an exit or a fast jump
 EXIT_FRAMES = 2                  # ... in this many following/preceding frames
-INDEPENDENCE_WINDOW = 10         # independence history, in units of H
+CONFIRM_FRAMES = 2               # fixed minimum consecutive normal observations
+SPLIT_HISTORY_FRAMES = 10        # short fragmentation safeguard, not a merge lifetime limit
 MATCH_AREA_RATIO = 1.33          # pass-through match: area ratio within [1/1.33, 1.33]
 MATCH_UNIQUENESS = 1.5           # second-best assignment must cost >= 1.5x the best
-SHARE_ROUNDING = 0.25            # a mass share s of n known animals holds floor(n * s + 0.25)
-ONE_SIDED_MASS_RATIO = 0.6       # beyond H, one-sided evidence needs 0.6 of the event-side mass
+SHARE_ROUNDING = 0.25            # default mass-sharing rounding bias
+ONE_SIDED_MASS_RATIO = 0.6       # default retained mass for one-sided evidence
 TAU_SCALE = 0.8
 TAU_MIN = 0.3
 TAU_MAX = 0.6
@@ -394,18 +394,18 @@ RELIABLE_CONTINUATION = 0.85
 
 @dataclass(frozen=True)
 class TemporalMergeParams:
-    horizon_frames: int
-    confirm_frames: int
     tau: "float | None" = None          # None: automatic calibration
     include_one_sided: bool = False
+    share_rounding: float = SHARE_ROUNDING
+    one_sided_mass_ratio: float = ONE_SIDED_MASS_RATIO
 
     def validate(self) -> None:
-        if int(self.horizon_frames) < 1:
-            raise ValueError("Horizon must be at least 1 frame.")
-        if int(self.confirm_frames) < 2:
-            raise ValueError("Confirmation length must be at least 2 frames.")
         if self.tau is not None and not 0.05 <= float(self.tau) <= 0.95:
             raise ValueError("Containment threshold must be between 0.05 and 0.95.")
+        if not 0.0 <= float(self.share_rounding) <= 1.0:
+            raise ValueError("Mass share rounding must be between 0 and 1.")
+        if not 0.0 < float(self.one_sided_mass_ratio) <= 1.0:
+            raise ValueError("One-sided retained mass ratio must be in (0, 1].")
 
 
 @dataclass
@@ -502,12 +502,10 @@ class _Evaluation:
         params.validate()
         self.g = graph
         self.p = params
-        self.H = int(params.horizon_frames)
-        self.k = int(params.confirm_frames)
-        # H bounds how long one-sided *positive* evidence holds unchecked.
-        # It must not turn a split hundreds of frames ago into permanent
-        # evidence that two subsequently separate animals are one fragment.
-        self.split_history = min(2 * self.H, max(10, 2 * self.k))
+        self.k = CONFIRM_FRAMES
+        # Only recent common split ancestry groups fragments of one animal;
+        # the lifetime of a confirmed merged blob is not time-limited.
+        self.split_history = SPLIT_HISTORY_FRAMES
         n = graph.node_count
         counts = np.diff(graph.offsets).astype(np.int64)
         self.frame = np.repeat(np.arange(graph.frame_count, dtype=np.int32), counts)
@@ -834,13 +832,12 @@ class _Evaluation:
 
     def _history(self, c: int, forward: bool, t: int) -> dict:
         """frame -> node of an arm, following unique contact matches (depth 3)."""
-        span = INDEPENDENCE_WINDOW * self.H
         out: dict = {}
         for _depth in range(4):
             nodes = self.nodes_of(c)
             for node in nodes:
                 f = int(self.frame[node])
-                if (t - span <= f < t) if forward else (t < f <= t + span):
+                if (f < t) if forward else (f > t):
                     out.setdefault(f, int(node))
             c = self.identity[forward].get(c)
             if c is None:
@@ -848,16 +845,15 @@ class _Evaluation:
         return out
 
     def _common_nodes(self, c1: int, c2: int, forward: bool, t: int):
-        """Nodes of both arms at their common frames within the history window."""
+        """Nodes of both arms at common frames, independent of elapsed time."""
         ident = self.identity[forward]
         if c1 not in ident and c2 not in ident:
-            span = INDEPENDENCE_WINDOW * self.H
             s1, s2 = int(self.frame[self.ch_start[c1]]), int(self.frame[self.ch_start[c2]])
             e1, e2 = int(self.frame[self.ch_end[c1]]), int(self.frame[self.ch_end[c2]])
             if forward:
-                lo, hi = max(s1, s2, t - span), min(e1, e2, t - 1)
+                lo, hi = max(s1, s2), min(e1, e2, t - 1)
             else:
-                lo, hi = max(s1, s2, t + 1), min(e1, e2, t + span)
+                lo, hi = max(s1, s2, t + 1), min(e1, e2)
             if hi < lo:
                 return np.zeros(0, np.int64), np.zeros(0, np.int64)
             frames = np.arange(lo, hi + 1)
@@ -1133,11 +1129,11 @@ class _Evaluation:
             origin = int(self.chain[sources[0]])
             branches = tuple(sorted(int(self.chain[x]) for x in targets))
             anc[("s" if forward else "m", comp)] = (t, origin, branches)
-            # Merge followed by a split within H (or the mirror): match through the blob.
+            # Match through the intervening merged blob when the geometric correspondence is unique.
             node = int(self.ch_start[origin] if forward else self.ch_end[origin])
             far = int(self.frame[sources[0]])
             mirror = self.start_kind[origin] if forward else self.end_kind[origin]
-            if mirror == ("merge" if forward else "split") and abs(far - int(self.frame[node])) <= self.H:
+            if mirror == ("merge" if forward else "split"):
                 mcomp = int(self.cc[node] if forward else self.pc[node])
                 sources = [int(x) for x in (self.parents(mcomp) if forward else self.children(mcomp))]
             else:
@@ -1200,7 +1196,7 @@ class _Evaluation:
         for i in sorted(range(len(receivers)), key=lambda i: (-masses[i], receivers[i])):
             r = receivers[i]
             share = masses[i] / total
-            count = min(int(math.floor(n * share + SHARE_ROUNDING)), len(pool))
+            count = min(int(math.floor(n * share + self.p.share_rounding)), len(pool))
             if count < 2 or not self.substantial[r]:
                 continue
             event = len(self.events)
@@ -1257,7 +1253,7 @@ class _Evaluation:
         fstore, fnode = self._pass(True)
         bstore, bnode = self._pass(False)
 
-        n, H = g.node_count, self.H
+        n = g.node_count
         nf = np.zeros(n, dtype=np.int32)
         nb = np.zeros(n, dtype=np.int32)
         f_direct = np.zeros(n, dtype=bool)
@@ -1284,8 +1280,8 @@ class _Evaluation:
         med_b = (nb >= 2) & b_direct & (b_frame >= 0)
         # Beyond H a blob must also keep its mass: an animal that left unseen
         # takes its area along, while occlusion alone shrinks a group less.
-        med_f &= (self.frame <= f_frame + H - 1) | self._keeps_mass(med_f, at_end=False)
-        med_b &= (self.frame >= b_frame - H + 1) | self._keeps_mass(med_b, at_end=True)
+        med_f &= self._keeps_mass(med_f, at_end=False)
+        med_b &= self._keeps_mass(med_b, at_end=True)
         medium = (med_f | med_b) & ~high
         level = np.zeros(n, dtype=np.int8)
         target = flaggable & ~self.result_single
@@ -1328,13 +1324,13 @@ class _Evaluation:
         return TemporalMergeResult(levels, excluded, rows, self.diag, counts, g.first_frame, g.digests)
 
     def _keeps_mass(self, candidates: np.ndarray, at_end: bool) -> np.ndarray:
-        """Candidates holding >= ONE_SIDED_MASS_RATIO of their chain's mass at its start/end."""
+        """Candidates retaining the configured fraction of their chain's reference mass."""
         out = np.zeros(self.g.node_count, dtype=bool)
         nodes = np.flatnonzero(candidates & (self.chain >= 0))
         if nodes.size:
             chains, index = np.unique(self.chain[nodes], return_inverse=True)
             mass = np.array([self._mass(int(c), at_end) for c in chains], dtype=np.float32)
-            out[nodes] = self.area[nodes] >= ONE_SIDED_MASS_RATIO * mass[index]
+            out[nodes] = self.area[nodes] >= self.p.one_sided_mass_ratio * mass[index]
         return out
 
     def _reliability(self, active: np.ndarray) -> None:
