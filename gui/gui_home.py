@@ -19,7 +19,7 @@ from PIL import Image, ImageTk
 
 import customtkinter as ctk
 
-try:
+if __package__:
     from .app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
     from .app_update import probe_update_status, start_update_check
     from .project_paths import PROJECT_ROOT, gui_asset, gui_script
@@ -35,7 +35,7 @@ try:
     from .splash_reveal import MAX_DISPLAY_MS, reveal_from_left, reveal_total_ms
     from .splash_geometry import SPLASH_LOGO_WIDTH_RATIO, configure_splash_window
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon, tk_font_spec
-except ImportError:  # Preserve direct execution with: python gui/gui_home.py
+else:
     from app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
     from app_update import probe_update_status, start_update_check
     from project_paths import PROJECT_ROOT, gui_asset, gui_script
