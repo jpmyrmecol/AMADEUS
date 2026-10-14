@@ -47,7 +47,7 @@ To update AMADEUS, select **Update** below **Help** on the Home screen. Review t
 
 ## Run tracking
 
-1. Open **Easy Tracking** and select the video and session folder.
+1. Open **Easy Tracking** and select the video.
 2. Select **Launch Segmentation**. Configure foreground segmentation so that complete, isolated animals are retained as single-animal blobs and unsuitable regions are marked as outliers.
 3. Specify the number of animals, overlap severity, and whether the animals move backward. Select **Processing** to run the workflow.
 4. Review the result video and CSV. Use **Refinement** to correct remaining errors if needed.
