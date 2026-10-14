@@ -32,8 +32,8 @@ Evaluation (re-runnable on the stored graph)
       coexist as separate, normal, substantial blobs for at least k frames.
       No minimum OBB gap is required. Recent common split ancestry prevents
       fragments of the same animal from being counted twice.
-    * arms descending from the same recent split (within 2H frames) are one
-      group and contribute the count from before that split (conservation),
+    * arms descending from the same recent split (within min(2H, max(10, 2k))
+      frames) are one group and contribute the count before that split,
       never a sum, so a fragmenting animal that rejoins keeps its count.
     * a merge followed by a split within H, and complex exchanges, are
       bridged only by a unique one-to-one match of substantial blobs. The
@@ -494,6 +494,10 @@ class _Evaluation:
         self.p = params
         self.H = int(params.horizon_frames)
         self.k = int(params.confirm_frames)
+        # H controls how long one-sided *positive* evidence remains valid.
+        # It must not turn a split hundreds of frames ago into permanent
+        # evidence that two subsequently separate animals are one fragment.
+        self.split_history = min(2 * self.H, max(10, 2 * self.k))
         n = graph.node_count
         counts = np.diff(graph.offsets).astype(np.int64)
         self.frame = np.repeat(np.arange(graph.frame_count, dtype=np.int32), counts)
@@ -920,7 +924,7 @@ class _Evaluation:
     # -- evidence passes ------------------------------------------------------
     def _pass(self, forward: bool):
         """Per-node evidence index and the list of evidence objects."""
-        n, C, W = self.g.node_count, self.nchain, 2 * self.H
+        n, C, W = self.g.node_count, self.nchain, self.split_history
         store: list[_Evidence] = []
         node_ev = np.full(n, -1, dtype=np.int32)
         boundary: list = [None] * C          # evidence at the chain end handed to events
@@ -1010,7 +1014,7 @@ class _Evaluation:
         rows = []
         for a in arms:
             ca = int(self.chain[a])
-            recent = {k: v for k, v in (lineage[ca] or {}).items() if abs(t - v[0]) <= 2 * self.H}
+            recent = {k: v for k, v in (lineage[ca] or {}).items() if abs(t - v[0]) <= self.split_history}
             rows.append({"node": a, "chain": ca, "why": self._confirmed(ca, forward),
                          "ambiguous": self._ambiguous(a, head, ca, forward),
                          "substantial": bool(self.substantial[a]), "ev": boundary[ca],
