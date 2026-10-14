@@ -172,22 +172,43 @@ if [ -z "$UV_EXE" ]; then
     exit 1
 fi
 
-# The bootstrap interpreter only runs setup; setup selects and checks the GUI Python.
-# AMADEUS_VENV explicitly selects an alternate environment. Do not infer it from activation.
+# Use a persistent interpreter for setup. The setup procedure can replace
+# .venv, so it must never run inside .venv or uv's ephemeral `run` environment.
+setup_python=""
 if [ "$(uname -s)" = Darwin ]; then
-    setup_python="$AMADEUS_PYTHON"
+    # macos_python.sh has already validated the requested Python and Tk.
+    setup_python="$("$AMADEUS_PYTHON" -c 'import sys; print(sys._base_executable)')"
 else
-    setup_python=3.12
     for minor in 12 11 10; do
-        candidate="$(command -v "python3.$minor" || true)"
-        if [ -n "$candidate" ]; then
-            setup_python="$candidate"
-            break
-        fi
+        for candidate in "/usr/bin/python3.$minor" "/usr/local/bin/python3.$minor" \
+                         "$(command -v "python3.$minor" || true)"; do
+            [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+            resolved="$("$candidate" -c 'import sys; print(sys._base_executable)' 2>/dev/null || true)"
+            case "$resolved" in
+                */builds-v0/*|*/.tmp*|*/tmp/*) continue ;;
+            esac
+            if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+                setup_python="$resolved"
+                break 2
+            fi
+        done
     done
+    if [ -z "$setup_python" ]; then
+        # uv-managed Python installations are persistent; `uv run` build
+        # environments are not. Never select a Python from .cache/uv/builds-v0.
+        setup_python="$("$UV_EXE" python find --system 3.12)" || {
+            echo "[ERROR] No stable Python 3.10-3.12 could be found for setup." >&2
+            exit 1
+        }
+    fi
 fi
-# Setup may rebuild .venv; keep the bootstrap interpreter outside that environment.
-if ! env -u VIRTUAL_ENV "$UV_EXE" --quiet run --no-project --isolated --python "$setup_python" python tools/setup_environment.py --uv "$UV_EXE"; then
+
+if [ ! -x "$setup_python" ]; then
+    echo "[ERROR] Setup Python is unavailable: $setup_python" >&2
+    exit 1
+fi
+echo "[AMADEUS] Setup Python (persistent): $setup_python"
+if ! env -u VIRTUAL_ENV "$setup_python" tools/setup_environment.py --uv "$UV_EXE"; then
     echo "[ERROR] AMADEUS environment setup failed. See the diagnostic above." >&2
     exit 1
 fi
