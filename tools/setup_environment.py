@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "gui"))
 from tools.runtime_profiles import PROFILES, check_support
+from tools.python_runtime import check_python_runtime, python_base_prefix, select_python_runtime
 from main.compute_telemetry import query_nvidia_driver_info
 from splash_ipc import signal_stop  # noqa: E402
 
@@ -284,81 +285,14 @@ def sync_environment(uv_executable: str, profile: str, python: str) -> None:
 
 
 def check_python(python: str, *, macos: bool, required_minor: str | None = None) -> None:
-    """Reject unsupported Python/Tk before uv can replace an existing environment."""
-    code = """
-import sys
-if sys.version_info[:2] != (3, 12):
-    raise RuntimeError('Python 3.12 required')
-"""
-    if required_minor:
-        code += f"""
-if f'{{sys.version_info.major}}.{{sys.version_info.minor}}' != {required_minor!r}:
-    raise RuntimeError('Python {required_minor} required for this accelerator profile')
-"""
-    if macos:
-        code += """
-import platform
-import tkinter as tk
-if platform.machine() not in ('arm64', 'aarch64'):
-    raise RuntimeError('Native Apple Silicon Python required')
-if tk.TkVersion != 8.6 or tk.TclVersion != 8.6:
-    raise RuntimeError('Tcl/Tk 8.6 required with CustomTkinter 5.2.2')
-root = tk.Tk()
-root.withdraw()
-root.update()
-root.destroy()
-"""
-    subprocess.run([python, "-c", code], check=True, capture_output=True, text=True)
+    check_python_runtime(python, required_minor or ("3.12" if macos else None))
 
 
 def select_python(requested: str | None, profile: str) -> str:
-    macos = sys.platform == "darwin"
     required_minor = PROFILES[profile].python_minor
-    if requested:
-        try:
-            check_python(requested, macos=macos, required_minor=required_minor)
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(f"Selected Python is incompatible: {requested}\n{exc.stderr}") from exc
-        # uv must not silently replace a different existing environment.
-        if venv_python().exists():
-            code = "import sys; print(sys.base_prefix)"
-            existing = subprocess.check_output([str(venv_python()), "-c", code], text=True).strip()
-            selected = subprocess.check_output([requested, "-c", code], text=True).strip()
-            if existing != selected:
-                raise RuntimeError(
-                    "The selected Python differs from the existing environment. "
-                    "Set AMADEUS_VENV to a new directory (for example .venv-tk86); "
-                    "the existing environment has been preserved."
-                )
-        return requested
-    if venv_python().exists():
-        try:
-            check_python(str(venv_python()), macos=macos, required_minor=required_minor)
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(
-                f"Existing environment is incompatible: {venv_python()}\n{exc.stderr}\n"
-                "Select Python 3.12 with Tcl/Tk 8.6 using AMADEUS_PYTHON "
-                "and set AMADEUS_VENV=.venv-tk86 to preserve the old environment."
-            ) from exc
-        return str(venv_python())
-    if required_minor:
-        return required_minor
-    if macos:
-        # Python.org framework installations are candidates, not an assumed Tk guarantee.
-        for minor in (12,):
-            candidate = f"/Library/Frameworks/Python.framework/Versions/3.{minor}/bin/python3.{minor}"
-            if Path(candidate).is_file():
-                try:
-                    check_python(candidate, macos=True)
-                    return candidate
-                except subprocess.CalledProcessError:
-                    continue
-        raise RuntimeError(
-            "macOS requires native Python 3.12 with Tcl/Tk 8.6. "
-            "Run AMADEUS.command (or AMADEUS-Setup.command) to check Python and offer installation. "
-            "Tk 9 is not supported with CustomTkinter 5.2.2. See README macOS setup."
-        )
-    return "3.12"
+    if sys.platform == "darwin":
+        required_minor = "3.12"
+    return select_python_runtime(requested, venv_python(), required_minor)
 
 
 def _ready_marker_profile() -> str | None:
@@ -370,46 +304,43 @@ def _ready_marker_profile() -> str | None:
     return profile if isinstance(profile, str) else None
 
 
-def prepare_profile_environment(profile: str, previous_profile: str | None = None) -> None:
-    """Rebuild the managed venv when a profile requires another Python/runtime stack."""
+def prepare_profile_environment(
+    profile: str, python: str, previous_profile: str | None = None,
+) -> None:
+    """Rebuild the managed .venv only if the base Python or accelerator changes."""
     if ENVIRONMENT_ROOT != PROJECT_ROOT / ".venv":
         return
-
     if previous_profile is None:
         previous_profile = _ready_marker_profile()
     current = PROFILES[profile]
     rebuild = bool(
-        previous_profile is None
-        and current.install_dependencies
-        and venv_python().exists()
+        previous_profile is None and current.install_dependencies and venv_python().exists()
     )
     if previous_profile is not None and previous_profile != profile:
         previous = PROFILES.get(previous_profile)
         rebuild = bool(
-            (previous and previous.install_dependencies)
-            or current.install_dependencies
+            (previous and previous.install_dependencies) or current.install_dependencies
         )
-
-    required_minor = current.python_minor or "3.12"
     if not rebuild and venv_python().exists():
         try:
+            running_base = python_base_prefix(str(venv_python()))
+            selected_base = python_base_prefix(python)
             running_minor = subprocess.check_output(
-                [
-                    str(venv_python()),
-                    "-c",
-                    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
-                ],
+                [str(venv_python()), "-c",
+                 "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
                 text=True,
             ).strip()
+            required_minor = current.python_minor or ("3.12" if sys.platform == "darwin" else None)
+            rebuild = (
+                Path(running_base).resolve() != Path(selected_base).resolve()
+                or running_minor not in ("3.10", "3.11", "3.12")
+                or (required_minor is not None and running_minor != required_minor)
+            )
         except (OSError, subprocess.CalledProcessError):
-            running_minor = ""
-        rebuild = running_minor != required_minor
-
+            rebuild = True
     if rebuild and ENVIRONMENT_ROOT.exists():
-        print(
-            f"[AMADEUS] Rebuilding the managed environment for PyTorch profile {profile}...",
-            flush=True,
-        )
+        print(f"[AMADEUS] Rebuilding .venv for Python/Tk and PyTorch profile {profile}...",
+              flush=True)
         shutil.rmtree(ENVIRONMENT_ROOT)
 
 
@@ -425,16 +356,14 @@ def ensure_linux_opencv_libgl() -> None:
         ctypes.CDLL("libGL.so.1")
     except OSError as exc:
         if platform.freedesktop_os_release().get("ID") == "ubuntu":
-            guidance = (
-                "Ubuntu package libgl1 is required. Install it separately "
-                "(e.g. 'sudo apt install libgl1') and rerun AMADEUS."
-            )
+            print("[AMADEUS] libGL.so.1 missing; installing Ubuntu libgl1...", flush=True)
+            prefix = [] if os.geteuid() == 0 else ["sudo"]
+            subprocess.run([*prefix, "apt-get", "install", "-y", "libgl1"], check=True)
+            ctypes.CDLL("libGL.so.1")
         else:
-            guidance = "Install the OpenGL runtime library for your distribution."
-        raise RuntimeError(
-            f"OpenCV needs libGL.so.1, but it could not be loaded: {exc}. "
-            f"{guidance} AMADEUS will not request administrator privileges."
-        ) from exc
+            raise RuntimeError(
+                f"OpenCV requires libGL.so.1: {exc}. Install your distribution's OpenGL runtime."
+            ) from exc
 
 
 def ensure_linux_tkdnd_dependencies() -> None:
@@ -487,6 +416,12 @@ print('[AMADEUS] Tcl/Tk:', tk.TclVersion, tk.TkVersion)
 print('[AMADEUS] PyAV:', av.__version__)
 if sys.platform == 'darwin' and (tk.TclVersion != 8.6 or tk.TkVersion != 8.6):
     raise RuntimeError('macOS requires Tcl/Tk 8.6 with CustomTkinter 5.2.2')
+if sys.platform.startswith('linux'):
+    version = str(app.tk.call('info', 'patchlevel'))
+    fontsystem = str(app.tk.call('tk::pkgconfig', 'get', 'fontsystem'))
+    print('[AMADEUS] Tk:', version, 'fontsystem:', fontsystem)
+    if not version.startswith('8.6.') or fontsystem != 'xft':
+        raise RuntimeError('Linux requires Tk 8.6 with Xft')
 app = ctk.CTk()
 app.withdraw()
 try:
@@ -550,8 +485,8 @@ def verify_pytorch_profile(profile: str) -> None:
     check_support(profile)
     code = f"""
 import sys
-if sys.version_info[:2] != (3, 12):
-    raise RuntimeError('AMADEUS requires Python 3.12')
+if not (3, 10) <= sys.version_info[:2] <= (3, 12):
+    raise RuntimeError('AMADEUS requires Python 3.10-3.12')
 import torch
 import torchvision
 from tools.runtime_profiles import verify_execution
@@ -910,7 +845,8 @@ def _accelerator_selection_identity() -> dict:
 
 def ready_identity(profile: str) -> dict:
     inputs = ("pyproject.toml", "uv.lock", "VERSION", "tools/setup_environment.py",
-              "tools/runtime_profiles.py", "main/compute_backend.py", "gui/tk_compat.py")
+              "tools/runtime_profiles.py", "tools/python_runtime.py",
+              "main/compute_backend.py", "gui/tk_compat.py")
     digest = hashlib.sha256()
     for name in inputs:
         digest.update((PROJECT_ROOT / name).read_bytes())
@@ -933,6 +869,8 @@ def environment_ready() -> bool:
         if marker != ready_identity(profile):
             return False
         verify_pytorch_profile(profile)
+        check_python(str(venv_python()), macos=sys.platform == "darwin",
+                     required_minor=PROFILES[profile].python_minor)
         return True
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         return False
@@ -976,8 +914,8 @@ def main() -> int:
                         f"[AMADEUS] Trying compatibility profile {candidate}...",
                         flush=True,
                     )
-                prepare_profile_environment(candidate, previous_profile)
                 python = select_python(args.python, candidate)
+                prepare_profile_environment(candidate, python, previous_profile)
                 sync_environment(args.uv, candidate, python)
                 verify_numeric_stack()
                 ensure_pytorch_profile(args.uv, candidate)
