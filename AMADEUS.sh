@@ -240,7 +240,6 @@ ensure_posix_command_path() {
 }
 
 ensure_posix_command_path
-"$AMADEUS_VENV/bin/python" tools/launch_summary.py
 set +e
 "$AMADEUS_VENV/bin/amadeus" "$@"
 status=$?
