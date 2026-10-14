@@ -12,6 +12,10 @@ import sys
 from dataclasses import dataclass
 
 
+# Preserve the original splash logo sizing on all platforms.
+SPLASH_LOGO_WIDTH_RATIO = 0.40
+
+
 @dataclass(frozen=True)
 class MonitorBounds:
     width: int
