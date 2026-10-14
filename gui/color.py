@@ -18,6 +18,8 @@ VALUE_LEVELS = (0.76, 0.84, 0.92)
 CYAN: Color = (210, 165, 0)
 ORANGE: Color = (0, 140, 242)
 GREEN: Color = (60, 220, 60)
+# Blue-violet (hue ~267 deg): distinct from the magenta Result OBB overlay.
+VIOLET: Color = (238, 80, 150)
 WHITE: Color = (255, 255, 255)
 BLACK: Color = (0, 0, 0)
 
@@ -26,6 +28,8 @@ OBB_COLOR: Color = CYAN
 OUTLIER_COLOR: Color = ORANGE
 DELETION_COLOR: Color = ORANGE
 ROI_COLOR: Color = GREEN
+STATIC_OUTLIER_COLOR: Color = GREEN
+TEMPORAL_MERGE_COLOR: Color = VIOLET
 
 
 def bgr_to_rgb(color: Color) -> Color:
@@ -39,12 +43,15 @@ def rgb_to_bgr(color: Color) -> Color:
 CYAN_RGB: Color = bgr_to_rgb(CYAN)
 ORANGE_RGB: Color = bgr_to_rgb(ORANGE)
 GREEN_RGB: Color = bgr_to_rgb(GREEN)
+VIOLET_RGB: Color = bgr_to_rgb(VIOLET)
 WHITE_RGB: Color = bgr_to_rgb(WHITE)
 BLACK_RGB: Color = bgr_to_rgb(BLACK)
 OBB_COLOR_RGB: Color = bgr_to_rgb(OBB_COLOR)
 OUTLIER_COLOR_RGB: Color = bgr_to_rgb(OUTLIER_COLOR)
 DELETION_COLOR_RGB: Color = bgr_to_rgb(DELETION_COLOR)
 ROI_COLOR_RGB: Color = bgr_to_rgb(ROI_COLOR)
+STATIC_OUTLIER_COLOR_RGB: Color = bgr_to_rgb(STATIC_OUTLIER_COLOR)
+TEMPORAL_MERGE_COLOR_RGB: Color = bgr_to_rgb(TEMPORAL_MERGE_COLOR)
 
 
 def _clamp_channel(value: float) -> int:

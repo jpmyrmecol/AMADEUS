@@ -24,6 +24,20 @@ class _Observation:
     y: float
     length: float
     contour: np.ndarray
+    _mask: "tuple | None" = field(default=None, repr=False, compare=False)
+
+    def mask(self) -> tuple:
+        """(x, y, filled uint8 mask in its bounding box, pixel count), cached.
+
+        Each observation is compared with every window midpoint it meets, so
+        rasterize it once instead of once per comparison.
+        """
+        if self._mask is None:
+            x, y, w, h = cv2.boundingRect(self.contour)
+            canvas = np.zeros((max(1, h), max(1, w)), dtype=np.uint8)
+            cv2.drawContours(canvas, [self.contour - (x, y)], -1, 1, cv2.FILLED)
+            self._mask = (x, y, canvas, cv2.countNonZero(canvas))
+        return self._mask
 
 
 @dataclass
@@ -52,6 +66,23 @@ def contour_iou(left: np.ndarray, right: np.ndarray) -> float:
     cv2.drawContours(b, [right - (x, y)], -1, 1, cv2.FILLED)
     union = cv2.countNonZero(cv2.bitwise_or(a, b))
     return cv2.countNonZero(cv2.bitwise_and(a, b)) / union if union else 0.0
+
+
+def _observation_iou(left: _Observation, right: _Observation) -> float:
+    """contour_iou on cached masks; identical pixels, no re-rasterization."""
+    if left is right or np.array_equal(left.contour, right.contour):
+        return 1.0
+    lx, ly, lm, la = left.mask()
+    rx, ry, rm, ra = right.mask()
+    x0, y0 = max(lx, rx), max(ly, ry)
+    x1 = min(lx + lm.shape[1], rx + rm.shape[1])
+    y1 = min(ly + lm.shape[0], ry + rm.shape[0])
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    inter = cv2.countNonZero(cv2.bitwise_and(
+        lm[y0 - ly:y1 - ly, x0 - lx:x1 - lx], rm[y0 - ry:y1 - ry, x0 - rx:x1 - rx]))
+    union = la + ra - inter
+    return inter / union if union else 0.0
 
 
 class PersistentStaticScanner:
@@ -159,8 +190,8 @@ class PersistentStaticScanner:
             center_span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
             if axis <= 0 or center_span > self.max_displacement * axis:
                 continue
-            reference = observations[len(observations) // 2].contour
-            ious = [contour_iou(reference, obs.contour) for obs in observations]
+            reference = observations[len(observations) // 2]
+            ious = [_observation_iou(reference, obs) for obs in observations]
             if float(np.median(ious)) < self.min_iou:
                 continue
             self.qualifying_windows += 1
