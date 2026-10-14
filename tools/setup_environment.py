@@ -414,63 +414,31 @@ def prepare_profile_environment(profile: str, previous_profile: str | None = Non
 
 
 def ensure_linux_opencv_libgl() -> None:
-    """Install Ubuntu's libgl1 only when OpenCV's libGL.so.1 is missing."""
+    """Check the mandatory OpenCV GL library without modifying the system."""
     if not sys.platform.startswith("linux"):
         return
 
     import ctypes
-
-    try:
-        ctypes.CDLL("libGL.so.1")
-        return
-    except OSError:
-        pass
-
     import platform
-
-    if platform.freedesktop_os_release().get("ID") != "ubuntu":
-        raise RuntimeError(
-            "OpenCV needs libGL.so.1, which is missing. "
-            "Install the OpenGL runtime package for this Linux distribution."
-        )
-
-    apt_get = shutil.which("apt-get")
-    if apt_get is None:
-        raise RuntimeError("Ubuntu requires apt-get to install the missing libgl1 package.")
-    if os.geteuid() == 0:
-        prefix: list[str] = []
-    else:
-        sudo = shutil.which("sudo")
-        if sudo is None:
-            raise RuntimeError(
-                "OpenCV needs libGL.so.1. Install it with 'sudo apt update && "
-                "sudo apt install -y libgl1', then rerun AMADEUS."
-            )
-        prefix = [sudo]
-
-    print(
-        "[AMADEUS] OpenCV requires libGL.so.1; installing Ubuntu package libgl1 "
-        "(sudo may request your password)...",
-        flush=True,
-    )
-    subprocess.run([*prefix, apt_get, "update"], check=True)
-    subprocess.run([*prefix, apt_get, "install", "-y", "libgl1"], check=True)
 
     try:
         ctypes.CDLL("libGL.so.1")
     except OSError as exc:
+        if platform.freedesktop_os_release().get("ID") == "ubuntu":
+            guidance = (
+                "Ubuntu package libgl1 is required. Install it separately "
+                "(e.g. 'sudo apt install libgl1') and rerun AMADEUS."
+            )
+        else:
+            guidance = "Install the OpenGL runtime library for your distribution."
         raise RuntimeError(
-            "libgl1 was installed but libGL.so.1 still cannot be loaded: "
-            f"{exc}"
+            f"OpenCV needs libGL.so.1, but it could not be loaded: {exc}. "
+            f"{guidance} AMADEUS will not request administrator privileges."
         ) from exc
 
 
 def ensure_linux_tkdnd_dependencies() -> None:
-    """Install missing Ubuntu X11 runtime libraries needed by native TkDND.
-
-    The extension is optional: an unavailable package must not prevent the
-    rest of the graphical application from launching.
-    """
+    """Report optional X11 libraries missing for TkDND, without using sudo."""
     if not sys.platform.startswith("linux"):
         return
 
@@ -490,39 +458,18 @@ def ensure_linux_tkdnd_dependencies() -> None:
     if not missing:
         return
 
-    packages = ", ".join(missing)
-    if platform.freedesktop_os_release().get("ID") != "ubuntu":
-        print(
-            f"[AMADEUS] TkDND is missing X11 libraries; install system packages "
-            f"providing: {packages}.",
-            file=sys.stderr,
-            flush=True,
-        )
-        return
-
-    apt_get = shutil.which("apt-get")
-    sudo = shutil.which("sudo") if os.geteuid() != 0 else None
-    if not apt_get or (os.geteuid() != 0 and not sudo):
-        print(
-            f"[AMADEUS] TkDND requires {packages}; please install it using "
-            f"your system package manager.",
-            file=sys.stderr,
-            flush=True,
-        )
-        return
-
-    prefix = [sudo] if sudo else []
-    print(f"[AMADEUS] Installing missing TkDND X11 dependencies: {packages}", flush=True)
-    try:
-        subprocess.run([*prefix, apt_get, "update"], check=True)
-        subprocess.run([*prefix, apt_get, "install", "-y", *missing], check=True)
-    except (OSError, subprocess.CalledProcessError) as exc:
-        print(
-            f"[AMADEUS] TkDND dependency setup failed ({exc}); "
-            "drag and drop may be unavailable.",
-            file=sys.stderr,
-            flush=True,
-        )
+    packages = " ".join(missing)
+    if platform.freedesktop_os_release().get("ID") == "ubuntu":
+        guidance = f"Install optional Ubuntu packages: {packages}"
+    else:
+        guidance = f"Install X11 libraries providing: {packages}"
+    print(
+        f"[AMADEUS] TkDND: {guidance}. "
+        "Drag and drop may be unavailable until they are installed; "
+        "no administrator privileges will be requested.",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def verify_gui_environment() -> None:
