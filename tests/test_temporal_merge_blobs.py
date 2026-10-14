@@ -108,6 +108,21 @@ class TemporalMergeHighSensitivityTests(unittest.TestCase):
             self.assertIn(0, result.excluded.get(fid, set()))
         for fid in range(80, 90):
             self.assertIn(0, result.excluded.get(fid, set()))
+        triple = [row for row in result.intervals if row["frame_start"] <= 80 <= row["frame_end"]]
+        self.assertTrue(any(row["n_forward"] >= 3 for row in triple))
+
+    def test_three_independent_blobs_merge_and_split(self):
+        third = (44, 25, 54, 35)
+        separate = (self.separate[0], self.separate[1], third)
+        combined = ((20, 25, 54, 35),)
+        graph = _graph([(70, separate), (12, combined), (70, separate)])
+        result = evaluate_temporal_merges(graph, self.params)
+        self.assertTrue(result.diagnostics["reliable"])
+        for fid in range(70, 82):
+            self.assertEqual(result.level(fid, 0), 2)
+            self.assertIn(0, result.excluded.get(fid, set()))
+        triple = [row for row in result.intervals if row["frame_start"] <= 70 <= row["frame_end"]]
+        self.assertTrue(any(row["n_forward"] >= 3 and row["n_backward"] >= 3 for row in triple))
 
     def test_morphological_shrink_before_merge_retains_confirmation(self):
         shrunk = ((20, 25, 26, 35), self.separate[1])
