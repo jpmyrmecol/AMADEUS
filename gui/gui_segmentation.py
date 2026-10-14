@@ -1667,6 +1667,7 @@ class CrossingReviewApp(ctk.CTk):
         self._area_reference_stats = (0.0, 0.0, 0.0, 0.0)
         self._min_area_slider_cap: Optional[int] = None
         self.analysis_blobs_by_frame: dict[int, list[BlobMetrics]] = {}
+        self.analysis_outlier_frames: list[int] = []
         self.analysis_frames: list[int] = []
         self.analysis_signature: Optional[tuple] = None
         self.analysis_bounds: dict[str, tuple[float, float]] = {}
@@ -2173,7 +2174,21 @@ class CrossingReviewApp(ctk.CTk):
         # bounds are entered directly, so this block belongs to the IQR branch.
         self.analysis_run_frame = ctk.CTkFrame(ana, corner_radius=0)
         self._pack_scale_entry(self.analysis_run_frame, "Analysis samples", self.analysis_sample_count_var, 10, 5000, 1)
-        ctk.CTkButton(self.analysis_run_frame, text="Analyze", command=self.analyze_sample_frames).pack(fill="x", padx=6, pady=(2, 6))
+        analysis_nav_row = ctk.CTkFrame(self.analysis_run_frame, corner_radius=0)
+        analysis_nav_row.pack(fill="x", padx=6, pady=(2, 6))
+        ctk.CTkButton(
+            analysis_nav_row, text="Analyze", command=self.analyze_sample_frames,
+        ).pack(side="left", fill="x", expand=True)
+        self.analysis_prev_outlier_button = ctk.CTkButton(
+            analysis_nav_row, text="<", width=36, state="disabled",
+            command=lambda: self._goto_sampled_outlier(-1),
+        )
+        self.analysis_prev_outlier_button.pack(side="left", padx=(6, 2))
+        self.analysis_next_outlier_button = ctk.CTkButton(
+            analysis_nav_row, text=">", width=36, state="disabled",
+            command=lambda: self._goto_sampled_outlier(1),
+        )
+        self.analysis_next_outlier_button.pack(side="left")
 
         self.area_iqr_frame = ctk.CTkFrame(ana, corner_radius=0)
         self.area_absolute_frame = ctk.CTkFrame(ana, corner_radius=0)
@@ -2412,6 +2427,14 @@ class CrossingReviewApp(ctk.CTk):
         state = "normal" if ready else "disabled"
         if hasattr(self, "export_button") and self.export_button is not None:
             self.export_button.configure(state=state)
+        outlier_nav_state = (
+            "normal" if self.reader is not None and not self.analysis_is_stale
+            and self.analysis_outlier_frames else "disabled"
+        )
+        for name in ("analysis_prev_outlier_button", "analysis_next_outlier_button"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.configure(state=outlier_nav_state)
         if hasattr(self, "screenshot_button") and self.screenshot_button is not None:
             screenshot_state = "normal" if self.reader is not None and self.frame_bgr_cache is not None else "disabled"
             self.screenshot_button.configure(state=screenshot_state)
@@ -2837,6 +2860,7 @@ class CrossingReviewApp(ctk.CTk):
 
         if legacy_additional_config:
             self.analysis_blobs_by_frame.clear()
+        self.analysis_outlier_frames.clear()
             self.analysis_frames = []
             self.analysis_signature = None
             self.analysis_bounds = {}
@@ -3180,6 +3204,7 @@ class CrossingReviewApp(ctk.CTk):
 
     def _invalidate_sampled_analysis(self, message: str = "analysis: not computed") -> None:
         self.analysis_blobs_by_frame.clear()
+        self.analysis_outlier_frames.clear()
         self.analysis_frames = []
         self.analysis_signature = None
         self.analysis_bounds = {}
@@ -4330,6 +4355,7 @@ class CrossingReviewApp(ctk.CTk):
         self.active_background_method = None
         self.current_mask_cache.clear()
         self.analysis_blobs_by_frame.clear()
+        self.analysis_outlier_frames.clear()
         self.analysis_frames = []
         self.analysis_signature = None
         self.analysis_bounds = {}
@@ -4972,6 +4998,7 @@ class CrossingReviewApp(ctk.CTk):
             return
         self.current_mask_cache.clear()
         self.analysis_blobs_by_frame.clear()
+        self.analysis_outlier_frames.clear()
         self.analysis_frames = []
         self.analysis_signature = None
         self.analysis_bounds = {}
@@ -6620,6 +6647,11 @@ class CrossingReviewApp(ctk.CTk):
                     int(fid): self._classify_blobs(blobs, self.analysis_bounds, frame_idx=int(fid))
                     for fid, blobs in self.analysis_blobs_by_frame.items()
                 }
+                self.analysis_outlier_frames = sorted(
+                    fid for fid, blobs in self.analysis_blobs_by_frame.items()
+                    if any(blob.is_crossing for blob in blobs)
+                )
+                self._update_analysis_dependent_buttons()
             if self.analysis_signature is not None and not self.analysis_is_stale:
                 label = "Absolute area bounds" if self.area_outlier_method_var.get() == "absolute" else "Area IQR stats; live IQR multipliers"
                 self.analysis_ready_var.set(f"analysis: ready ({label})")
@@ -6948,11 +6980,16 @@ class CrossingReviewApp(ctk.CTk):
         outliers = int(result["outliers"])
 
         self.analysis_blobs_by_frame = classified_by_frame
+        self.analysis_outlier_frames = sorted(
+            fid for fid, blobs in classified_by_frame.items()
+            if any(blob.is_crossing for blob in blobs)
+        )
         self.analysis_frames = frame_indices
         self.analysis_signature = (self._segmentation_signature(), tuple(frame_indices), self._classifier_signature())
         self.analysis_iqr_stats = iqr_stats_fixed
         self.analysis_bounds = bounds
         self.analysis_is_stale = False
+        self._update_analysis_dependent_buttons()
         self.analysis_ready_var.set(f"analysis: ready ({scope_text}, blobs={total}, outliers={outliers})")
         self.outlier_section_revealed = True
         self._guidance_stage = "outlier"
@@ -6971,6 +7008,22 @@ class CrossingReviewApp(ctk.CTk):
 
     def analyze_sample_frames(self):
         self._run_analysis()
+
+    def _goto_sampled_outlier(self, direction: int) -> None:
+        """Navigate outlier-containing analyzed sample frames, with wraparound."""
+        if self.reader is None or self.analysis_is_stale or not self.analysis_blobs_by_frame:
+            self.set_status("Run Analyze to navigate sampled outlier frames.")
+            return
+        frames = self.analysis_outlier_frames
+        if not frames:
+            self.set_status("No outliers in analyzed sample frames.")
+            return
+        current = int(self.current_frame)
+        if direction > 0:
+            target = next((fid for fid in frames if fid > current), frames[0])
+        else:
+            target = next((fid for fid in reversed(frames) if fid < current), frames[-1])
+        self.set_frame(target)
 
     def _classified_current_frame(self) -> tuple[np.ndarray, list[BlobMetrics]]:
         if self.frame_bgr_cache is None:
@@ -7722,6 +7775,7 @@ class CrossingReviewApp(ctk.CTk):
     def _invalidate_analysis_for_background_change(self):
         self.current_mask_cache.clear()
         self.analysis_blobs_by_frame.clear()
+        self.analysis_outlier_frames.clear()
         self.analysis_frames = []
         self.analysis_signature = None
         self.analysis_bounds = {}
