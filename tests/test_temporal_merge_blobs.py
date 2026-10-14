@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Regression tests for high-sensitivity temporal merge detection."""
 
+import ast
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from dataclasses import fields
@@ -290,6 +292,58 @@ class TemporalMergeHighSensitivityTests(unittest.TestCase):
         self.assertTrue(result.diagnostics["reliable"])
         for fid in range(101, 111):
             self.assertIn(0, result.excluded.get(fid, set()))
+
+
+class TemporalMergeGuiColorTests(unittest.TestCase):
+    @staticmethod
+    def _gui_function(name):
+        src = Path(__file__).resolve().parents[1] / "gui" / "gui_segmentation.py"
+        module = ast.parse(src.read_text(encoding="utf-8"))
+        fn = next(item for item in module.body if isinstance(item, ast.FunctionDef)
+                  and item.name == name)
+        scope = {
+            "BlobMetrics": object,
+            "TEMPORAL_MERGE_COLOR": (200, 100, 150),
+            "STATIC_OUTLIER_COLOR": (30, 200, 30),
+            "OUTLIER_COLOR": (10, 60, 250),
+            "OBB_COLOR": (250, 250, 10),
+        }
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), str(src), "exec"), scope)
+        return scope[name], scope
+
+    def test_violet_precedes_orange_even_for_area_outliers_and_uncertain(self):
+        fn, colors = self._gui_function("_blob_color")
+        for level in (1, 2, 3):
+            blob = SimpleNamespace(temporal_merge_level=level,
+                                   temporal_merge_outlier=level != 3,
+                                   persistent_static_outlier=True,
+                                   is_crossing=True)
+            self.assertEqual(fn(blob), colors["TEMPORAL_MERGE_COLOR"])
+        later = SimpleNamespace(temporal_merge_level=0,
+                                temporal_merge_outlier=False,
+                                persistent_static_outlier=False,
+                                is_crossing=True)
+        self.assertEqual(fn(later), colors["OUTLIER_COLOR"])
+
+    def test_temporal_exclusion_precedes_existing_area_crossing(self):
+        fn, _ = self._gui_function("_apply_temporal_levels")
+        blob = SimpleNamespace(temporal_merge_level=0, temporal_merge_outlier=False,
+                               is_crossing=True)
+        result = SimpleNamespace(levels={10: {0: 2}}, excluded={10: {0}})
+        fn([blob], result, 10, [True])
+        self.assertTrue(blob.temporal_merge_outlier)
+        self.assertTrue(blob.is_crossing)
+        self.assertEqual(blob.temporal_merge_level, 2)
+
+    def test_unconfirmed_violet_does_not_force_exclusion(self):
+        fn, _ = self._gui_function("_apply_temporal_levels")
+        blob = SimpleNamespace(temporal_merge_level=0, temporal_merge_outlier=False,
+                               is_crossing=False)
+        result = SimpleNamespace(levels={10: {0: 3}}, excluded={})
+        fn([blob], result, 10, [False])
+        self.assertFalse(blob.temporal_merge_outlier)
+        self.assertFalse(blob.is_crossing)
+        self.assertEqual(blob.temporal_merge_level, 3)
 
 
 if __name__ == "__main__":
