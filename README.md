@@ -41,7 +41,7 @@ Use the [installers on the website](https://amadeus.jpmyrmecol.com/#install), or
 
 For platform requirements, installation details, and troubleshooting, see the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html).
 
-To update AMADEUS, select **Update** below **Help** on the Home screen. Review the version change and confirm to install; AMADEUS closes during the update and restarts when setup is complete.
+To update AMADEUS, select **Update** below **Help** on the Home screen.
 
 ## Run tracking
 
