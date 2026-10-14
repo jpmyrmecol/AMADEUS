@@ -39,8 +39,6 @@ Use the [installers on the website](https://amadeus.jpmyrmecol.com/#install), or
 | macOS on Apple Silicon | Open `AMADEUS.command` |
 | Linux / WSL2 | Run `bash AMADEUS.sh` |
 
-On **Windows**, AMADEUS uses **uv-managed Python 3.12**, reusing an existing uv installation or installing it when needed; an independently installed system Python is not selected. On **Linux**, AMADEUS accepts **Python 3.10–3.12** and prefers a compatible system interpreter with **Tk 8.6 and the Xft font backend**. On **macOS**, AMADEUS requires **Python 3.12 with Tcl/Tk 8.6**. Setup executes using a persistent interpreter outside the AMADEUS virtual environment; `uv sync` manages the dedicated `.venv`, from which AMADEUS always runs. Setup does not use an ephemeral `uv run` environment. Ubuntu setup installs `python3-tk` and `libxft2` only when the distribution Python needs them; it installs `libgl1` only if OpenCV needs the missing library. These required system installations may request sudo. On systems without a compatible Tk runtime, setup reports the missing requirement.
-
 For platform requirements, installation details, and troubleshooting, see the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html).
 
 To update AMADEUS, select **Update** below **Help** on the Home screen. Review the version change and confirm to install; AMADEUS closes during the update and restarts when setup is complete.
