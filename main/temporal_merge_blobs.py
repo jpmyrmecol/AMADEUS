@@ -830,55 +830,79 @@ class _Evaluation:
             return "possible_fast_motion"
         return ""
 
-    def _history(self, c: int, forward: bool, t: int) -> dict:
-        """frame -> node of an arm, following unique contact matches (depth 3)."""
-        out: dict = {}
-        for _depth in range(4):
-            nodes = self.nodes_of(c)
-            for node in nodes:
-                f = int(self.frame[node])
-                if (f < t) if forward else (f > t):
-                    out.setdefault(f, int(node))
-            c = self.identity[forward].get(c)
-            if c is None:
-                break
-        return out
-
     def _common_nodes(self, c1: int, c2: int, forward: bool, t: int):
-        """Nodes of both arms at common frames, independent of elapsed time."""
+        """Find up to k clean, substantial shared frames without a time cutoff.
+
+        Scan from the event outwards, stopping as soon as independent
+        observations are sufficient. This avoids allocating an entire
+        long-video history at each contact event.
+        """
+        def valid(a, b):
+            return self.clean[a] & self.clean[b] & self.substantial[a] & self.substantial[b]
+
         ident = self.identity[forward]
+        matched_a, matched_b = [], []
         if c1 not in ident and c2 not in ident:
             s1, s2 = int(self.frame[self.ch_start[c1]]), int(self.frame[self.ch_start[c2]])
             e1, e2 = int(self.frame[self.ch_end[c1]]), int(self.frame[self.ch_end[c2]])
-            if forward:
-                lo, hi = max(s1, s2), min(e1, e2, t - 1)
-            else:
-                lo, hi = max(s1, s2, t + 1), min(e1, e2)
-            if hi < lo:
-                return np.zeros(0, np.int64), np.zeros(0, np.int64)
-            frames = np.arange(lo, hi + 1)
-            return (self.ch_nodes[self.ch_ptr[c1] + (frames - s1)],
-                    self.ch_nodes[self.ch_ptr[c2] + (frames - s2)])
-        h1, h2 = self._history(c1, forward, t), self._history(c2, forward, t)
-        frames = sorted(set(h1) & set(h2))
-        return (np.asarray([h1[f] for f in frames], dtype=np.int64),
-                np.asarray([h2[f] for f in frames], dtype=np.int64))
+            lo = max(s1, s2, t + 1 if not forward else s1)
+            hi = min(e1, e2, t - 1 if forward else e1)
+            # Check at most 1024 frames at a time, nearest the event first.
+            cursor = hi if forward else lo
+            while lo <= cursor <= hi and len(matched_a) < self.k:
+                if forward:
+                    first = max(lo, cursor - 1023)
+                    frames = np.arange(first, cursor + 1)
+                    cursor = first - 1
+                else:
+                    last = min(hi, cursor + 1023)
+                    frames = np.arange(cursor, last + 1)
+                    cursor = last + 1
+                a = self.ch_nodes[self.ch_ptr[c1] + frames - s1]
+                b = self.ch_nodes[self.ch_ptr[c2] + frames - s2]
+                good = np.flatnonzero(valid(a, b))
+                if forward:
+                    good = good[::-1]
+                good = good[:self.k - len(matched_a)]
+                matched_a.extend(a[good].tolist())
+                matched_b.extend(b[good].tolist())
+        else:
+            def walk(c):
+                last_frame = t
+                for _ in range(4):  # follow unique identity across up to 3 contacts
+                    nodes = self.nodes_of(c)
+                    for node in (nodes[::-1] if forward else nodes):
+                        f = int(self.frame[node])
+                        if (f < last_frame) if forward else (f > last_frame):
+                            last_frame = f
+                            yield f, int(node)
+                    c = ident.get(c)
+                    if c is None:
+                        break
+
+            left, right = walk(c1), walk(c2)
+            a, b = next(left, None), next(right, None)
+            while a is not None and b is not None and len(matched_a) < self.k:
+                if a[0] == b[0]:
+                    if bool(valid(a[1], b[1])):
+                        matched_a.append(a[1])
+                        matched_b.append(b[1])
+                    a, b = next(left, None), next(right, None)
+                elif (a[0] > b[0]) if forward else (a[0] < b[0]):
+                    a = next(left, None)
+                else:
+                    b = next(right, None)
+        return (np.asarray(matched_a, dtype=np.int64),
+                np.asarray(matched_b, dtype=np.int64))
 
     def _independence(self, c1: int, c2: int, forward: bool, t: int):
-        """Were both arms separate, credible blobs in at least k common frames?
+        """Were both arms separate, credible blobs in at least k shared frames?
 
-        The graph contains distinct segmented components, so requiring an
-        additional body-length OBB gap rejects real contacts between nearby
-        animals. Keep the stable-normal and substantial-area checks to avoid
-        accepting tiny fragments or momentary segmentation artefacts.
-        Recent branches of the same split are grouped by _combine().
+        Only separate normal, substantial segmented components qualify.
+        A recent common split ancestor is handled separately in _combine().
         """
         a, b = self._common_nodes(c1, c2, forward, t)
-        if a.size < self.k:
-            return False, 0
-        usable = (self.clean[a] & self.clean[b]
-                  & self.substantial[a] & self.substantial[b])
-        shared = int(np.count_nonzero(usable))
+        shared = int(a.size)
         return shared >= self.k, shared
 
     @staticmethod
