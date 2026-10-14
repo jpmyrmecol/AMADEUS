@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import json
 import os
+from zipfile import BadZipFile
 
 import numpy as np
 
@@ -153,5 +154,5 @@ def load_temporal_merge_cache(
             )
             return graph, result
     except (OSError, ValueError, TypeError, KeyError, IndexError,
-            OverflowError, UnicodeError, json.JSONDecodeError):
+            OverflowError, UnicodeError, BadZipFile, EOFError, RuntimeError):
         return None
