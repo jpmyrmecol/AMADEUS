@@ -10,12 +10,10 @@ cd "$SCRIPT_DIR"
 
 show_version_status() {
     if [ ! -f "$SCRIPT_DIR/VERSION" ]; then
-        echo "[AMADEUS] Version: unavailable"
         return 0
     fi
 
     current="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
-    echo "[AMADEUS] Version: v$current"
 
     latest_url=""
     if command -v curl >/dev/null 2>&1; then
