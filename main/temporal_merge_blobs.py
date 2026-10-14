@@ -28,9 +28,10 @@ Evaluation (re-runnable on the stored graph)
     is propagated forward from merges and backward from splits:
 
     * a merge sums only arms that are confirmed (k stable normal frames,
-      not fading, unambiguous) and pairwise independent: at some common
-      frame the gap between their OBBs was at least one body length of
-      either arm. Pieces of one fragmented body are never that far apart.
+      not fading, unambiguous) and pairwise independent: both arms must
+      coexist as separate, normal, substantial blobs for at least k frames.
+      No minimum OBB gap is required. Recent common split ancestry prevents
+      fragments of the same animal from being counted twice.
     * arms descending from the same recent split (within 2H frames) are one
       group and contribute the count from before that split (conservation),
       never a sum, so a fragmenting animal that rejoins keeps its count.
@@ -366,7 +367,8 @@ SUBSTANTIAL_AREA_RATIO = 0.5     # smaller blobs never decide an event alone
 STABLE_AREA_RATIO = 1.5          # consecutive confirmation frames within [1/1.5, 1.5]
 FADING_RATIO = 0.67              # an arm's last node must keep 2/3 of its median area
 CONTAINMENT_AREA_RATIO = 0.75    # a merged blob must be able to hold its largest member
-AMBIGUOUS_FRACTION = 0.5         # second-best containment >= 0.5 tau: mass went elsewhere
+AMBIGUOUS_FRACTION = 0.5         # a substantial second link suggests mass went elsewhere
+SECONDARY_LINK_FLOOR = 0.25      # avoid making low containment thresholds *more* restrictive
 EXIT_RADIUS = 3.0                # births/deaths within 3 L_ref may be an exit or a fast jump
 EXIT_FRAMES = 2                  # ... in this many following/preceding frames
 INDEPENDENCE_WINDOW = 10         # independence history, in units of H
@@ -816,9 +818,10 @@ class _Evaluation:
         return False
 
     def _ambiguous(self, arm: int, event_node: int, chain: int, forward: bool) -> str:
-        if forward and self.second_f[arm] >= AMBIGUOUS_FRACTION * self.tau:
+        secondary_limit = max(AMBIGUOUS_FRACTION * self.tau, SECONDARY_LINK_FLOOR)
+        if forward and self.second_f[arm] >= secondary_limit:
             return "split_mass"
-        if not forward and self.second_g[arm] >= AMBIGUOUS_FRACTION * self.tau:
+        if not forward and self.second_g[arm] >= secondary_limit:
             return "mixed_source"
         median = float(_median(self.area[self._window(chain, forward, self.k)]))
         o = self.overlap(arm, event_node) if forward else self.overlap(event_node, arm)
@@ -869,30 +872,21 @@ class _Evaluation:
                 np.asarray([h2[f] for f in frames], dtype=np.int64))
 
     def _independence(self, c1: int, c2: int, forward: bool, t: int):
-        """Did a body length of background separate the two arms once?"""
+        """Were both arms separate, credible blobs in at least k common frames?
+
+        The graph contains distinct segmented components, so requiring an
+        additional body-length OBB gap rejects real contacts between nearby
+        animals. Keep the stable-normal and substantial-area checks to avoid
+        accepting tiny fragments or momentary segmentation artefacts.
+        Recent branches of the same split are grouped by _combine().
+        """
         a, b = self._common_nodes(c1, c2, forward, t)
         if a.size < self.k:
-            return False, 0.0
-        usable = ~(self.roi_edge[a] | self.roi_edge[b])
-        if usable.sum() < self.k:
-            return False, 0.0
-        a, b = a[usable], b[usable]
-        g = self.g
-        body = max(_median(g.length[a]), _median(g.length[b]))
-        # The box gap never exceeds the centre distance: test only frames
-        # whose centres are at least one body length apart.
-        distance = np.hypot(g.cx[a] - g.cx[b], g.cy[a] - g.cy[b])
-        far = distance >= body
-        if not far.any():
-            return False, float(distance.max()) / max(body, 1e-6)
-        a, b = a[far], b[far]
-        f64 = np.float64
-        gap = _obb_gap(g.cx[a].astype(f64), g.cy[a].astype(f64), g.length[a].astype(f64),
-                       g.width[a].astype(f64), g.theta[a].astype(f64),
-                       g.cx[b].astype(f64), g.cy[b].astype(f64), g.length[b].astype(f64),
-                       g.width[b].astype(f64), g.theta[b].astype(f64))
-        best = float(gap.max()) / max(body, 1e-6)
-        return best >= 1.0, best
+            return False, 0
+        usable = (self.clean[a] & self.clean[b]
+                  & self.substantial[a] & self.substantial[b])
+        shared = int(np.count_nonzero(usable))
+        return shared >= self.k, shared
 
     @staticmethod
     def _best_clique(units: list, independent) -> list[int]:
@@ -1007,9 +1001,10 @@ class _Evaluation:
             return "result_single"
         if self.area[v] < CONTAINMENT_AREA_RATIO * ev.max_area:
             return "area_floor"
-        if forward and self.second_f[u] >= AMBIGUOUS_FRACTION * self.tau:
+        secondary_limit = max(AMBIGUOUS_FRACTION * self.tau, SECONDARY_LINK_FLOOR)
+        if forward and self.second_f[u] >= secondary_limit:
             return "split_mass"
-        if not forward and self.second_g[u] >= AMBIGUOUS_FRACTION * self.tau:
+        if not forward and self.second_g[u] >= secondary_limit:
             return "mixed_source"
         if self.area[v] < self.area[u] / STABLE_AREA_RATIO:
             other = self.sub_children[u] if forward else self.sub_parents[u]
@@ -1071,9 +1066,9 @@ class _Evaluation:
         independent = [[False] * len(good) for _ in good]
         pairs = []
         for i, j in itertools.combinations(range(len(good)), 2):
-            ok, gap = self._independence(good[i]["rep"]["chain"], good[j]["rep"]["chain"], forward, t)
+            ok, shared = self._independence(good[i]["rep"]["chain"], good[j]["rep"]["chain"], forward, t)
             independent[i][j] = independent[j][i] = ok
-            pairs.append((self._ref(good[i]["rep"]["node"]), self._ref(good[j]["rep"]["node"]), ok, gap))
+            pairs.append((self._ref(good[i]["rep"]["node"]), self._ref(good[j]["rep"]["node"]), ok, shared))
         clique = [good[i] for i in self._best_clique(good, independent)]
         reasons = []
         union = frozenset()
@@ -1165,8 +1160,8 @@ class _Evaluation:
         for row in event["arms"]:
             status = row["ambiguous"] or row["why"] or "ok"
             parts.append(f"arm {self._ref(row['node'])}:{status}")
-        for a, b, ok, gap in event["pairs"]:
-            parts.append(f"{a}~{b}:{'independent' if ok else 'dependent'} gap={gap:.2f}body")
+        for a, b, ok, shared in event["pairs"]:
+            parts.append(f"{a}~{b}:{'independent' if ok else 'dependent'} shared={shared}frames")
         if event["reasons"]:
             parts.append("reasons=" + "+".join(event["reasons"]))
         return " | ".join(parts)
