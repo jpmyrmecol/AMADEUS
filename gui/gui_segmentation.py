@@ -1593,15 +1593,14 @@ class CrossingReviewApp(ctk.CTk):
         self._static_digests: "Optional[np.ndarray]" = None
         self._static_scan_start = 0
 
-        # High-sensitivity defaults. The optional filter remains disabled until
-        # requested, because enabling it requires a Search before Processing.
-        # Horizon is recalculated from FPS on video load (1 second).
+        # High-sensitivity defaults. Search is required before Processing.
+        # Confirmation is fixed at 2 frames in the temporal merge algorithm.
         self.temporal_merge_enabled_var = tk.BooleanVar(value=False)
         self.temporal_merge_mode_var = tk.StringVar(value="one_sided")
-        self.temporal_merge_horizon_var = tk.IntVar(value=30)
-        self.temporal_merge_confirm_var = tk.IntVar(value=2)
         self.temporal_merge_tau_manual_var = tk.BooleanVar(value=True)
         self.temporal_merge_tau_var = tk.DoubleVar(value=0.30)
+        self.temporal_merge_share_rounding_var = tk.DoubleVar(value=0.25)
+        self.temporal_merge_mass_ratio_var = tk.DoubleVar(value=0.60)
         self.temporal_search_status_var = tk.StringVar(value="Disabled")
         self._temporal_search: Optional[_TemporalSearchState] = None
         self._filter_preview_mismatch = False
@@ -2107,20 +2106,21 @@ class CrossingReviewApp(ctk.CTk):
         ctk.CTkRadioButton(
             mode_row, text="Include one-sided", variable=self.temporal_merge_mode_var, value="one_sided",
         ).pack(side="left")
-        # Integer frame counts and the manual threshold are typed directly; no
-        # sliders, so the section stays short enough to show its Search button.
-        self._pack_scale_entry(
-            self.temporal_options_frame, "One-sided horizon (frames)",
-            self.temporal_merge_horizon_var, 1, 600, 1, show_slider=False,
-        )
-        self._pack_scale_entry(
-            self.temporal_options_frame, "Confirmation (frames)",
-            self.temporal_merge_confirm_var, 2, 120, 1, show_slider=False,
-        )
+        # Search parameters; all thresholds can be entered directly.
         self._pack_scale_entry(
             self.temporal_options_frame, "Manual containment",
             self.temporal_merge_tau_var, 0.1, 0.9, 0.01, is_float=True,
             enable_var=self.temporal_merge_tau_manual_var, show_slider=False,
+        )
+        self._pack_scale_entry(
+            self.temporal_options_frame, "Share rounding",
+            self.temporal_merge_share_rounding_var, 0.0, 1.0, 0.01,
+            is_float=True, show_slider=False,
+        )
+        self._pack_scale_entry(
+            self.temporal_options_frame, "One-sided mass ratio",
+            self.temporal_merge_mass_ratio_var, 0.01, 1.0, 0.01,
+            is_float=True, show_slider=False,
         )
         search_row = ctk.CTkFrame(self.temporal_options_frame, corner_radius=0)
         search_row.pack(fill="x", padx=6, pady=(4, 2))
@@ -2143,9 +2143,9 @@ class CrossingReviewApp(ctk.CTk):
         ).pack(fill="x", padx=6, pady=(0, 4))
         self._toggle_temporal_options()
         for var in (
-            self.temporal_merge_mode_var, self.temporal_merge_horizon_var,
-            self.temporal_merge_confirm_var, self.temporal_merge_tau_manual_var,
-            self.temporal_merge_tau_var,
+            self.temporal_merge_mode_var, self.temporal_merge_tau_manual_var,
+            self.temporal_merge_tau_var, self.temporal_merge_share_rounding_var,
+            self.temporal_merge_mass_ratio_var,
         ):
             var.trace_add("write", lambda *_: self._on_temporal_parameters_changed())
 
@@ -2483,10 +2483,10 @@ class CrossingReviewApp(ctk.CTk):
             "static_max_movement": self.static_max_movement_var,
             "temporal_merge_enabled": self.temporal_merge_enabled_var,
             "temporal_merge_mode": self.temporal_merge_mode_var,
-            "temporal_merge_horizon_frames": self.temporal_merge_horizon_var,
-            "temporal_merge_confirm_frames": self.temporal_merge_confirm_var,
             "temporal_merge_tau_manual": self.temporal_merge_tau_manual_var,
             "temporal_merge_tau": self.temporal_merge_tau_var,
+            "temporal_merge_share_rounding": self.temporal_merge_share_rounding_var,
+            "temporal_merge_one_sided_mass_ratio": self.temporal_merge_mass_ratio_var,
             "area_outlier_method": self.area_outlier_method_var,
             "area_iqr_min": self.area_iqr_min_var,
             "area_iqr_max": self.area_iqr_max_var,
@@ -2705,8 +2705,7 @@ class CrossingReviewApp(ctk.CTk):
                 pass
         if "show_centers" not in settings:
             self.show_centers_var.set(True)
-        # Old configs must not inherit these optional settings from another
-        # video. The window itself is initialized from the loaded video FPS.
+        # Old configs must not inherit optional settings from another video.
         if "static_exclusion_enabled" not in settings:
             self.static_exclusion_enabled_var.set(False)
         if "static_presence" not in settings:
@@ -2724,6 +2723,19 @@ class CrossingReviewApp(ctk.CTk):
             self.temporal_merge_tau_var.set(min(0.9, max(0.1, float(settings.get("temporal_merge_tau", 0.30)))))
         except (TypeError, ValueError):
             self.temporal_merge_tau_var.set(0.30)
+        # Ignore legacy horizon/confirmation keys in saved configs; those
+        # controls no longer exist. Restore the new parameters explicitly.
+        for key, var, default, lower, upper in (
+            ("temporal_merge_share_rounding", self.temporal_merge_share_rounding_var, 0.25, 0.0, 1.0),
+            ("temporal_merge_one_sided_mass_ratio", self.temporal_merge_mass_ratio_var, 0.60, 0.01, 1.0),
+        ):
+            try:
+                value = float(settings.get(key, default))
+                if not math.isfinite(value):
+                    raise ValueError("nonfinite")
+                var.set(max(lower, min(upper, value)))
+            except (TypeError, ValueError):
+                var.set(default)
         # Loading an older session must not inherit smoothing from the last one.
         self.single_blob_smoothing_enabled_var.set(bool(settings.get("single_blob_smoothing_enabled", False)))
         self.single_blob_smoothing_level_var.set(max(1, min(20, int(settings.get("single_blob_smoothing_level", 3)))))
@@ -2740,15 +2752,6 @@ class CrossingReviewApp(ctk.CTk):
         if "static_frame_window" not in settings and self.reader is not None:
             fps = float(self.reader.fps) if self.reader.fps and self.reader.fps > 0 else 30.0
             self.static_frame_window_var.set(max(2, int(round(0.5 * fps))))
-        horizon, confirm = self._default_temporal_frames()
-        for key, var, default, lower, upper in (
-                ("temporal_merge_horizon_frames", self.temporal_merge_horizon_var, horizon, 1, 600),
-                ("temporal_merge_confirm_frames", self.temporal_merge_confirm_var, confirm, 2, 120)):
-            try:
-                value = int(settings[key]) if key in settings else default
-            except (TypeError, ValueError):
-                value = default
-            var.set(max(lower, min(upper, value)))
         # Search results are intentionally not trusted from a saved config:
         # the current video must be searched again before exclusion.
         self._static_search_signature = None
@@ -4339,9 +4342,6 @@ class CrossingReviewApp(ctk.CTk):
             "Not searched — press Search before Processing"
             if self.static_exclusion_enabled_var.get() else "Disabled"
         )
-        horizon, confirm = self._default_temporal_frames()
-        self.temporal_merge_horizon_var.set(horizon)
-        self.temporal_merge_confirm_var.set(confirm)
         self._reset_temporal_search()
         self.current_frame = 0
         self.frame_var.set(0)
@@ -5502,19 +5502,14 @@ class CrossingReviewApp(ctk.CTk):
             self._update_temporal_status()
         self._refresh_search_glows()
 
-    def _default_temporal_frames(self) -> tuple[int, int]:
-        """High-sensitivity defaults: 1 s horizon and 2-frame confirmation."""
-        fps = float(self.reader.fps) if self.reader is not None and self.reader.fps and self.reader.fps > 0 else 30.0
-        return min(600, max(1, int(round(fps)))), 2
-
     def _temporal_params(self):
         from main.temporal_merge_blobs import TemporalMergeParams
         tau = float(self.temporal_merge_tau_var.get()) if self.temporal_merge_tau_manual_var.get() else None
         params = TemporalMergeParams(
-            horizon_frames=int(self.temporal_merge_horizon_var.get()),
-            confirm_frames=int(self.temporal_merge_confirm_var.get()),
             tau=tau,
             include_one_sided=self.temporal_merge_mode_var.get() == "one_sided",
+            share_rounding=float(self.temporal_merge_share_rounding_var.get()),
+            one_sided_mass_ratio=float(self.temporal_merge_mass_ratio_var.get()),
         )
         params.validate()
         return params
@@ -5524,7 +5519,7 @@ class CrossingReviewApp(ctk.CTk):
             p = self._temporal_params()
         except (ValueError, TypeError, tk.TclError):
             return ("invalid",)
-        return (p.horizon_frames, p.confirm_frames, p.tau, p.include_one_sided)
+        return (p.tau, p.include_one_sided, p.share_rounding, p.one_sided_mass_ratio)
 
     def _search_frame_range(self) -> tuple[int, int]:
         start = max(0, int(self.training_frame_start_var.get()))
@@ -8288,8 +8283,9 @@ class CrossingReviewApp(ctk.CTk):
             f"  high / medium / uncertain : {counts['high_intervals']} / {counts['medium_intervals']} / "
             f"{counts['uncertain_intervals']} intervals",
             f"  high / medium blobs       : {counts['high_blobs']} / {counts['medium_blobs']}",
-            f"  horizon / confirmation    : {int(params.horizon_frames)} / "
-            f"{int(params.confirm_frames)} frames",
+            "  confirmation              : 2 frames (fixed)",
+            f"  share rounding            : {params.share_rounding:.2f}",
+            f"  one-sided mass ratio      : {params.one_sided_mass_ratio:.2f}",
             f"  containment threshold     : {diag.get('tau')} ({diag.get('tau_mode')}; "
             f"self-containment P10={diag.get('self_containment_p10')}, pairs={diag.get('calibration_pairs')})",
             f"  reliable for exclusion    : {'yes' if diag.get('reliable') else 'no'}",
