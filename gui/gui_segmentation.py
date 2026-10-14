@@ -5616,8 +5616,7 @@ class CrossingReviewApp(ctk.CTk):
 
     def _restore_temporal_search_cache(self) -> None:
         """Restore verified Search data on config load; never trust stale blobs."""
-        if (not self.temporal_merge_enabled_var.get() or self.reader is None
-                or not self.config_path):
+        if self.reader is None or not self.config_path:
             return
         from main.temporal_merge_cache import load_temporal_merge_cache
 
@@ -5640,8 +5639,9 @@ class CrossingReviewApp(ctk.CTk):
                 reclassifiable=not self._temporal_geometry_dependent(),
                 start=start, end=end, graph=graph, result=result, params=params,
             )
-            self.temporal_search_status_var.set(
-                "Saved Search loaded — " + self._temporal_summary_text(result))
+            if self.temporal_merge_enabled_var.get():
+                self.temporal_search_status_var.set(
+                    "Saved Search loaded — " + self._temporal_summary_text(result))
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             self._temporal_search = None
             self.temporal_search_status_var.set(
