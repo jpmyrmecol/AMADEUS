@@ -33,13 +33,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-".venv\Scripts\python.exe" tools\launch_summary.py
-if errorlevel 1 (
-    echo [ERROR] Failed to check the AMADEUS GPU runtime.
-    call :keep_prompt_open
-    exit /b 1
-)
-
 set "AMADEUS_SPLASH_TOKEN=%RANDOM%%RANDOM%%RANDOM%"
 set "AMADEUS_SPLASH_SECONDS=4"
 start "AMADEUS Splash" /min ".venv\Scripts\python.exe" "gui\splash_standalone.py" "%AMADEUS_SPLASH_TOKEN%" "%AMADEUS_SPLASH_SECONDS%"
