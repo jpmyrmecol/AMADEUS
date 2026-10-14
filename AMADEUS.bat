@@ -79,9 +79,14 @@ if not defined UV_EXE (
 REM Setup may rebuild .venv; run it outside that environment to avoid locking its Python.
 set "VIRTUAL_ENV="
 set "SETUP_PYTHON="
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\windows_python.ps1"`) do set "SETUP_PYTHON=%%I"
-if not defined SETUP_PYTHON set "SETUP_PYTHON=3.12"
-"%UV_EXE%" --quiet run --no-project --isolated --python "%SETUP_PYTHON%" python tools\setup_environment.py --uv "%UV_EXE%"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\windows_python.ps1" -UvExecutable "%UV_EXE%"`) do set "SETUP_PYTHON=%%I"
+if not defined SETUP_PYTHON (
+    echo [ERROR] No stable Python 3.10-3.12 could be prepared for setup.
+    endlocal
+    exit /b 1
+)
+echo [AMADEUS] Setup Python (persistent): %SETUP_PYTHON%
+"%SETUP_PYTHON%" tools\setup_environment.py --uv "%UV_EXE%"
 set "AMADEUS_SETUP_EXIT=%errorlevel%"
 endlocal & exit /b %AMADEUS_SETUP_EXIT%
 
