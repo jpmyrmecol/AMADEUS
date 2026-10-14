@@ -49,6 +49,12 @@ def python_base_prefix(python: str) -> str:
     ).strip()
 
 
+def python_base_executable(python: str) -> str:
+    return subprocess.check_output(
+        [python, "-c", "import sys; print(sys._base_executable)"], text=True
+    ).strip()
+
+
 def _candidates() -> list[str]:
     if sys.platform == "darwin":
         candidates = [
