@@ -679,7 +679,6 @@ def install_amadeus_command() -> Path:
             'set /p AMADEUS_INSTALLED_VERSION=<"%AMADEUS_ROOT%\\VERSION"\n'
             'echo [AMADEUS] Version: v%AMADEUS_INSTALLED_VERSION%\n'
             'echo [AMADEUS] Location: %AMADEUS_ROOT%\n'
-            '"%AMADEUS_ROOT%\\.venv\\Scripts\\python.exe" tools\\launch_summary.py\n'
             'set "AMADEUS_SPLASH_TOKEN=%RANDOM%%RANDOM%%RANDOM%"\n'
             'start "AMADEUS Splash" /min "%AMADEUS_ROOT%\\.venv\\Scripts\\python.exe" "%AMADEUS_ROOT%\\gui\\splash_standalone.py" "%AMADEUS_SPLASH_TOKEN%" "4"\n'
             '"%AMADEUS_ROOT%\\.venv\\Scripts\\amadeus.exe" %*\n'
@@ -715,7 +714,6 @@ def install_amadeus_command() -> Path:
         f"cd {shlex.quote(str(PROJECT_ROOT))}\n"
         'printf "[AMADEUS] Version: v%s\\n" "$(tr -d \'[:space:]\' < VERSION)"\n'
         'echo "[AMADEUS] Location: $PWD"\n'
-        f"{shlex.quote(str(ENVIRONMENT_ROOT / 'bin' / 'python'))} tools/launch_summary.py\n"
         f"{shlex.quote(str(ENVIRONMENT_ROOT / 'bin' / 'amadeus'))} \"$@\"\n"
         "status=$?\n"
         "if [ \"$status\" -eq 42 ] || [ \"$status\" -eq 43 ]; then\n"
