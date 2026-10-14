@@ -124,6 +124,61 @@ class TemporalMergeHighSensitivityTests(unittest.TestCase):
         triple = [row for row in result.intervals if row["frame_start"] <= 70 <= row["frame_end"]]
         self.assertTrue(any(row["n_forward"] >= 3 and row["n_backward"] >= 3 for row in triple))
 
+    def test_parting_animals_stay_single(self):
+        graph = _graph([(60, self.separate), (10, self.merged), (60, self.separate)])
+        result = evaluate_temporal_merges(graph, self.params)
+        for fid in list(range(60)) + list(range(70, 130)):
+            self.assertEqual(result.excluded.get(fid, set()), set())
+
+    def test_group_split_leaves_pair_with_its_count(self):
+        # Three animals merge, then part as a pair and a single: the pair
+        # keeps two of the three known animals by its share of the mass.
+        third = (44, 25, 54, 35)
+        graph = _graph([
+            (60, (self.separate[0], self.separate[1], third)),
+            (10, ((20, 25, 54, 35),)),
+            (70, (self.merged[0], third)),
+        ])
+        result = evaluate_temporal_merges(graph, self.params)
+        self.assertTrue(result.diagnostics["reliable"])
+        for fid in range(70, 140):
+            self.assertIn(0, result.excluded.get(fid, set()))
+            self.assertNotIn(1, result.excluded.get(fid, set()))
+
+    def test_one_sided_merge_beyond_horizon_needs_its_mass(self):
+        # One-sided evidence lasts beyond H while the blob keeps its mass;
+        # shrinking to one body (an animal may have left unseen) ends it.
+        shrunk = ((20, 25, 30, 35),)
+        graph = _graph([(60, self.separate), (50, self.merged), (40, shrunk)])
+        result = evaluate_temporal_merges(graph, self.params)
+        self.assertTrue(result.diagnostics["reliable"])
+        for fid in range(60, 110):
+            self.assertIn(0, result.excluded.get(fid, set()))
+        for fid in range(110, 150):
+            self.assertNotIn(0, result.excluded.get(fid, set()))
+
+    def test_contact_match_ignores_inflated_contact_frame(self):
+        # A single body looks pair-sized in the frame before touching an
+        # overlapped pair. Matching by that frame would hand it the pair's
+        # later count; sizes next to the contact keep it single.
+        pair, single = (20, 25, 33, 35), (20, 45, 30, 55)
+        graph = _graph([
+            (60, (pair, single)),
+            (1, (pair, (20, 45, 39, 55))),
+            (1, ((20, 25, 39, 55),)),
+            (30, ((20, 25, 42, 35), single)),
+            (60, (self.separate[0], self.separate[1], single)),
+        ])
+        result = evaluate_temporal_merges(graph, self.params)
+        self.assertTrue(result.diagnostics["reliable"])
+        for fid in range(61):
+            self.assertNotIn(1, result.excluded.get(fid, set()))
+        for fid in range(62, 92):
+            self.assertIn(0, result.excluded.get(fid, set()))
+            self.assertNotIn(1, result.excluded.get(fid, set()))
+        for fid in range(92, 152):
+            self.assertNotIn(2, result.excluded.get(fid, set()))
+
     def test_morphological_shrink_before_merge_retains_confirmation(self):
         shrunk = ((20, 25, 26, 35), self.separate[1])
         graph = _graph([

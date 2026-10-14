@@ -36,10 +36,16 @@ Evaluation (re-runnable on the stored graph)
       frames) are one group and contribute the count before that split,
       never a sum, so a fragmenting animal that rejoins keeps its count.
     * a merge followed by a split within H, and complex exchanges, are
-      bridged only by a unique one-to-one match of substantial blobs. The
-      matched blob keeps the arm's identity (its history counts towards
-      confirmation and independence); a count >= 2 inherited this way can
-      complete a High decision but never create a Medium one.
+      bridged by a unique one-to-one match of substantial blobs, compared by
+      their median areas next to the contact (a body touching another one
+      already looks larger in the contact frames). The matched blob keeps the
+      arm's identity (its history counts towards confirmation and
+      independence) and its count.
+    * otherwise a known count is shared by mass: a blob that takes a share s
+      of the mass leaving a split (or, backward, entering a merge) holds
+      floor(n * s + 0.25) of the n known animals, as disjoint atoms. Two
+      animals parting stay one each; three parting as a pair and a single
+      leave the pair with a count of 2.
     * along a chain the count is kept (occlusion hides area, not animals)
       unless a visible exit explains a loss: a substantial birth or death
       nearby, part of the mass flowing to another blob, or an area below
@@ -51,10 +57,13 @@ Decisions (only blobs that are normal after classification are flagged)
     High    forward and backward evidence >= 2 at the blob; excluded only when
             the overlap calibration is reliable (>= 100 unambiguous pairs,
             self-containment P10 >= 0.5, continuation rate >= 0.85).
-    Medium  one-sided direct evidence within H frames of its event; excluded
-            only in "include one-sided" mode with reliable calibration.
-    Other evidence (beyond H, conflicts, failed events) is reported as
-    uncertain and never excluded.
+    Medium  one-sided evidence >= 2 that has not passed an ROI edge: within H
+            frames of its event, and beyond H while the blob keeps at least
+            0.6 of its mass next to that event (an animal leaving unseen, for
+            example into a hole, takes its area along). Excluded only in
+            "include one-sided" mode with reliable calibration.
+    Other evidence (one-sided after an ROI edge or a mass loss, conflicts,
+    failed events) is reported as uncertain and never excluded.
 """
 from __future__ import annotations
 
@@ -373,6 +382,8 @@ EXIT_FRAMES = 2                  # ... in this many following/preceding frames
 INDEPENDENCE_WINDOW = 10         # independence history, in units of H
 MATCH_AREA_RATIO = 1.33          # pass-through match: area ratio within [1/1.33, 1.33]
 MATCH_UNIQUENESS = 1.5           # second-best assignment must cost >= 1.5x the best
+SHARE_ROUNDING = 0.25            # a mass share s of n known animals holds floor(n * s + 0.25)
+ONE_SIDED_MASS_RATIO = 0.6       # beyond H, one-sided evidence needs 0.6 of the event-side mass
 TAU_SCALE = 0.8
 TAU_MIN = 0.3
 TAU_MAX = 0.6
@@ -461,7 +472,7 @@ def _blob_refs(frames: np.ndarray, local: np.ndarray, limit: int = 0) -> str:
 @dataclass(frozen=True)
 class _Evidence:
     atoms: frozenset         # chains of independent confirmed animals
-    direct: bool             # False: passed through a match or an ROI edge
+    direct: bool             # False: passed an ROI edge, where an animal may leave unseen
     frame: int               # relative frame of the event that established it, -1 none
     event: int               # event id, -1 none
     max_area: float          # largest member area (a blob must be able to hold it)
@@ -493,7 +504,7 @@ class _Evaluation:
         self.p = params
         self.H = int(params.horizon_frames)
         self.k = int(params.confirm_frames)
-        # H controls how long one-sided *positive* evidence remains valid.
+        # H bounds how long one-sided *positive* evidence holds unchecked.
         # It must not turn a split hundreds of frames ago into permanent
         # evidence that two subsequently separate animals are one fragment.
         self.split_history = min(2 * self.H, max(10, 2 * self.k))
@@ -521,6 +532,8 @@ class _Evaluation:
         self._confirmed_cache: dict = {}
         self.diag: dict = {"warnings": []}
         self._match_cache: dict = {}
+        self._share_cache: dict = {}
+        self._mass_cache: dict = {}
 
     # -- reference scale and calibration -------------------------------------
     def _unique_pairs(self):
@@ -894,16 +907,22 @@ class _Evaluation:
                     best, best_key = list(subset), key
         return best
 
-    def _match(self, sources: list[int], targets: list[int]):
-        """Unique one-to-one match target -> source, or None."""
+    def _match(self, sources: list[int], targets: list[int], forward: bool):
+        """Unique one-to-one match target -> source, or None.
+
+        Sizes are chain medians next to the contact (sources end there when
+        forward, targets start there), not the contact frames themselves.
+        """
         n = len(sources)
         if n < 2 or n != len(targets) or n > 5:
             return None
         g = self.g
+        source_mass = [max(self._mass(int(self.chain[s]), forward), 1.0) for s in sources]
+        target_mass = [self._mass(int(self.chain[t]), not forward) for t in targets]
         cost = np.full((n, n), np.inf)
         for i, s in enumerate(sources):
             for j, t in enumerate(targets):
-                ratio = self.area[t] / max(self.area[s], 1.0)
+                ratio = target_mass[j] / source_mass[i]
                 if 1 / MATCH_AREA_RATIO <= ratio <= MATCH_AREA_RATIO:
                     d = math.hypot(float(g.cx[t] - g.cx[s]), float(g.cy[t] - g.cy[s])) / self.L
                     cost[i, j] = d + 2.0 * abs(math.log(ratio))
@@ -1106,6 +1125,7 @@ class _Evaluation:
         comp = int(self.cc[head] if forward else self.pc[head])
         sources = [int(x) for x in (self.parents(comp) if forward else self.children(comp))]
         targets = [int(x) for x in (self.children(comp) if forward else self.parents(comp))]
+        givers, receivers = list(sources), list(targets)
         anc: dict = {}
         for s in sources:
             anc.update(lineage[int(self.chain[s])] or {})
@@ -1127,17 +1147,73 @@ class _Evaluation:
         if head in targets and sources:
             cache_key = (forward, tuple(sorted(sources)), tuple(sorted(targets)))
             if cache_key not in self._match_cache:
-                self._match_cache[cache_key] = self._match(sources, targets)
+                self._match_cache[cache_key] = self._match(sources, targets, forward)
             match = self._match_cache[cache_key]
             if match and head in match:
                 source = int(self.chain[match[head]])
                 self.identity[forward][c] = source
                 donor = boundary[source]
-                if donor is not None and donor.n >= 2:
-                    return _Evidence(donor.atoms, False, donor.frame, donor.event, donor.max_area), anc
                 if donor is not None:
-                    return donor, anc          # same animal: keep its atom
+                    return donor, anc          # same animals (one atom for a single)
+        shares = self._share(comp, forward, givers, receivers, boundary, t)
+        if head in shares:
+            return shares[head], anc
         return _fresh(c), anc
+
+    def _mass(self, c: int, at_end: bool) -> float:
+        """Median area of chain c over the nodes next to its end (or start)."""
+        key = (c, at_end)
+        mass = self._mass_cache.get(key)
+        if mass is None:
+            size = min(int(self.ch_len[c]), max(10, 4 * self.k))
+            mass = float(_median(self.area[self._window(c, at_end, size)])) if size else 0.0
+            self._mass_cache[key] = mass
+        return mass
+
+    def _share(self, comp: int, forward: bool, givers: list, receivers: list,
+               boundary: list, t: int) -> dict:
+        """Receiver node -> its share of the givers' known count, where >= 2.
+
+        Animals move with mass: a receiver taking a fraction s of the
+        receivers' mass holds floor(n * s + 0.25) of the n known animals.
+        Disjoint atoms keep receivers that later re-merge from counting more
+        animals than were known before they parted.
+        """
+        key = (forward, comp)
+        if key in self._share_cache:
+            return self._share_cache[key]
+        out: dict = {}
+        self._share_cache[key] = out
+        evs = [boundary[int(self.chain[g])] for g in givers]
+        if len(receivers) < 2 or any(e is None for e in evs):
+            return out
+        pool = sorted(frozenset().union(*(e.atoms for e in evs)))
+        n = len(pool)
+        if n < 2:
+            return out
+        direct = all(e.direct for e in evs)
+        # Receivers end at a merge (backward) or start at a split (forward).
+        masses = [self._mass(int(self.chain[r]), not forward) for r in receivers]
+        total = float(sum(masses))
+        if total <= 0:
+            return out
+        for i in sorted(range(len(receivers)), key=lambda i: (-masses[i], receivers[i])):
+            r = receivers[i]
+            share = masses[i] / total
+            count = min(int(math.floor(n * share + SHARE_ROUNDING)), len(pool))
+            if count < 2 or not self.substantial[r]:
+                continue
+            event = len(self.events)
+            # The area floor along the chain: one animal's share of the mass.
+            out[r] = _Evidence(frozenset(pool[:count]), direct, t, event, masses[i] / count)
+            pool = pool[count:]
+            self.events.append({
+                "id": event, "direction": "forward" if forward else "backward",
+                "type": "split_share" if forward else "merge_share", "frame": t + self.g.first_frame,
+                "node": r, "chain": int(self.chain[r]), "arms": [], "pairs": [], "n": count,
+                "source": "mass_share", "reasons": [],
+                "detail": f"share={share:.2f} of n={n} from {';'.join(self._ref(g) for g in givers)}"})
+        return out
 
     # -- decisions ------------------------------------------------------------
     def _describe(self, event_id: int) -> str:
@@ -1145,6 +1221,8 @@ class _Evaluation:
             return ""
         event = self.events[int(event_id)]
         parts = [f"{event['type']}@{event['frame']} n={event['n']} source={event['source']}"]
+        if event.get("detail"):
+            parts.append(event["detail"])
         for row in event["arms"]:
             status = row["ambiguous"] or row["why"] or "ok"
             parts.append(f"arm {self._ref(row['node'])}:{status}")
@@ -1202,8 +1280,12 @@ class _Evaluation:
             event[has] = table[idx, 3]
         flaggable = self.normal & ~self.edge & ~self.unknown
         high = (nf >= 2) & (nb >= 2)
-        med_f = (nf >= 2) & f_direct & (self.frame <= f_frame + H - 1) & (f_frame >= 0)
-        med_b = (nb >= 2) & b_direct & (self.frame >= b_frame - H + 1) & (b_frame >= 0)
+        med_f = (nf >= 2) & f_direct & (f_frame >= 0)
+        med_b = (nb >= 2) & b_direct & (b_frame >= 0)
+        # Beyond H a blob must also keep its mass: an animal that left unseen
+        # takes its area along, while occlusion alone shrinks a group less.
+        med_f &= (self.frame <= f_frame + H - 1) | self._keeps_mass(med_f, at_end=False)
+        med_b &= (self.frame >= b_frame - H + 1) | self._keeps_mass(med_b, at_end=True)
         medium = (med_f | med_b) & ~high
         level = np.zeros(n, dtype=np.int8)
         target = flaggable & ~self.result_single
@@ -1242,7 +1324,18 @@ class _Evaluation:
             "excluded_blobs": sum(len(v) for v in excluded.values()),
         }
         self.diag["events"] = len(self.events)
+        self.diag["mass_shares"] = sum(1 for e in self.events if e["source"] == "mass_share")
         return TemporalMergeResult(levels, excluded, rows, self.diag, counts, g.first_frame, g.digests)
+
+    def _keeps_mass(self, candidates: np.ndarray, at_end: bool) -> np.ndarray:
+        """Candidates holding >= ONE_SIDED_MASS_RATIO of their chain's mass at its start/end."""
+        out = np.zeros(self.g.node_count, dtype=bool)
+        nodes = np.flatnonzero(candidates & (self.chain >= 0))
+        if nodes.size:
+            chains, index = np.unique(self.chain[nodes], return_inverse=True)
+            mass = np.array([self._mass(int(c), at_end) for c in chains], dtype=np.float32)
+            out[nodes] = self.area[nodes] >= ONE_SIDED_MASS_RATIO * mass[index]
+        return out
 
     def _reliability(self, active: np.ndarray) -> None:
         last = self.frame == self.g.frame_count - 1
@@ -1292,8 +1385,8 @@ class _Evaluation:
             else:
                 excluded_nodes = nodes[lv > 0] if exclude_medium else high
             events = by_chain.get(c, [])
-            merge = next((e for e in events if e["direction"] == "forward"), None)
-            split = next((e for e in events if e["direction"] == "backward"), None)
+            merge = next((e for e in events if e["type"] == "merge"), None)
+            split = next((e for e in events if e["type"] == "split"), None)
             fwd_ids = [int(x) for x in f_event[nodes] if x >= 0]
             bwd_ids = [int(x) for x in b_event[nodes] if x >= 0]
             reasons = []
