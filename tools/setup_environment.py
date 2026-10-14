@@ -465,6 +465,66 @@ def ensure_linux_opencv_libgl() -> None:
         ) from exc
 
 
+def ensure_linux_tkdnd_dependencies() -> None:
+    """Install missing Ubuntu X11 runtime libraries needed by native TkDND.
+
+    The extension is optional: an unavailable package must not prevent the
+    rest of the graphical application from launching.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+
+    import ctypes
+    import platform
+
+    required = {
+        "libX11.so.6": "libx11-6",
+        "libXcursor.so.1": "libxcursor1",
+    }
+    missing = []
+    for library, package in required.items():
+        try:
+            ctypes.CDLL(library)
+        except OSError:
+            missing.append(package)
+    if not missing:
+        return
+
+    packages = ", ".join(missing)
+    if platform.freedesktop_os_release().get("ID") != "ubuntu":
+        print(
+            f"[AMADEUS] TkDND is missing X11 libraries; install system packages "
+            f"providing: {packages}.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+
+    apt_get = shutil.which("apt-get")
+    sudo = shutil.which("sudo") if os.geteuid() != 0 else None
+    if not apt_get or (os.geteuid() != 0 and not sudo):
+        print(
+            f"[AMADEUS] TkDND requires {packages}; please install it using "
+            f"your system package manager.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+
+    prefix = [sudo] if sudo else []
+    print(f"[AMADEUS] Installing missing TkDND X11 dependencies: {packages}", flush=True)
+    try:
+        subprocess.run([*prefix, apt_get, "update"], check=True)
+        subprocess.run([*prefix, apt_get, "install", "-y", *missing], check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(
+            f"[AMADEUS] TkDND dependency setup failed ({exc}); "
+            "drag and drop may be unavailable.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def verify_gui_environment() -> None:
     """Exercise CustomTkinter dropdowns under the supported Tk runtime."""
     code = """
@@ -958,6 +1018,7 @@ def main() -> int:
         READY_MARKER.unlink(missing_ok=True)
         check_uv_version(args.uv)
         ensure_linux_opencv_libgl()
+        ensure_linux_tkdnd_dependencies()
 
         profile = ""
         last_error: Exception | None = None
