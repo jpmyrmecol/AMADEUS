@@ -55,6 +55,7 @@ def save_temporal_merge_cache(
         "first_frame": int(graph.first_frame),
         "image_shape": list(graph.image_shape),
         "levels": result.levels,
+        "animals": result.animals,
         "excluded": {str(k): sorted(map(int, v)) for k, v in result.excluded.items()},
         "intervals": result.intervals,
         "diagnostics": result.diagnostics,
@@ -132,7 +133,9 @@ def load_temporal_merge_cache(
                       for f, row in meta["levels"].items()}
             excluded = {int(f): set(map(int, indices))
                         for f, indices in meta["excluded"].items()}
-            for mapping in (levels, excluded):
+            animals = {int(f): {int(i): int(n) for i, n in row.items()}
+                       for f, row in meta["animals"].items()}
+            for mapping in (levels, excluded, animals):
                 for frame, selected in mapping.items():
                     offset = int(frame) - first
                     if not 0 <= offset < frames:
@@ -140,11 +143,13 @@ def load_temporal_merge_cache(
                     count = int(offsets[offset + 1] - offsets[offset])
                     if any(not 0 <= int(index) < count for index in selected):
                         return None
+            if any(n < 2 for row in animals.values() for n in row.values()):
+                return None
             result = TemporalMergeResult(
                 levels=levels, excluded=excluded,
                 intervals=meta["intervals"], diagnostics=meta["diagnostics"],
                 counts=meta["counts"], first_frame=first,
-                digests=arrays["digests"],
+                digests=arrays["digests"], animals=animals,
             )
             return graph, result
     except (OSError, ValueError, TypeError, KeyError, IndexError,
