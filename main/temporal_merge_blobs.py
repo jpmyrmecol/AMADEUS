@@ -773,22 +773,23 @@ class _Evaluation:
             if _median(self.area[nodes]) < SUBSTANTIAL_AREA_RATIO * self.S:
                 return "small"
             return "" if not self._confirmed(previous, forward, depth + 1) else "short"
-        nodes = self._window(c, forward, self.k)
-        if not self.normal[nodes].all():
-            return "not_normal"
-        if (self.edge[nodes] | self.roi_edge[nodes] | self.unknown[nodes]).any():
-            return "edge"
-        areas = self.area[nodes]
-        ratio = areas[1:] / np.maximum(areas[:-1], 1.0)
-        if ((ratio < 1 / STABLE_AREA_RATIO) | (ratio > STABLE_AREA_RATIO)).any():
-            return "unstable"
-        median = _median(areas)
-        if median < SUBSTANTIAL_AREA_RATIO * self.S:
+        # Bodies often change apparent area just before contact. Require a
+        # stable, clean k-frame observation near the event, but do not demand
+        # that the last k frames themselves have stable contour areas.
+        nodes = self._window(c, forward, min(int(self.ch_len[c]), max(10, 4 * self.k)))
+        if not self.clean[nodes[-1] if forward else nodes[0]]:
+            return "edge_or_outlier"
+        if not self.substantial[nodes[-1] if forward else nodes[0]]:
             return "small"
-        event_node = nodes[-1] if forward else nodes[0]
-        if self.area[event_node] < FADING_RATIO * median:
-            return "fading" if forward else "emerging"
-        return ""
+        for i in range(nodes.size - self.k + 1):
+            sample = nodes[i:i + self.k]
+            if not self.clean[sample].all() or not self.substantial[sample].all():
+                continue
+            areas = self.area[sample]
+            ratio = areas[1:] / np.maximum(areas[:-1], 1.0)
+            if ((ratio >= 1 / STABLE_AREA_RATIO) & (ratio <= STABLE_AREA_RATIO)).all():
+                return ""
+        return "unstable_or_not_normal"
 
     def _near(self, table: dict, frames, x: float, y: float, radius: float) -> bool:
         for f in frames:
@@ -990,12 +991,16 @@ class _Evaluation:
             other = self.sub_children[u] if forward else self.sub_parents[u]
             if other >= 2:
                 return "shrink_exit"
-        t = int(self.frame[v])
-        frames = range(t, t + EXIT_FRAMES + 1) if forward else range(t - EXIT_FRAMES, t + 1)
-        radius = max(self.exit_radius, 1.5 * float(self.g.length[u]))
-        for node in (u, v):
-            if self._near(table, frames, float(self.g.cx[node]), float(self.g.cy[node]), radius):
-                return "possible_departure" if forward else "possible_arrival"
+        # A nearby new blob is not evidence that animals have left an
+        # unchanged merged blob. Apply proximity exits only when the blob
+        # actually loses substantial area.
+        if self.area[v] < self.area[u] * CONTAINMENT_AREA_RATIO:
+            t = int(self.frame[v])
+            frames = range(t, t + EXIT_FRAMES + 1) if forward else range(t - EXIT_FRAMES, t + 1)
+            radius = max(self.exit_radius, 1.5 * float(self.g.length[u]))
+            for node in (u, v):
+                if self._near(table, frames, float(self.g.cx[node]), float(self.g.cy[node]), radius):
+                    return "possible_departure" if forward else "possible_arrival"
         return ""
 
     def _combine(self, c: int, head: int, forward: bool, boundary: list, lineage: list):
