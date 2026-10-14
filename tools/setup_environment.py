@@ -321,7 +321,7 @@ def prepare_profile_environment(
     )
     if previous_profile is not None and previous_profile != profile:
         previous = PROFILES.get(previous_profile)
-        rebuild = bool(
+        rebuild = rebuild or bool(
             (previous and previous.install_dependencies) or current.install_dependencies
         )
     if not rebuild and venv_python().is_file():
