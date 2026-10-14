@@ -1338,7 +1338,7 @@ class _Evaluation:
             fid = int(self.frame[node]) + g.first_frame
             code = int(level[node])
             levels.setdefault(fid, {})[int(self.local[node])] = code
-            if auto and (code == LEVEL_HIGH or (exclude_medium and code in (LEVEL_MEDIUM, LEVEL_UNCERTAIN))):
+            if auto and (code == LEVEL_HIGH or (exclude_medium and code == LEVEL_MEDIUM)):
                 excluded.setdefault(fid, set()).add(int(self.local[node]))
         rows = self._report(level, evidence_level, uncertain, nf, nb, f_event, b_event, auto, exclude_medium)
         counts = {
@@ -1409,7 +1409,7 @@ class _Evaluation:
             if not auto:
                 excluded_nodes = nodes[:0]
             else:
-                excluded_nodes = nodes[lv > 0] if exclude_medium else high
+                excluded_nodes = nodes[(lv == LEVEL_HIGH) | (lv == LEVEL_MEDIUM)] if exclude_medium else high
             events = by_chain.get(c, [])
             merge = next((e for e in events if e["type"] == "merge"), None)
             split = next((e for e in events if e["type"] == "split"), None)
