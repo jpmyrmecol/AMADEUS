@@ -176,6 +176,19 @@ def _install_runtime() -> None:
         os.replace(staged_root, RUNTIME_DIR)
 
 
+def _ubuntu_tk9_package_available() -> bool:
+    """Ubuntu ships libtk9.0 beginning with the 25.10 release."""
+    if platform.machine().lower() != "x86_64":
+        return False
+    release = platform.freedesktop_os_release()
+    if release.get("ID") != "ubuntu":
+        return False
+    version = release.get("VERSION_ID", "").split(".")
+    if len(version) < 2 or not all(part.isdecimal() for part in version[:2]):
+        return False
+    return (int(version[0]), int(version[1])) >= (25, 10)
+
+
 def main() -> int:
     if not sys.platform.startswith("linux"):
         return 0
@@ -196,6 +209,14 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    if not _ubuntu_tk9_package_available():
+        print(
+            f"[AMADEUS] Tk uses the '{backend}' font backend. "
+            "This Ubuntu release has no libtk9.0 package; "
+            "continuing with the bundled Tk runtime."
+        )
+        return 0
 
     runtime_lib_dir = RUNTIME_DIR / "usr/lib" / _multiarch()
     runtime_ready = all(
