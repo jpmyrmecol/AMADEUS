@@ -278,19 +278,22 @@ def sync_environment(uv_executable: str, profile: str, python: str) -> None:
         "torchvision",
     ]
     environment = os.environ.copy()
-    # The installer runs under a stable system Python, outside the managed .venv.
+    # Setup runs outside .venv: uv-managed Python on Windows, system Python
+    # on Linux, or the validated Python/Tk framework on macOS.
     environment.pop("VIRTUAL_ENV", None)
     environment["UV_PROJECT_ENVIRONMENT"] = str(ENVIRONMENT_ROOT)
     subprocess.run(command, cwd=PROJECT_ROOT, env=environment, check=True)
 
 
 def check_python(python: str, *, macos: bool, required_minor: str | None = None) -> None:
-    check_python_runtime(python, required_minor or ("3.12" if macos else None))
+    # Windows and macOS standardize on Python 3.12; Linux permits 3.10-3.12.
+    required = required_minor or ("3.12" if macos or sys.platform == "win32" else None)
+    check_python_runtime(python, required)
 
 
 def select_python(requested: str | None, profile: str) -> str:
     required_minor = PROFILES[profile].python_minor
-    if sys.platform == "darwin":
+    if sys.platform in ("darwin", "win32"):
         required_minor = "3.12"
     return select_python_runtime(requested, venv_python(), required_minor)
 
@@ -333,7 +336,9 @@ def prepare_profile_environment(
                  "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
                 text=True,
             ).strip()
-            required_minor = current.python_minor or ("3.12" if sys.platform == "darwin" else None)
+            required_minor = current.python_minor or (
+                "3.12" if sys.platform in ("darwin", "win32") else None
+            )
             rebuild = (
                 Path(running_base).resolve() != Path(selected_base).resolve()
                 or running_minor not in ("3.10", "3.11", "3.12")
