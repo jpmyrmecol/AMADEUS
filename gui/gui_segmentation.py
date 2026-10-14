@@ -2998,12 +2998,14 @@ class CrossingReviewApp(ctk.CTk):
         return path
 
     def save_config(self):
-        """Write the settings without asking where; Processing writes the same file."""
+        """Save config and confirm success with a dialog only after the write completes."""
         try:
             path = self._save_config_to_default_path()
-            self.set_status(f"Config saved: {path}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
+            return
+        self.set_status(f"Config saved: {path}")
+        messagebox.showinfo("Config saved", f"Configuration saved successfully:\n{path}", parent=self)
 
     @staticmethod
     def _find_default_video_for_config(config_path: str, configured_video_path: str) -> str:
