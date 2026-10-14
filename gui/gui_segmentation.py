@@ -7052,8 +7052,12 @@ class CrossingReviewApp(ctk.CTk):
         # still identify entirely missed regions that must be removed.
         if self._result_match is not None:
             classified = self._classify_blobs(blobs, {}, frame_idx=self.current_frame)
-            return _draw_blob_union_mask(mask.shape, classified), classified
-        return mask, [self._clone_blob(b) for b in blobs]
+            return (_draw_blob_union_mask(mask.shape, classified),
+                    self._apply_preview_filters(classified, self.current_frame))
+        # Temporal Search precedes Analyze, so its violet results must be
+        # drawn even before any IQR statistics have been computed.
+        return mask, self._apply_preview_filters(
+            [self._clone_blob(b) for b in blobs], self.current_frame)
 
     @staticmethod
     def _format_bound_value(v: float) -> str:
