@@ -89,6 +89,7 @@ class TemporalMergeHighSensitivityTests(unittest.TestCase):
         self.assertTrue(result.diagnostics["reliable"])
         for fid in range(120, 130):
             self.assertIn(0, result.excluded.get(fid, set()))
+            self.assertEqual(result.level(fid, 0), 2)
 
     def test_nearby_new_animal_does_not_clear_existing_merge(self):
         third = (44, 25, 54, 35)
