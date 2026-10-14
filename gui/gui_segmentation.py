@@ -1593,14 +1593,15 @@ class CrossingReviewApp(ctk.CTk):
         self._static_digests: "Optional[np.ndarray]" = None
         self._static_scan_start = 0
 
-        # Temporal merge filter. Frame counts are re-derived from the video FPS
-        # on load (0.5 s horizon, max(3 frames, 0.1 s) confirmation).
+        # High-sensitivity defaults. The optional filter remains disabled until
+        # requested, because enabling it requires a Search before Processing.
+        # Horizon is recalculated from FPS on video load (1 second).
         self.temporal_merge_enabled_var = tk.BooleanVar(value=False)
-        self.temporal_merge_mode_var = tk.StringVar(value="bilateral")
-        self.temporal_merge_horizon_var = tk.IntVar(value=15)
-        self.temporal_merge_confirm_var = tk.IntVar(value=3)
-        self.temporal_merge_tau_manual_var = tk.BooleanVar(value=False)
-        self.temporal_merge_tau_var = tk.DoubleVar(value=0.5)
+        self.temporal_merge_mode_var = tk.StringVar(value="one_sided")
+        self.temporal_merge_horizon_var = tk.IntVar(value=30)
+        self.temporal_merge_confirm_var = tk.IntVar(value=2)
+        self.temporal_merge_tau_manual_var = tk.BooleanVar(value=True)
+        self.temporal_merge_tau_var = tk.DoubleVar(value=0.30)
         self.temporal_search_status_var = tk.StringVar(value="Disabled")
         self._temporal_search: Optional[_TemporalSearchState] = None
         self._filter_preview_mismatch = False
@@ -2716,13 +2717,13 @@ class CrossingReviewApp(ctk.CTk):
             self.static_max_movement_var.set(0.2)
         # Configs written before the temporal merge filter keep it disabled.
         self.temporal_merge_enabled_var.set(bool(settings.get("temporal_merge_enabled", False)))
-        mode = str(settings.get("temporal_merge_mode", "bilateral"))
-        self.temporal_merge_mode_var.set(mode if mode in ("bilateral", "one_sided") else "bilateral")
-        self.temporal_merge_tau_manual_var.set(bool(settings.get("temporal_merge_tau_manual", False)))
+        mode = str(settings.get("temporal_merge_mode", "one_sided"))
+        self.temporal_merge_mode_var.set(mode if mode in ("bilateral", "one_sided") else "one_sided")
+        self.temporal_merge_tau_manual_var.set(bool(settings.get("temporal_merge_tau_manual", True)))
         try:
-            self.temporal_merge_tau_var.set(min(0.9, max(0.1, float(settings.get("temporal_merge_tau", 0.5)))))
+            self.temporal_merge_tau_var.set(min(0.9, max(0.1, float(settings.get("temporal_merge_tau", 0.30)))))
         except (TypeError, ValueError):
-            self.temporal_merge_tau_var.set(0.5)
+            self.temporal_merge_tau_var.set(0.30)
         # Loading an older session must not inherit smoothing from the last one.
         self.single_blob_smoothing_enabled_var.set(bool(settings.get("single_blob_smoothing_enabled", False)))
         self.single_blob_smoothing_level_var.set(max(1, min(20, int(settings.get("single_blob_smoothing_level", 3)))))
@@ -5502,9 +5503,9 @@ class CrossingReviewApp(ctk.CTk):
         self._refresh_search_glows()
 
     def _default_temporal_frames(self) -> tuple[int, int]:
-        """0.5 s horizon and max(3 frames, 0.1 s) confirmation, within the entry limits."""
+        """High-sensitivity defaults: 1 s horizon and 2-frame confirmation."""
         fps = float(self.reader.fps) if self.reader is not None and self.reader.fps and self.reader.fps > 0 else 30.0
-        return min(600, max(1, int(round(0.5 * fps)))), min(120, max(3, int(round(0.1 * fps))))
+        return min(600, max(1, int(round(fps)))), 2
 
     def _temporal_params(self):
         from main.temporal_merge_blobs import TemporalMergeParams
