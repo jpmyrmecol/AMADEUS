@@ -67,7 +67,8 @@ def _candidates() -> list[str]:
         for minor in (12, 11, 10):
             candidates.extend((shutil.which(f"python3.{minor}"), f"/usr/bin/python3.{minor}"))
     else:
-        candidates = [sys.executable]
+        # uv's isolated bootstrap executable is temporary; always select its base Python.
+        candidates = [sys._base_executable]
         candidates.extend(shutil.which(name) for name in ("python3.12", "python3.11", "python3.10", "python"))
     return list(dict.fromkeys(str(path) for path in candidates if path and Path(path).is_file()))
 
