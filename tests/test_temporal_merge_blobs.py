@@ -73,5 +73,53 @@ class TemporalMergeHighSensitivityTests(unittest.TestCase):
         self.assertEqual(result.counts["medium_blobs"], 0)
 
 
+    def test_long_separation_overrides_old_split_ancestry(self):
+        # A historical 1->2 split is not evidence that two long-lived,
+        # separately segmented objects are fragments of one animal.
+        graph = _graph([
+            (60, self.merged),
+            (60, self.separate),
+            (10, self.merged),
+            (60, self.separate),
+        ])
+        params = TemporalMergeParams(
+            horizon_frames=200, confirm_frames=2, tau=0.30, include_one_sided=True
+        )
+        result = evaluate_temporal_merges(graph, params)
+        self.assertTrue(result.diagnostics["reliable"])
+        for fid in range(120, 130):
+            self.assertIn(0, result.excluded.get(fid, set()))
+
+    def test_nearby_new_animal_does_not_clear_existing_merge(self):
+        third = (44, 25, 54, 35)
+        ab_and_c = (self.merged[0], third)
+        abc = ((20, 25, 54, 35),)
+        graph = _graph([
+            (60, self.separate),
+            (10, self.merged),
+            (10, ab_and_c),
+            (10, abc),
+            (60, (self.separate[0], self.separate[1], third)),
+        ])
+        result = evaluate_temporal_merges(graph, self.params)
+        self.assertTrue(result.diagnostics["reliable"])
+        for fid in range(70, 80):
+            self.assertIn(0, result.excluded.get(fid, set()))
+        for fid in range(80, 90):
+            self.assertIn(0, result.excluded.get(fid, set()))
+
+    def test_morphological_shrink_before_merge_retains_confirmation(self):
+        shrunk = ((20, 25, 26, 35), self.separate[1])
+        graph = _graph([
+            (100, self.separate),
+            (1, shrunk),
+            (10, self.merged),
+        ])
+        result = evaluate_temporal_merges(graph, self.params)
+        self.assertTrue(result.diagnostics["reliable"])
+        for fid in range(101, 111):
+            self.assertIn(0, result.excluded.get(fid, set()))
+
+
 if __name__ == "__main__":
     unittest.main()
