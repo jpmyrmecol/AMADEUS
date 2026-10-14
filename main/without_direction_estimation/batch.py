@@ -44,6 +44,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from gui.project_paths import MAIN_DIR as MAIN_PATH, PROJECT_ROOT, with_pythonpath
+from main.runtime_diagnostics import runtime_details, runtime_summary_lines
 
 CURRENT_DIR = str(Path(__file__).resolve().parent)
 
@@ -132,23 +133,30 @@ def _begin_logging(config_path: str) -> str:
     _ARCHIVE_LOG_PATH = log_path
     _ARCHIVE_LOG = open(log_path, "a", encoding="utf-8", buffering=1)
     version_status = check_version_status(timeout=2.0)
+    runtime = runtime_details()
     separator = (
         f"=== AMADEUS {version_label(version_status.current)} RUN START "
         f"{_iso_timestamp()} PID={os.getpid()} ===\n"
     )
     _write_archive(separator)
     header = [
-        f"amadeus_version={version_status.current}",
+        f"amadeus_version={runtime['amadeus_version']}",
         f"latest_version={version_status.latest or 'unavailable'}",
         f"update_status={version_status.state}",
-        f"python_executable={sys.executable}",
-        f"python_version={sys.version.split()[0]}",
+        f"python_executable={runtime['python_executable']}",
+        f"python_version={runtime['python_version']}",
         f"platform={platform.platform()}",
         f"machine={platform.machine()}",
         f"cwd={os.getcwd()}",
         f"config_path={cfg_abs}",
         f"argv={sys.argv!r}",
-        f"torch_version={_package_version('torch')}",
+        f"torch_version={runtime['torch_version']}",
+        f"cuda_runtime={runtime['cuda_runtime']}",
+        f"rocm_runtime={runtime['rocm_runtime']}",
+        f"gpu_backend={runtime['gpu_backend']}",
+        f"gpu_available={runtime['gpu_available']}",
+        f"gpu_devices={runtime['gpu_devices']}",
+        f"automatic_torch_device={runtime['automatic_torch_device']}",
         f"torchvision_version={_package_version('torchvision')}",
         f"ultralytics_version={_package_version('ultralytics')}",
     ]
@@ -156,6 +164,8 @@ def _begin_logging(config_path: str) -> str:
     sys.stdout = TeeStream(_CONSOLE_STDOUT, _ARCHIVE_LOG)
     sys.stderr = TeeStream(_CONSOLE_STDERR, _ARCHIVE_LOG)
     print(f"[AMADEUS] Version: {version_label(version_status.current)}", flush=True)
+    for line in runtime_summary_lines(runtime)[1:]:
+        print(line, flush=True)
     if version_status.latest is None:
         print("[AMADEUS] Latest version: unavailable (offline or update check failed)", flush=True)
     elif version_status.update_available:
