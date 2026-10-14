@@ -66,7 +66,7 @@ Decisions (only blobs that are normal after classification are flagged)
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import csv
 import itertools
 import math
@@ -421,6 +421,7 @@ class TemporalMergeResult:
     counts: dict
     first_frame: int = 0
     digests: "np.ndarray | None" = None
+    animals: dict = field(default_factory=dict)  # frame -> {blob_index: estimated animals >= 2}
 
     @property
     def excluded_count(self) -> int:
@@ -1334,12 +1335,15 @@ class _Evaluation:
                 "not reliable enough. Temporal candidates are shown in violet but not excluded.")
         levels: dict[int, dict[int, int]] = {}
         excluded: dict[int, set[int]] = {}
+        animals: dict[int, dict[int, int]] = {}
         for node in np.flatnonzero(level):
             fid = int(self.frame[node]) + g.first_frame
+            index = int(self.local[node])
             code = int(level[node])
-            levels.setdefault(fid, {})[int(self.local[node])] = code
+            levels.setdefault(fid, {})[index] = code
+            animals.setdefault(fid, {})[index] = max(2, int(nf[node]), int(nb[node]))
             if auto and (code == LEVEL_HIGH or (exclude_medium and code == LEVEL_MEDIUM)):
-                excluded.setdefault(fid, set()).add(int(self.local[node]))
+                excluded.setdefault(fid, set()).add(index)
         rows = self._report(level, evidence_level, uncertain, nf, nb, f_event, b_event, auto, exclude_medium)
         counts = {
             "high_intervals": sum(1 for r in rows if r["level_code"] == LEVEL_HIGH),
@@ -1351,7 +1355,8 @@ class _Evaluation:
         }
         self.diag["events"] = len(self.events)
         self.diag["mass_shares"] = sum(1 for e in self.events if e["source"] == "mass_share")
-        return TemporalMergeResult(levels, excluded, rows, self.diag, counts, g.first_frame, g.digests)
+        return TemporalMergeResult(levels, excluded, rows, self.diag, counts, g.first_frame, g.digests,
+                                   animals=animals)
 
     def _keeps_mass(self, candidates: np.ndarray, at_end: bool) -> np.ndarray:
         """Candidates retaining the configured fraction of their chain's reference mass."""
