@@ -4313,8 +4313,9 @@ class CrossingReviewApp(ctk.CTk):
             "Not searched — press Search before Processing"
             if self.static_exclusion_enabled_var.get() else "Disabled"
         )
-        self.temporal_merge_horizon_var.set(max(1, int(round(0.5 * fps))))
-        self.temporal_merge_confirm_var.set(max(3, int(round(0.1 * fps))))
+        horizon, confirm = self._default_temporal_frames()
+        self.temporal_merge_horizon_var.set(horizon)
+        self.temporal_merge_confirm_var.set(confirm)
         self._reset_temporal_search()
         self.current_frame = 0
         self.frame_var.set(0)
@@ -5474,8 +5475,9 @@ class CrossingReviewApp(ctk.CTk):
         self._refresh_search_glows()
 
     def _default_temporal_frames(self) -> tuple[int, int]:
+        """0.5 s horizon and max(3 frames, 0.1 s) confirmation, within the entry limits."""
         fps = float(self.reader.fps) if self.reader is not None and self.reader.fps and self.reader.fps > 0 else 30.0
-        return max(1, int(round(0.5 * fps))), max(3, int(round(0.1 * fps)))
+        return min(600, max(1, int(round(0.5 * fps)))), min(120, max(3, int(round(0.1 * fps))))
 
     def _temporal_params(self):
         from main.temporal_merge_blobs import TemporalMergeParams

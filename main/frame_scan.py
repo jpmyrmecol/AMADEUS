@@ -11,7 +11,7 @@ held at a time.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 import hashlib
 from typing import Any, Callable, Iterator, Sequence
 
@@ -50,9 +50,10 @@ def iter_frames_in_order(
     ``decode_batch`` runs on a single decoder thread and must return one
     image for every requested frame. ``process`` runs on ``workers`` threads.
     A batch is submitted to the pool before the previous batch's results are
-    handed out, so the caller's per-frame work overlaps the workers. At most
-    one decoded batch waits ahead (with ``prefetch``) besides the batch being
-    processed.
+    handed out, so the caller's per-frame work overlaps the workers. The
+    previous batch has finished (its images are released) before the next is
+    decoded or submitted, so images of one batch are being processed and at
+    most one more is decoded ahead (with ``prefetch``).
     """
     frame_ids = [int(fid) for fid in frame_ids]
     batch_size = max(1, int(batch_size))
@@ -73,6 +74,7 @@ def iter_frames_in_order(
         for index, batch in enumerate(batches):
             if cancelled():
                 return
+            wait([future for _fid, future in previous])
             if pending is None:
                 pending = decoder.submit(decode_batch, batch)
             frames = pending.result()
