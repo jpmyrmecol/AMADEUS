@@ -421,6 +421,7 @@ class BlobMetrics:
     low_obb_aspect_outlier: bool = False
     persistent_static_outlier: bool = False
     temporal_merge_outlier: bool = False   # excluded by temporal merge evidence
+    temporal_merge_animals: int = 0       # minimum animal count inferred by forward/backward evidence
     temporal_merge_level: int = 0          # 2 high, 1 medium candidate, 0 none
     manual_outlier: bool = False
     is_crossing: bool = False
@@ -1247,6 +1248,7 @@ def _apply_temporal_levels(blobs: list, result, fid: int, base_crossing: list[bo
             continue
         blob = blobs[position]
         blob.temporal_merge_level = int(level)
+        blob.temporal_merge_animals = int(result.animals.get(int(fid), {}).get(position, 0))
         if position in excluded:
             blob.temporal_merge_outlier = True
             blob.is_crossing = True
@@ -3779,12 +3781,13 @@ class CrossingReviewApp(ctk.CTk):
         self._iqr_drag_index = None
         self._iqr_drag_start_x = None
         self.area_iqr_boxplot = tk.Canvas(
-            parent, height=70, bg="white",
+            parent, height=38, bg="white",
             highlightthickness=1, highlightbackground="#cccccc",
         )
         self.area_iqr_boxplot.bind("<Configure>", lambda _e: self._redraw_area_iqr_boxplot())
         self.area_iqr_boxplot.bind("<Motion>", self._update_iqr_boxplot_cursor)
         self.area_iqr_boxplot.bind("<Button-1>", self._start_iqr_boxplot_drag)
+        self.area_iqr_boxplot.bind("<Double-Button-1>", self._reset_iqr_bracket_on_double_click)
         self.area_iqr_boxplot.bind("<B1-Motion>", self._drag_iqr_boxplot_handle)
         self.area_iqr_boxplot.bind("<ButtonRelease-1>", self._end_iqr_boxplot_drag)
 
@@ -3874,6 +3877,21 @@ class CrossingReviewApp(ctk.CTk):
         self._iqr_drag_start_x = event.x
         if self._iqr_drag_index is not None:
             self.area_iqr_boxplot.focus_set()
+
+    def _reset_iqr_bracket_on_double_click(self, event):
+        """Reset only the clicked red bracket to 1.5×IQR."""
+        index = self._iqr_bracket_hit(event)
+        if index is None:
+            return
+        self._end_iqr_boxplot_drag()
+        if index == -1:
+            self._set_iqr_multiplier(0, 1.5)
+            self._set_iqr_multiplier(1, 1.5)
+        else:
+            self._set_iqr_multiplier(index, 1.5)
+        self._sync_iqr_area_entries(force=True)
+        self._redraw_area_iqr_boxplot()
+        return "break"
 
     def _drag_iqr_boxplot_handle(self, event):
         if self._iqr_drag_index is None or self._iqr_plot_axis is None:
@@ -6653,6 +6671,7 @@ class CrossingReviewApp(ctk.CTk):
             low_obb_aspect_outlier=blob.low_obb_aspect_outlier,
             persistent_static_outlier=blob.persistent_static_outlier,
             temporal_merge_outlier=blob.temporal_merge_outlier,
+            temporal_merge_animals=blob.temporal_merge_animals,
             temporal_merge_level=blob.temporal_merge_level,
             manual_outlier=blob.manual_outlier,
             is_crossing=blob.is_crossing,
@@ -6773,6 +6792,7 @@ class CrossingReviewApp(ctk.CTk):
         for b in out:
             # Avoid stale temporal states from earlier classification passes.
             b.temporal_merge_outlier = False
+            b.temporal_merge_animals = 0
             b.temporal_merge_level = 0
             b.area_outlier = not inside_bounds(b.area, area_bounds)
             b.bbox_area_outlier = False
@@ -7361,7 +7381,10 @@ class CrossingReviewApp(ctk.CTk):
         if blob.temporal_merge_level:
             state = "crossing" if blob.temporal_merge_outlier else "candidate only (not excluded)"
             lines.append(f"Temporal merge: {state}")
-        lines.append("outlier" if blob.is_crossing else "non-outlier")
+        if blob.temporal_merge_outlier and blob.temporal_merge_animals >= 2:
+            lines.append(f"crossing({blob.temporal_merge_animals})")
+        else:
+            lines.append("outlier" if blob.is_crossing else "non-outlier")
         if blob.result_single:
             lines.append("kept as one animal (imported OBB)")
         return "\n".join(lines)
