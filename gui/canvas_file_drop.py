@@ -148,9 +148,34 @@ def install_canvas_file_drop(
         log("canvas registered=False")
         return state
 
+    # Home registers several panels on the same Tcl interpreter. A failed
+    # native extension load cannot succeed on the following panels; report
+    # the original Tcl error once instead of repeating a generic message.
+    previous_failure = getattr(window, "_amadeus_tkdnd_load_failure", None)
+    if previous_failure is not None:
+        state.diagnostics.append(f"[DND] tkdnd unavailable: {previous_failure}")
+        return state
+
     try:
         _add_tkdnd_package_path(window, log)
-        tkdnd_version = TkinterDnD.require(window)
+        tkdnd_version = getattr(window, "_amadeus_tkdnd_version", None)
+        if tkdnd_version is None:
+            try:
+                tkdnd_version = TkinterDnD.require(window)
+            except Exception as exc:
+                detail = str(exc)
+                if "Unable to load tkdnd library" in detail:
+                    # tkinterdnd2 wraps TclError as RuntimeError and drops the
+                    # informative loader message (missing .so, GLIBC, etc.).
+                    try:
+                        tcl_detail = str(window.tk.call("set", "errorInfo")).strip()
+                        if tcl_detail:
+                            detail = tcl_detail.splitlines()[0]
+                    except (tk.TclError, RuntimeError):
+                        pass
+                setattr(window, "_amadeus_tkdnd_load_failure", detail[:750])
+                raise RuntimeError(detail[:750]) from exc
+            setattr(window, "_amadeus_tkdnd_version", tkdnd_version)
         log(f"tkdnd={tkdnd_version}")
         targets = [canvas]
         if include_descendants:
