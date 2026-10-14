@@ -66,7 +66,7 @@ Decisions (only blobs that are normal after classification are flagged)
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import csv
 import itertools
 import math
@@ -988,8 +988,6 @@ class _Evaluation:
             anc: dict = {}
             if self.edge[head] or self.unknown[head] or self.result_single[head]:
                 ev = _fresh(c)
-            elif forward and kind == "scan_start":
-                ev = self._initial_pair_evidence(c, head)
             elif kind == ("merge" if forward else "split"):
                 ev, anc = self._combine(c, head, forward, boundary, lineage)
             elif kind in (("split", "complex") if forward else ("merge", "complex")):
@@ -1018,43 +1016,6 @@ class _Evaluation:
                 node_ev[v] = len(store) - 1
             boundary[c] = ev
         return store, node_ev
-
-    def _initial_pair_evidence(self, c: int, head: int) -> _Evidence:
-        """Conservative lower bound for a pair already touching at scan start.
-
-        Never infer a pair from its size alone. Require a stable start chain
-        that later participates in a confirmed merge with an independent
-        contemporaneous single animal. Its pre-contact area must be clearly
-        larger than that partner's. This also allows the new three-animal
-        evidence to conserve a pair when the third animal subsequently leaves.
-        """
-        base = _fresh(c)
-        if self.end_kind[c] != "merge" or self._confirmed(c, True):
-            return base
-        end = int(self.ch_end[c])
-        comp = int(self.pc[end])
-        if comp < 0:
-            return base
-        arms = [int(x) for x in self.parents(comp) if int(self.chain[x]) != c]
-        if len(arms) != 1:
-            return base
-        partner = int(self.chain[arms[0]])
-        if self._confirmed(partner, True):
-            return base
-        large = self._mass(c, True)
-        small = self._mass(partner, True)
-        if small <= 0 or large < 1.75 * small:
-            return base
-        # Treat the group conservatively as *at least* two animals.
-        t = int(self.frame[head])
-        event = len(self.events)
-        self.events.append({
-            "id": event, "direction": "forward", "type": "initial_pair",
-            "frame": t + self.g.first_frame, "node": head, "chain": c,
-            "arms": [], "pairs": [], "n": 2, "source": "initial_pair_mass",
-            "reasons": [], "detail": f"start_mass={large:.1f}, independent_partner={small:.1f}",
-        })
-        return _Evidence(frozenset((c, -1 - c)), True, t, event, large / 2.0)
 
     def _exit(self, u: int, v: int, ev: _Evidence, forward: bool, table: dict) -> str:
         """Why the count may have dropped between consecutive chain nodes u -> v.
