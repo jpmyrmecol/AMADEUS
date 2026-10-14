@@ -119,7 +119,7 @@ tools/check_torch.cmd
 tools/colab_runner.py
 tools/ffmpeg_runtime.py
 tools/macos_python.sh
-tools/prepare_linux_tk_xft.py
+tools/python_runtime.py
 tools/runtime_profiles.py
 tools/setup_environment.py
 tools/update_manifest.txt
