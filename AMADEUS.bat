@@ -2,6 +2,7 @@
 @REM SPDX-License-Identifier: AGPL-3.0-only
 
 @echo off
+REM Keep the established v1.1.17 CALL-label flow; Git enforces CRLF on Windows.
 set "AMADEUS_LAUNCH_CWD=%CD%"
 cd /d "%~dp0"
 
