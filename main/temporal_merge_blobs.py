@@ -485,26 +485,6 @@ def _fresh(chain: int) -> _Evidence:
     return _Evidence(frozenset((chain,)), True, -1, -1, 0.0)
 
 
-def _obb_gap(cx1, cy1, l1, w1, t1, cx2, cy2, l2, w2, t2) -> np.ndarray:
-    """Separating-axis gap between OBB pairs (a lower bound of their distance)."""
-    def corners(cx, cy, length, width, theta):
-        ux, uy = np.cos(theta) * length / 2, np.sin(theta) * length / 2
-        vx, vy = -np.sin(theta) * width / 2, np.cos(theta) * width / 2
-        xs = np.stack([cx + ux + vx, cx + ux - vx, cx - ux - vx, cx - ux + vx], axis=-1)
-        ys = np.stack([cy + uy + vy, cy + uy - vy, cy - uy - vy, cy - uy + vy], axis=-1)
-        return xs, ys
-    ax, ay = corners(cx1, cy1, l1, w1, t1)
-    bx, by = corners(cx2, cy2, l2, w2, t2)
-    gap = np.full(np.shape(cx1), -np.inf)
-    for theta in (t1, t1 + np.pi / 2, t2, t2 + np.pi / 2):
-        nx, ny = np.cos(theta)[..., None], np.sin(theta)[..., None]
-        pa = ax * nx + ay * ny
-        pb = bx * nx + by * ny
-        separation = np.maximum(pb.min(-1) - pa.max(-1), pa.min(-1) - pb.max(-1))
-        gap = np.maximum(gap, separation)
-    return gap
-
-
 class _Evaluation:
     """One evaluation of a stored graph; see the module docstring for rules."""
 
