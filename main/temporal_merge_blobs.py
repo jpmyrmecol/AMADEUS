@@ -27,9 +27,9 @@ Evaluation (re-runnable on the stored graph)
     set of *atoms* (chains of confirmed, mutually independent animals), and
     is propagated forward from merges and backward from splits:
 
-    * a merge sums only arms that are confirmed (k stable normal frames,
-      not fading, unambiguous) and pairwise independent: both arms must
-      coexist as separate, normal, substantial blobs for at least k frames.
+    * a merge sums only arms that are confirmed (k stable, normal observations
+      close to the event and no ambiguous flow) and pairwise independent:
+      both arms must coexist as separate, normal, substantial blobs for k frames.
       No minimum OBB gap is required. Recent common split ancestry prevents
       fragments of the same animal from being counted twice.
     * arms descending from the same recent split (within min(2H, max(10, 2k))
@@ -365,7 +365,6 @@ LEVEL_NAMES = {LEVEL_MEDIUM: "medium", LEVEL_HIGH: "high"}
 TINY_AREA_RATIO = 0.2            # ignored entirely (legs, antennae, noise)
 SUBSTANTIAL_AREA_RATIO = 0.5     # smaller blobs never decide an event alone
 STABLE_AREA_RATIO = 1.5          # consecutive confirmation frames within [1/1.5, 1.5]
-FADING_RATIO = 0.67              # an arm's last node must keep 2/3 of its median area
 CONTAINMENT_AREA_RATIO = 0.75    # a merged blob must be able to hold its largest member
 AMBIGUOUS_FRACTION = 0.5         # a substantial second link suggests mass went elsewhere
 SECONDARY_LINK_FLOOR = 0.25      # avoid making low containment thresholds *more* restrictive
