@@ -416,14 +416,14 @@ print('[AMADEUS] Tcl/Tk:', tk.TclVersion, tk.TkVersion)
 print('[AMADEUS] PyAV:', av.__version__)
 if sys.platform == 'darwin' and (tk.TclVersion != 8.6 or tk.TkVersion != 8.6):
     raise RuntimeError('macOS requires Tcl/Tk 8.6 with CustomTkinter 5.2.2')
+app = ctk.CTk()
+app.withdraw()
 if sys.platform.startswith('linux'):
     version = str(app.tk.call('info', 'patchlevel'))
     fontsystem = str(app.tk.call('tk::pkgconfig', 'get', 'fontsystem'))
     print('[AMADEUS] Tk:', version, 'fontsystem:', fontsystem)
     if not version.startswith('8.6.') or fontsystem != 'xft':
         raise RuntimeError('Linux requires Tk 8.6 with Xft')
-app = ctk.CTk()
-app.withdraw()
 try:
     combo = ctk.CTkComboBox(app, values=['Color', 'Grayscale'])
     combo.pack()
