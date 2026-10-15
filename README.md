@@ -48,7 +48,7 @@ Use **Advanced Tracking** to configure individual stages and parameters, or **Mu
 
 ## Add-ons
 
-Select **Add-ons** above **Update** on Home to install an independent application from a ZIP using drag and drop or **Browse**. Installed add-ons appear on the right with their version, declared OS support, and **Update** / **Uninstall** menus. Their separate environments and settings are stored outside the AMADEUS installation and retained across AMADEUS updates. Uninstalling an individual add-on deletes its complete folder, including settings, data and logs; updating an add-on preserves these files. Uninstalling AMADEUS also removes all installed add-ons, including their saved settings, data and logs.
+Select **Add-ons** above **Update** on Home to install an independent application from a ZIP using drag and drop or **Browse**. Installed add-ons appear on the right with their version, declared OS support, and **Update** / **Uninstall** menus. Drag the panels to reorder them; order is saved. Developers can optionally enable Home file/video drops using `drop_extensions` in `addon.json`. Their separate environments and settings are stored outside the AMADEUS installation and retained across AMADEUS updates. Uninstalling an individual add-on deletes its complete folder, including settings, data and logs; updating an add-on preserves these files. Uninstalling AMADEUS also removes all installed add-ons, including their saved settings, data and logs.
 
 Only install add-ons from developers you trust. They are not sandboxed. See the [add-on guide](tools/ADDONS.md) and [official template](https://github.com/jpmyrmecol/AMADEUS-Addon-Template) for the file interface, package format, licensing boundary and developer instructions.
 

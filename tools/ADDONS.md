@@ -2,9 +2,9 @@
 
 ## Using add-ons
 
-Select **Add-ons** on Home. Drop one add-on ZIP into the installer, or use **Browse**. Review the developer, license, OS support, update source and SHA-256 before accepting installation. Package inspection does not execute its code.
+Select **Add-ons** on Home. Drop one add-on ZIP into the installer, or use **Browse**. Review the developer, license, OS support, update source and SHA-256 before accepting installation. Package inspection does not execute its code. After approval, the chooser closes and an animated green installation bar appears. The progress window closes automatically after installation. The drop area expands to fill the available chooser space.
 
-Installed applications appear in one scrollable column on the right of Home. Panels show the name, version and declared OS/CPU support. Click a panel to launch its independent GUI. Use its **...** menu for **Update** and **Uninstall**. The existing video drop targets continue to open their existing GUIs.
+Installed applications appear in one scrollable column on the right of Home. Panels show the name, version and declared OS/CPU support. Click a panel to launch its independent GUI. Use its **...** menu for **Update** and **Uninstall**. Drag a panel vertically to reorder it. The order is saved between sessions and across updates, and is updated when an add-on is uninstalled. The existing video drop targets continue to open their existing GUIs.
 
 OS support is a developer declaration, not a test certification. An unsupported package cannot be installed on the current OS/CPU. An already registered application remains visible but cannot be launched when its declared platforms do not include the current runtime. GPU requirements and native OS libraries are the add-on developer's responsibility.
 
@@ -35,7 +35,7 @@ Each add-on has an immutable ID and its own directory:
 
 A replacement environment is built at its final path before `current.json` is atomically replaced. Existing virtual environments are not moved. Each ID has an OS file lock for management operations. Old program/environment directories are removed after a successful replacement. **Updates preserve `data/`, `run.log`, and previous entries in `install.log` (new installation output is appended).** Failed attempts never become the current installation.
 
-Home reconstructs the panels from these records. AMADEUS updates, replacement checkouts and reinstalls therefore do not need to copy add-ons out of the application directory. Corrupt records are reported in the installer without preventing Home from opening.
+Home reconstructs the panels from these records. Panel ordering is stored in `.order.json` at the add-on storage root. Individual uninstall removes that add-on ID from the saved order. AMADEUS updates, replacement checkouts and reinstalls therefore do not need to copy add-ons out of the application directory. Corrupt records are reported in the installer without preventing Home from opening.
 
 **Uninstalling one add-on** from its panel permanently deletes the complete `<id>/` directory, including the program, virtual environments, `data/` (saved settings and generated outputs), `install.log` and `run.log`. Files outside that add-on directory are not removed. The shared `.python` and `.cache` directories remain available for other add-ons.
 
@@ -60,11 +60,14 @@ This is an AMADEUS-specific format, not a general Python package standard. A ZIP
   "python": "3.12",
   "entry_point": "app.py",
   "dependencies": ["PyYAML==6.0.2"],
+  "drop_extensions": [".csv", ".yaml", ".mp4"],
   "update_url": null
 }
 ```
 
-`id`, `name`, `version`, `author`, `license`, `platforms`, `python`, `entry_point` and `manifest_version` are required. `description`, `dependencies` and `update_url` are optional. Unknown fields and unsupported manifest versions are rejected.
+`id`, `name`, `version`, `author`, `license`, `platforms`, `python`, `entry_point` and `manifest_version` are required. `description`, `dependencies`, `update_url` and `drop_extensions` are optional. Unknown fields and unsupported manifest versions are rejected.
+
+`drop_extensions` is an optional list of distinct lowercase filename suffixes, such as `.csv`, `.yaml`, `.mp4` or `.avi`. Each suffix starts with a dot, followed by 1 to 12 lowercase letters or digits. Up to 32 suffixes are allowed. Omission or an empty list disables drag-and-drop on that add-on's Home panel. If declared, only existing files with those suffixes are accepted, one file at a time. The declaration is opt-in. The add-on must implement the `--dropped-file` argument to process the selected file. Supported suffixes are displayed on its panel.
 
 IDs are lowercase qualified names containing at least one dot or hyphen. Keep the ID unchanged across updates. Versions are numeric `MAJOR.MINOR.PATCH`, with no leading zeros or prerelease suffixes. Reinstalling the current version is allowed. Downgrades are rejected.
 
@@ -76,7 +79,7 @@ The installer uses the uv executable prepared by the existing AMADEUS launcher. 
 
 ## File interface
 
-Home normally launches the entry script with no input arguments. The application supplies its own file selectors for AMADEUS results and `config.yaml`.
+Home normally launches the entry script with no input arguments. The application supplies its own file selectors for AMADEUS results and `config.yaml`. When a supported file is dropped on an opt-in Home panel, AMADEUS launches its independent entry script with `--dropped-file <absolute-path>`. Video files and other inputs can use the same protocol. AMADEUS passes the path unchanged and leaves interpretation or playback to the add-on. Drop support is disabled for add-ons that do not declare `drop_extensions` or are unsupported on the current OS/CPU.
 
 The launcher also supports optional `--config <absolute-path>` and `--results <absolute-path>` arguments through `Store.launch`. Applications following this protocol should accept these options. No AMADEUS Python object is passed across the boundary. `AMADEUS_ADDON_DATA_DIR` supplies the persistent per-application data directory. The process working directory is this data directory, so application resources should be located relative to `__file__`, not the working directory.
 

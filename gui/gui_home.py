@@ -764,6 +764,7 @@ def main() -> int:
         # Initialize tkdnd after the Home window is visible, without delaying
         # the splash reveal or altering the existing panel click actions.
         root.after(100, lambda: install_home_video_drop(root, home_drop_targets))
+        root.after(150, addons.enable_file_drop)
         if os.name == "nt":
             # Windows can leave the owner window stuck with the topmost style
             # inherited from its topmost splash child; force-clear it.

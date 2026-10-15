@@ -119,7 +119,7 @@ def _json(data: bytes) -> dict:
 
 def validate_manifest(data: dict) -> dict:
     allowed = {"manifest_version", "id", "name", "version", "author", "description", "license",
-               "platforms", "python", "entry_point", "dependencies", "update_url"}
+               "platforms", "python", "entry_point", "dependencies", "update_url", "drop_extensions"}
     if set(data) - allowed:
         raise ValueError(f"Unknown manifest fields: {', '.join(sorted(set(data) - allowed))}")
     if type(data.get("manifest_version")) is not int or data["manifest_version"] != 1:
@@ -146,6 +146,12 @@ def validate_manifest(data: dict) -> dict:
     if (not isinstance(dependencies, list) or len(dependencies) > 100
             or any(not isinstance(d, str) or not PIN_PATTERN.fullmatch(d) for d in dependencies)):
         raise ValueError("dependencies must contain exact package pins, for example PyYAML==6.0.2.")
+    drop_extensions = data.get("drop_extensions", [])
+    if (not isinstance(drop_extensions, list) or len(drop_extensions) > 32
+            or any(not isinstance(value, str) or not re.fullmatch(r"\.[a-z0-9]{1,12}", value)
+                   for value in drop_extensions)
+            or len(set(drop_extensions)) != len(drop_extensions)):
+        raise ValueError("drop_extensions must list distinct lowercase file suffixes, such as .csv or .mp4.")
     if data.get("update_url") is not None:
         _https(data["update_url"])
     return dict(data)
@@ -318,6 +324,31 @@ class Store:
             raise ValueError(f"Invalid installation time for {addon_id}.")
         return Installed(manifest, release, float(installed_at))
 
+    def _read_order(self) -> list[str]:
+        path = self.path(".order.json")
+        if not path.exists():
+            return []
+        data = _json(path.read_bytes())
+        ids = data.get("ids")
+        if (data.get("schema") != 1 or not isinstance(ids, list)
+                or any(not isinstance(value, str) for value in ids)
+                or len(ids) != len(set(ids))):
+            raise ValueError("Invalid add-on panel order record.")
+        for addon_id in ids:
+            _identifier(addon_id)
+        return ids
+
+    def set_order(self, addon_ids: list[str]) -> None:
+        if not isinstance(addon_ids, list) or len(addon_ids) != len(set(addon_ids)):
+            raise ValueError("Add-on panel order must list each installed add-on exactly once.")
+        for addon_id in addon_ids:
+            _identifier(addon_id)
+        with _lock(self.path(".locks/order.lock")):
+            installed, errors = self.list()
+            if errors or set(addon_ids) != {item.manifest["id"] for item in installed}:
+                raise ValueError("Add-on list changed. Refresh Home before reordering.")
+            _atomic_json(self.path(".order.json"), {"schema": 1, "ids": addon_ids})
+
     def list(self) -> tuple[list[Installed], list[str]]:
         installed, errors = [], []
         if not self.root.exists():
@@ -331,7 +362,15 @@ class Store:
                     installed.append(item)
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 errors.append(f"{directory.name}: {exc}")
-        return sorted(installed, key=lambda item: (item.installed_at, item.manifest["id"])), errors
+        installed.sort(key=lambda item: (item.installed_at, item.manifest["id"]))
+        try:
+            order = self._read_order()
+        except (OSError, ValueError) as exc:
+            errors.append(f"Panel order: {exc}")
+            order = []
+        positions = {addon_id: index for index, addon_id in enumerate(order)}
+        installed.sort(key=lambda item: positions.get(item.manifest["id"], len(positions)))
+        return installed, errors
 
     def _guard(self, addon_id: str):
         return _lock(self.path(f".locks/{_identifier(addon_id)}.lock"))
@@ -446,11 +485,17 @@ class Store:
         addon_id = _identifier(addon_id)
         with self._guard(addon_id):
             self._require_stopped(addon_id)
-            directory = self.path(addon_id)
-            if directory.exists():
-                shutil.rmtree(directory)
+            with _lock(self.path(".locks/order.lock")):
+                order = self._read_order()
+                directory = self.path(addon_id)
+                if directory.exists():
+                    shutil.rmtree(directory)
+                if addon_id in order:
+                    _atomic_json(self.path(".order.json"),
+                                 {"schema": 1, "ids": [value for value in order if value != addon_id]})
 
-    def launch(self, addon_id: str, *, config: Path | None = None, results: Path | None = None) -> tuple[subprocess.Popen, Path]:
+    def launch(self, addon_id: str, *, config: Path | None = None, results: Path | None = None,
+               dropped_file: Path | None = None) -> tuple[subprocess.Popen, Path]:
         with self._guard(addon_id):
             item = self.get(addon_id)
             if item is None:
@@ -460,11 +505,16 @@ class Store:
             self._require_stopped(addon_id)
             script = _safe_path(item.release / "payload", item.manifest["entry_point"])
             command = [str(self.python(item.release)), "-E", "-s", str(script)]
-            for flag, path in (("--config", config), ("--results", results)):
+            for flag, path in (("--config", config), ("--results", results),
+                               ("--dropped-file", dropped_file)):
                 if path is not None:
                     path = Path(path).resolve(strict=True)
                     if not path.is_file():
                         raise ValueError(f"Input must be a file: {path}")
+                    if flag == "--dropped-file":
+                        allowed = item.manifest.get("drop_extensions", [])
+                        if path.suffix.lower() not in allowed:
+                            raise ValueError(f"This add-on does not accept dropped files of type {path.suffix!r}.")
                     command.extend([flag, str(path)])
             env = clean_environment()
             data = self.path(f"{addon_id}/data")

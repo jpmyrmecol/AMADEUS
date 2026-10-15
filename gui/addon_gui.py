@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import queue
+import time
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -38,6 +39,13 @@ class AddonController:
             self.storage_error = str(exc)
         self.busy = False
         self.dialog = None
+        self.progress_dialog = None
+        self.progress_status = tk.StringVar(root, "")
+        self.progress_job = None
+        self.drag = None
+        self.drop_ready = False
+        self.panel_frames = {}
+        self.panel_ids = []
         self.status = tk.StringVar(root, "Ready.")
         self.results = queue.Queue()
         self.signature = None
@@ -102,6 +110,9 @@ class AddonController:
         if signature == self.signature:
             return
         self.signature = signature
+        self.panel_ids = [item.manifest["id"] for item in items]
+        self.panel_frames = {}
+        self.drag = None
         for widget in self.cards.winfo_children():
             widget.destroy()
         if not items:
@@ -110,6 +121,35 @@ class AddonController:
         self.sidebar.grid(row=0, column=1, sticky="nsew")
         for item in items:
             self._card(item)
+        if self.drop_ready:
+            self._register_panel_drops(items)
+
+    def enable_file_drop(self):
+        """Enable native file drops only after the Home window has been revealed."""
+        self.drop_ready = True
+        if self.store is not None:
+            items, _errors = self.store.list()
+            self._register_panel_drops(items)
+
+    def _register_panel_drops(self, items):
+        for item in items:
+            manifest = item.manifest
+            addon_id = manifest["id"]
+            extensions = manifest.get("drop_extensions", [])
+            frame = self.panel_frames.get(addon_id)
+            if not extensions or frame is None or platform_key() not in manifest["platforms"]:
+                continue
+            if not frame.winfo_exists():
+                continue
+            install_canvas_file_drop(
+                self.root,
+                frame,
+                allowed_suffixes=extensions,
+                on_path=lambda path, key=addon_id: self.launch(key, dropped_file=Path(path)),
+                status_callback=lambda message: messagebox.showwarning("Add-on file drop", message, parent=self.root),
+                label="supported add-on file",
+                include_descendants=True,
+            )
 
     def _card(self, item):
         manifest = item.manifest
@@ -117,6 +157,7 @@ class AddonController:
         supported = platform_key() in manifest["platforms"]
         frame = tk.Frame(self.cards, bg=CARD, highlightbackground="#333333", highlightthickness=1, cursor="hand2" if supported else "arrow")
         frame.pack(fill="x", padx=8, pady=5)
+        self.panel_frames[addon_id] = frame
         menu_button = tk.Menubutton(frame, text="...", bg=CARD, fg=FG, activebackground="#333333", activeforeground=FG, relief="flat")
         menu_button.pack(anchor="ne", padx=6, pady=(3, 0))
         menu = tk.Menu(menu_button, tearoff=False)
@@ -129,18 +170,72 @@ class AddonController:
             ("\n".join(PLATFORMS[p] for p in manifest["platforms"]), ("Arial", 10), MUTED),
             ("Click to open" if supported else "Not supported on this OS / CPU", ("Arial", 10), MUTED),
         ]
+        if supported and manifest.get("drop_extensions"):
+            labels.append(("Drop files: " + ", ".join(manifest["drop_extensions"]), ("Arial", 10), MUTED))
         for text, font, color in labels:
             label = tk.Label(frame, text=text, font=font, fg=color, bg=CARD, wraplength=236, justify="center")
             label.pack(fill="x", padx=8, pady=(2, 5))
-            if supported:
-                label.bind("<Button-1>", lambda _e, key=addon_id: self.launch(key))
+            self._bind_panel_drag(label, addon_id, supported)
             self._bind_scroll(label)
+        self._bind_panel_drag(frame, addon_id, supported)
         if supported:
-            frame.bind("<Button-1>", lambda _e: self.launch(addon_id))
             frame.bind("<Return>", lambda _e: self.launch(addon_id))
             frame.bind("<space>", lambda _e: self.launch(addon_id))
             frame.configure(takefocus=True)
         self._bind_scroll(frame)
+
+    def _bind_panel_drag(self, widget, addon_id, supported):
+        widget.bind("<ButtonPress-1>", lambda event: self._drag_start(event, addon_id))
+        widget.bind("<B1-Motion>", self._drag_move)
+        widget.bind("<ButtonRelease-1>", lambda event: self._drag_finish(event, addon_id, supported))
+
+    def _drag_start(self, event, addon_id):
+        if self.busy:
+            return
+        self.drag = {"id": addon_id, "start_y": event.y_root, "moved": False,
+                     "candidate": list(self.panel_ids)}
+
+    def _drag_move(self, event):
+        gesture = self.drag
+        if gesture is None:
+            return
+        if not gesture["moved"] and abs(event.y_root - gesture["start_y"]) < 7:
+            return
+        gesture["moved"] = True
+        viewport_top = self.canvas.winfo_rooty()
+        viewport_bottom = viewport_top + self.canvas.winfo_height()
+        if event.y_root < viewport_top + 24:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.y_root > viewport_bottom - 24:
+            self.canvas.yview_scroll(1, "units")
+
+        moving = gesture["id"]
+        others = [key for key in self.panel_ids if key != moving]
+        position = sum(event.y_root > self.panel_frames[key].winfo_rooty()
+                       + self.panel_frames[key].winfo_height() / 2 for key in others)
+        gesture["candidate"] = others[:position] + [moving] + others[position:]
+        for key, frame in self.panel_frames.items():
+            frame.configure(highlightbackground="#188b55" if key == moving else "#333333")
+
+    def _drag_finish(self, _event, addon_id, supported):
+        gesture = self.drag
+        self.drag = None
+        if gesture is None or gesture["id"] != addon_id:
+            return
+        for frame in self.panel_frames.values():
+            frame.configure(highlightbackground="#333333")
+        if not gesture["moved"]:
+            if supported:
+                self.launch(addon_id)
+            return
+        candidate = gesture["candidate"]
+        if candidate != self.panel_ids:
+            try:
+                self.store.set_order(candidate)
+                self.signature = None
+                self.refresh()
+            except (OSError, ValueError, RuntimeError) as exc:
+                messagebox.showerror("Add-on order", str(exc), parent=self.root)
 
     def open_installer(self):
         if self.dialog is not None and self.dialog.winfo_exists():
@@ -149,19 +244,19 @@ class AddonController:
         dialog = self.dialog = tk.Toplevel(self.root)
         dialog.title("AMADEUS Add-ons")
         dialog.configure(bg=BG)
-        dialog.geometry("620x390")
+        dialog.geometry("620x440")
         dialog.minsize(480, 330)
         dialog.transient(self.root)
-        tk.Label(dialog, text="Install an add-on", bg=BG, fg=FG, font=("Arial", 18, "bold")).pack(pady=(18, 12))
-        drop = tk.Canvas(dialog, bg=CARD, highlightbackground="#444444", highlightthickness=1, height=105)
-        drop.pack(fill="x", padx=20)
+        tk.Label(dialog, text="Install an add-on", bg=BG, fg=FG, font=("Arial", 18, "bold")).pack(pady=(15, 10))
+        drop = tk.Canvas(dialog, bg=CARD, highlightbackground="#444444", highlightthickness=1, height=220)
+        drop.pack(fill="both", expand=True, padx=20, pady=(0, 10))
         label = drop.create_text(0, 0, text="Drop an add-on ZIP here", fill=FG, font=("Arial", 14))
         drop.bind("<Configure>", lambda e: drop.coords(label, e.width / 2, e.height / 2))
-        tk.Button(dialog, text="Browse...", command=self.browse, bg="#222222", fg=FG, activebackground="#333333", activeforeground=FG).pack(pady=10)
+        tk.Button(dialog, text="Browse...", command=self.browse, bg="#222222", fg=FG, activebackground="#333333", activeforeground=FG).pack(pady=(0, 8))
         tk.Label(dialog, textvariable=self.status, bg=BG, fg=MUTED, wraplength=560).pack(fill="x", padx=20, pady=4)
         tk.Label(dialog, text="OS support is declared by the developer. Add-ons are not sandboxed.", bg=BG, fg=MUTED, wraplength=560).pack(padx=20, pady=6)
         links = tk.Frame(dialog, bg=BG)
-        links.pack(pady=6)
+        links.pack(pady=(4, 14))
         for text, url in (("Developer guide", GUIDE_URL), ("Official template", TEMPLATE_URL)):
             tk.Button(links, text=text, command=lambda value=url: webbrowser.open(value), bg="#222222", fg=FG).pack(side="left", padx=5)
         if self.errors:
@@ -174,6 +269,49 @@ class AddonController:
             if not state.enabled:
                 self.status.set("Drag and drop is unavailable in this Tk session. Use Browse.")
         dialog.after(100, register_drop)
+
+    def _show_install_progress(self, name):
+        if self.dialog is not None and self.dialog.winfo_exists():
+            self.dialog.destroy()
+        self.dialog = None
+        window = self.progress_dialog = tk.Toplevel(self.root)
+        window.title("Installing add-on")
+        window.configure(bg=BG)
+        window.geometry("490x165")
+        window.resizable(False, False)
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", lambda: None)
+        tk.Label(window, text=f"Installing {name}", bg=BG, fg=FG,
+                 font=("Arial", 15, "bold")).pack(pady=(16, 12))
+        track = tk.Canvas(window, height=20, bg="#292929", highlightthickness=0, bd=0)
+        track.pack(fill="x", padx=24)
+        segment = track.create_rectangle(0, 0, 0, 20, fill="#21a366", outline="")
+        self.progress_status.set("Preparing installation...")
+        tk.Label(window, textvariable=self.progress_status, bg=BG, fg=MUTED,
+                 wraplength=450).pack(pady=(12, 8))
+        started = time.monotonic()
+
+        def animate():
+            if not window.winfo_exists():
+                return
+            width = max(1, track.winfo_width())
+            chunk = max(40, int(width * 0.28))
+            phase = ((time.monotonic() - started) / 1.25) % 2
+            position = 1 - abs(1 - phase)
+            left = int(max(0, width - chunk) * position)
+            track.coords(segment, left, 0, left + chunk, 20)
+            self.progress_job = window.after(30, animate)
+
+        animate()
+
+    def _close_install_progress(self):
+        window = self.progress_dialog
+        self.progress_dialog = None
+        if window is not None and window.winfo_exists():
+            if self.progress_job is not None:
+                window.after_cancel(self.progress_job)
+            window.destroy()
+        self.progress_job = None
 
     def browse(self, expected_id=None):
         if not self.check_idle():
@@ -222,8 +360,9 @@ class AddonController:
             cleanup()
             self.status.set("Installation cancelled.")
             return
+        self._show_install_progress(manifest["name"])
         self._task(lambda: self.store.install(package, resolve_uv(self.project_root), self._progress, expected_id),
-                   lambda _item: self._installed(), cleanup=cleanup)
+                   lambda _item: self._installed(), cleanup=cleanup, installation=True)
 
     def _installed(self):
         self.refresh()
@@ -260,11 +399,11 @@ class AddonController:
         self.refresh()
         self.status.set("Add-on folder removed, including settings, data and logs.")
 
-    def launch(self, addon_id):
+    def launch(self, addon_id, *, dropped_file=None):
         if not self.check_idle():
             return
         try:
-            process, log = self.store.launch(addon_id)
+            process, log = self.store.launch(addon_id, **({"dropped_file": dropped_file} if dropped_file is not None else {}))
         except Exception as exc:
             messagebox.showerror("Unable to launch add-on", str(exc), parent=self.root)
             return
@@ -282,7 +421,7 @@ class AddonController:
     def _progress(self, message):
         self.results.put(("progress", message))
 
-    def _task(self, action, success, cleanup=None):
+    def _task(self, action, success, cleanup=None, installation=False):
         if not self.check_idle():
             return
         self.busy = True
@@ -302,6 +441,8 @@ class AddonController:
                     return
                 if kind == "progress":
                     self.status.set(value)
+                    if installation:
+                        self.progress_status.set(value)
                     continue
                 self.busy = False
                 try:
@@ -312,6 +453,8 @@ class AddonController:
                     self.status.set(str(exc))
                     messagebox.showerror("Add-ons", str(exc), parent=self.root)
                 finally:
+                    if installation:
+                        self._close_install_progress()
                     if cleanup is not None:
                         cleanup()
                 return
