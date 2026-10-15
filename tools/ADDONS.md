@@ -33,11 +33,11 @@ Each add-on has an immutable ID and its own directory:
   run.log
 ```
 
-A replacement environment is built at its final path before `current.json` is atomically replaced. Existing virtual environments are not moved. Each ID has an OS file lock for management operations. Old program/environment directories are removed after a successful replacement. Failed attempts never become the current installation.
+A replacement environment is built at its final path before `current.json` is atomically replaced. Existing virtual environments are not moved. Each ID has an OS file lock for management operations. Old program/environment directories are removed after a successful replacement. **Updates preserve `data/`, `run.log`, and previous entries in `install.log` (new installation output is appended).** Failed attempts never become the current installation.
 
 Home reconstructs the panels from these records. AMADEUS updates, replacement checkouts and reinstalls therefore do not need to copy add-ons out of the application directory. Corrupt records are reported in the installer without preventing Home from opening.
 
-**Uninstalling one add-on** from its panel removes that add-on's program and virtual environments but retains its `data/` and logs. The shared `.python` and `.cache` directories remain.
+**Uninstalling one add-on** from its panel permanently deletes the complete `<id>/` directory, including the program, virtual environments, `data/` (saved settings and generated outputs), `install.log` and `run.log`. Files outside that add-on directory are not removed. The shared `.python` and `.cache` directories remain available for other add-ons.
 
 **Uninstalling AMADEUS itself** also deletes the entire add-on storage directory, including every add-on, its saved settings, data and logs, and shared add-on Python environments and caches. Videos, tracking sessions and results stored outside the AMADEUS installation and add-on storage are not deleted. Independent applications are not sandboxed and can modify files themselves. Back up important research data.
 

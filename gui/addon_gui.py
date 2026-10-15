@@ -246,13 +246,19 @@ class AddonController:
     def uninstall(self, addon_id, name):
         if not self.check_idle():
             return
-        if messagebox.askyesno("Uninstall add-on", f"Uninstall {name}?\n\nThe program and its Python environments will be removed. "
-                               "Settings, logs and analysis files will be kept.", parent=self.root, default=messagebox.NO):
+        if messagebox.askyesno(
+            "Uninstall add-on",
+            f"Uninstall {name}?\n\n"
+            "The entire add-on folder will be deleted, including its Python environment, "
+            "saved settings, generated data and logs. Files stored elsewhere will not be removed.",
+            parent=self.root,
+            default=messagebox.NO,
+        ):
             self._task(lambda: self.store.uninstall(addon_id), lambda _result: self._uninstalled())
 
     def _uninstalled(self):
         self.refresh()
-        self.status.set("Add-on uninstalled. Settings and data were kept.")
+        self.status.set("Add-on folder removed, including settings, data and logs.")
 
     def launch(self, addon_id):
         if not self.check_idle():

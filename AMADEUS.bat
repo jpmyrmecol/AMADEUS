@@ -47,6 +47,8 @@ if "%AMADEUS_GUI_EXIT%"=="42" (
 )
 if "%AMADEUS_GUI_EXIT%"=="43" (
     echo [AMADEUS] Uninstall accepted. A separate Command Prompt will remove AMADEUS.
+    REM Restore PATH, VIRTUAL_ENV and PROMPT before the .venv folder is deleted.
+    call ".venv\Scripts\deactivate.bat"
     REM Release the installation folder even if this terminal started there.
     cd /d "%USERPROFILE%"
     exit /b 0

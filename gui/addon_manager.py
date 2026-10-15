@@ -361,7 +361,8 @@ class Store:
             commands.append([str(uv), "--no-config", "pip", "install", "--python", str(self.python(release)),
                              "--only-binary", ":all:", "--", *manifest["dependencies"]])
         log_path = self.path(f"{manifest['id']}/install.log")
-        with log_path.open("w", encoding="utf-8") as log:
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(f"\nInstalling {manifest['id']} v{manifest['version']}\n")
             for command in commands:
                 progress("Preparing Python environment and dependencies...")
                 log.write("$ " + subprocess.list2cmdline(command) + "\n")
@@ -442,12 +443,12 @@ class Store:
         shutil.rmtree(path)
 
     def uninstall(self, addon_id: str) -> None:
+        addon_id = _identifier(addon_id)
         with self._guard(addon_id):
             self._require_stopped(addon_id)
-            for release in self.path(f"{addon_id}/releases").glob("*"):
-                self._remove_release(release)
-            self.path(f"{addon_id}/current.json").unlink(missing_ok=True)
-            # data/ and logs deliberately survive uninstall. Never delete research inputs.
+            directory = self.path(addon_id)
+            if directory.exists():
+                shutil.rmtree(directory)
 
     def launch(self, addon_id: str, *, config: Path | None = None, results: Path | None = None) -> tuple[subprocess.Popen, Path]:
         with self._guard(addon_id):
