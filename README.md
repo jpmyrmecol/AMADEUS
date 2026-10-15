@@ -23,7 +23,7 @@ AMADEUS is a markerless multi-animal tracking system for laboratory videos. It e
 
 Download and run the [installer for your operating system](https://amadeus.jpmyrmecol.com/#install). Initial setup requires an internet connection. The installer prepares the required software; follow any prompts that appear.
 
-AMADEUS supports NVIDIA GPUs on Windows and Linux, Apple Silicon on macOS, and some AMD GPUs via ROCm. For NVIDIA and AMD GPUs, 8 GB or more of VRAM is recommended; memory requirements depend on the video and animal count. Operation has also been confirmed on an NVIDIA laptop GPU with 4 GB of VRAM. AMD compatibility depends on the GPU, operating system, and drivers. AMD and macOS workflows have not yet been extensively tested on physical hardware.
+AMADEUS supports NVIDIA GPUs on Windows and Linux, Apple Silicon on macOS, and some AMD GPUs via ROCm. For NVIDIA and AMD GPUs, 8 GB or more of VRAM is recommended; memory requirements depend on the video and animal count. Operation has also been confirmed on an NVIDIA laptop GPU with 4 GB of VRAM.
 
 You can also install using Git or download the repository as a ZIP. Follow the [Git and ZIP installation instructions](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-1), then run the launcher from the repository’s root directory. For a ZIP download, select **Code → Download ZIP** on [GitHub](https://github.com/jpmyrmecol/AMADEUS) and extract the archive first.
 
