@@ -22,7 +22,7 @@ BG = "#000000"
 CARD = "#111111"
 FG = "#ffffff"
 MUTED = "#aaaaaa"
-GUIDE_URL = "https://github.com/jpmyrmecol/AMADEUS/blob/main/docs/ADDONS.md"
+GUIDE_URL = "https://github.com/jpmyrmecol/AMADEUS/blob/main/tools/ADDONS.md"
 TEMPLATE_URL = "https://github.com/jpmyrmecol/AMADEUS-Addon-Template"
 
 

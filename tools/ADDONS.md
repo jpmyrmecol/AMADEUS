@@ -108,16 +108,6 @@ Before installation the manager rejects path traversal, absolute paths, Windows 
 
 The AMADEUS management implementation remains AGPL-3.0-only. The [official template](https://github.com/jpmyrmecol/AMADEUS-Addon-Template) is independently written under 0BSD. An add-on should not copy or import AMADEUS implementation modules. It communicates using files and runs independently. This architecture does not change the licenses of AMADEUS, Ultralytics, or any dependency. Assess the licenses of all code included in each add-on.
 
-## Testing
+## References
 
-From the AMADEUS repository root:
-
-```sh
-python -m unittest discover -s tests -p 'test_addon*.py' -v
-```
-
-On a headless Linux system, use `xvfb-run -a` before that command. GUI tests exercise real Tk widgets and Home layout functions with external services mocked. Native D&D registration is mocked. Environment lifecycle tests use a real local `venv` in place of uv's network installation. These tests do not establish that the full CustomTkinter launcher, native drag-and-drop, or Python downloads work on every OS.
-
-Before release, test the template ZIP through the actual Home on Windows, macOS and Linux. Confirm real downloads, Browse and native D&D, launch, update, core update retention, failure recovery and uninstall retention.
-
-References: [uv CLI](https://docs.astral.sh/uv/reference/cli/), [Python virtual environments](https://docs.python.org/3/library/venv.html), [ZIP safety](https://docs.python.org/3/library/zipfile.html), [0BSD](https://spdx.org/licenses/0BSD.html).
+[uv CLI](https://docs.astral.sh/uv/reference/cli/), [Python virtual environments](https://docs.python.org/3/library/venv.html), [ZIP safety](https://docs.python.org/3/library/zipfile.html), [0BSD](https://spdx.org/licenses/0BSD.html).
