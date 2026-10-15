@@ -2,7 +2,7 @@
 
 ## Using add-ons
 
-Select **Add-ons**, between **Help** and **Update** on Home. Drop one add-on ZIP into the installer, or use **Browse**. Review the developer, license, OS support, update source and SHA-256 before accepting installation. Package inspection does not execute its code.
+Select **Add-ons** on Home. Drop one add-on ZIP into the installer, or use **Browse**. Review the developer, license, OS support, update source and SHA-256 before accepting installation. Package inspection does not execute its code.
 
 Installed applications appear in one scrollable column on the right of Home. Panels show the name, version and declared OS/CPU support. Click a panel to launch its independent GUI. Use its **...** menu for **Update** and **Uninstall**. The existing video drop targets continue to open their existing GUIs.
 
