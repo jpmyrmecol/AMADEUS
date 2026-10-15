@@ -46,6 +46,12 @@ To update, select **Update** on the Home screen.
 
 Use **Advanced Tracking** to configure individual stages and parameters, or **Multi Config Batch** to run several saved configurations.
 
+## Add-ons
+
+Select **Add-ons** above **Update** on Home to install an independent application from a ZIP using drag and drop or **Browse**. Installed add-ons appear on the right with their version, declared OS support, and **Update** / **Uninstall** menus. Their separate environments and settings are stored outside the AMADEUS installation and retained across AMADEUS updates.
+
+Only install add-ons from developers you trust. They are not sandboxed. See the [add-on guide](docs/ADDONS.md) and [official template](https://github.com/jpmyrmecol/AMADEUS-Addon-Template) for the file interface, package format, licensing boundary and developer instructions.
+
 ## Outputs and recording conditions
 
 The standard output includes individual identity, OBB center and dimensions, and head direction in degrees over time. Front and rear keypoints are derived from OBB geometry; they are not directly detected anatomical landmarks. In the final CSV, columns named `heading` store head direction. See the [output format](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-12) for coordinates, angles, and processing stages.

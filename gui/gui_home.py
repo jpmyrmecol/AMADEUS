@@ -20,6 +20,7 @@ from PIL import Image, ImageTk
 import customtkinter as ctk
 
 if __package__:
+    from .addon_gui import AddonController
     from .app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
     from .app_update import probe_update_status, start_update_check
     from .project_paths import PROJECT_ROOT, gui_asset, gui_script
@@ -36,6 +37,7 @@ if __package__:
     from .splash_geometry import SPLASH_LOGO_WIDTH_RATIO, configure_splash_window
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon, tk_font_spec
 else:
+    from addon_gui import AddonController
     from app_uninstall import UNINSTALL_EXIT_CODE, start_uninstall
     from app_update import probe_update_status, start_update_check
     from project_paths import PROJECT_ROOT, gui_asset, gui_script
@@ -241,6 +243,8 @@ def make_panel(
 ) -> tk.Canvas:
     canvas = tk.Canvas(
         parent,
+        width=1,
+        height=1,
         bg=DEFAULT_BG,
         highlightthickness=0,
         bd=0,
@@ -306,6 +310,8 @@ def make_panel(
         canvas.tag_lower("background")
         canvas.coords(shadow, width / 2 + 2, height / 2 + 2)
         canvas.coords(label, width / 2, height / 2)
+        canvas.itemconfigure(shadow, width=max(1, width - 16))
+        canvas.itemconfigure(label, width=max(1, width - 16))
         if hint is not None:
             canvas.coords(hint, width / 2, height * 5 / 6)
 
@@ -381,14 +387,20 @@ def open_manual(language: str) -> None:
 
 
 def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
-    root.grid_rowconfigure(0, weight=9, minsize=EASY_PANEL_H)
-    root.grid_rowconfigure(1, weight=2, minsize=BOTTOM_PANEL_H)
+    root.grid_rowconfigure(0, weight=1)
+    root.grid_columnconfigure(0, weight=1)
+    core = tk.Frame(root, bg=DEFAULT_BG)
+    core.grid(row=0, column=0, sticky="nsew")
+    core.grid_rowconfigure(0, weight=4, minsize=360)
+    core.grid_rowconfigure(1, weight=1, minsize=90)
     for col in range(6):
-        root.grid_columnconfigure(col, weight=1, minsize=WINDOW_W // 6)
+        core.grid_columnconfigure(col, weight=1, uniform="home", minsize=140)
+    addons = AddonController(root, PROJECT_ROOT)
+    root.AMADEUS_ADDONS = addons
 
     easy_panel = make_panel(
         root,
-        root,
+        core,
         "Easy Tracking",
         launch_easy_tracking,
         font_size=44,
@@ -405,6 +417,9 @@ def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
         "help": {
             "text": "Help", "hover": False, "shape_id": None, "text_id": None,
         },
+        "addons": {
+            "text": "Add-ons", "hover": False, "shape_id": None, "text_id": None,
+        },
         "update": {
             "text": "Update", "hover": False, "shape_id": None, "text_id": None,
             "available": False, "pulse_started_at": 0.0, "pulse_job": None,
@@ -415,7 +430,7 @@ def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
         if name == "uninstall":
             x0, y0 = 24, 24
             return x0, y0, x0 + 96, y0 + 30
-        index = 0 if name == "help" else 1
+        index = {"help": 0, "addons": 1, "update": 2}[name]
         x1, y0 = easy_panel.winfo_width() - 24, 24 + index * 38
         x0, y1 = x1 - 96, y0 + 30
         return x0, y0, x1, y1
@@ -565,6 +580,8 @@ def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
         for name in corner_buttons:
             x0, y0, x1, y1 = corner_bounds(name)
             if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+                if name in {"uninstall", "update"} and not addons.check_idle():
+                    return "break"
                 if name == "uninstall":
                     def close_for_uninstall() -> None:
                         root._amadeus_uninstall_requested = True
@@ -573,6 +590,8 @@ def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
                     start_uninstall(root, on_uninstall_start=close_for_uninstall)
                 elif name == "help":
                     open_manual("EN")
+                elif name == "addons":
+                    addons.open_installer()
                 else:
                     def close_for_update() -> None:
                         root._amadeus_update_requested = True
@@ -617,7 +636,7 @@ def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
         ),
     )
     for col, (text, command, drop_script) in enumerate(lower_panels):
-        panel = make_panel(root, root, text, command, font_size=18)
+        panel = make_panel(root, core, text, command, font_size=18)
         panel.grid(row=1, column=col, sticky="nsew")
         if drop_script is not None:
             drop_targets.append((panel, drop_script))
@@ -715,7 +734,8 @@ def main() -> int:
 
     install_window_icon(root)
     root.geometry(f"{WINDOW_W}x{WINDOW_H}")
-    root.resizable(False, False)
+    root.resizable(True, True)
+    root.minsize(1140, 540)
     install_window_icon(root)
 
     home_drop_targets = build_home(root)

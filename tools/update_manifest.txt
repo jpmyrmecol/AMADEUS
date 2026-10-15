@@ -12,7 +12,10 @@ assets/deep_green.json
 assets/logo_amadeus_mini.png
 assets/logo_amadeus_splash.png
 colab/AMADEUS_Colab.ipynb
+docs/ADDONS.md
 gui/__init__.py
+gui/addon_gui.py
+gui/addon_manager.py
 gui/advanced_tracking_layout.py
 gui/attention_border.py
 gui/app_uninstall.py
