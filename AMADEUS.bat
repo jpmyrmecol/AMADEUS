@@ -47,7 +47,8 @@ if "%AMADEUS_GUI_EXIT%"=="42" (
 )
 if "%AMADEUS_GUI_EXIT%"=="43" (
     echo [AMADEUS] Uninstall accepted. A separate Command Prompt will remove AMADEUS.
-    cd /d "%AMADEUS_LAUNCH_CWD%"
+    REM Release the installation folder even if this terminal started there.
+    cd /d "%USERPROFILE%"
     exit /b 0
 )
 if not "%AMADEUS_GUI_EXIT%"=="0" (

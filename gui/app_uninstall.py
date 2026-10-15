@@ -17,9 +17,11 @@ from tkinter import messagebox
 from typing import Callable
 
 try:
+    from .addon_manager import Store as AddonStore, storage_root as addon_storage_root
     from .project_paths import PROJECT_ROOT
     from .update_support import terminate_other_amadeus_processes
 except ImportError:
+    from addon_manager import Store as AddonStore, storage_root as addon_storage_root
     from project_paths import PROJECT_ROOT
     from update_support import terminate_other_amadeus_processes
 
@@ -141,7 +143,6 @@ try {
 
     $LocalAmadeus = Join-Path $env:LOCALAPPDATA "AMADEUS"
     $CommandDir = Join-Path $LocalAmadeus "bin"
-    Remove-AmadeusPathEntry $CommandDir
 
     $rootNorm = $ProjectRoot.TrimEnd("\")
     $localNorm = ([IO.Path]::GetFullPath($LocalAmadeus)).TrimEnd("\")
@@ -151,14 +152,15 @@ try {
     ) -or $rootNorm.Equals($localNorm, [StringComparison]::OrdinalIgnoreCase)
 
     if ($rootInsideLocal) {
-        Write-Host "[AMADEUS] Removing $LocalAmadeus ..."
+        Write-Host "[AMADEUS] Removing $LocalAmadeus (including add-ons) ..."
         Remove-WithRetry $LocalAmadeus
     } else {
-        Write-Host "[AMADEUS] Removing $LocalAmadeus ..."
-        Remove-WithRetry $LocalAmadeus
         Write-Host "[AMADEUS] Removing $ProjectRoot ..."
         Remove-WithRetry $ProjectRoot
+        Write-Host "[AMADEUS] Removing $LocalAmadeus (including add-ons) ..."
+        Remove-WithRetry $LocalAmadeus
     }
+    Remove-AmadeusPathEntry $CommandDir
 
     Write-Host ""
     Write-Host "[AMADEUS] Uninstall complete."
@@ -184,11 +186,13 @@ try {
 def _write_posix_uninstaller(project_root: Path) -> Path:
     script = Path(tempfile.gettempdir()) / f"AMADEUS-uninstall-{uuid.uuid4().hex}.sh"
     root_literal = shlex.quote(str(project_root))
+    addons_literal = shlex.quote(str(addon_storage_root()))
     script.write_text(
         """#!/usr/bin/env bash
 set -u
 
 PROJECT_ROOT=__AMADEUS_PROJECT_ROOT__
+ADDONS_ROOT=__AMADEUS_ADDONS_ROOT__
 PARENT_PID="$1"
 
 is_wsl() {
@@ -246,6 +250,13 @@ case "$PROJECT_ROOT" in
         ;;
 esac
 
+case "$ADDONS_ROOT" in
+    ""|"/"|"$HOME")
+        fail "Refusing to remove an unsafe add-on directory: $ADDONS_ROOT"
+        ;;
+esac
+[ ! -L "$ADDONS_ROOT" ] || fail "Refusing to remove a symbolic link as add-on storage: $ADDONS_ROOT"
+
 [ -f "$PROJECT_ROOT/VERSION" ] || fail "AMADEUS VERSION marker is missing."
 [ -f "$PROJECT_ROOT/pyproject.toml" ] || fail "AMADEUS pyproject.toml is missing."
 [ -f "$PROJECT_ROOT/gui/gui_home.py" ] || fail "AMADEUS Home GUI marker is missing."
@@ -262,15 +273,22 @@ chmod -R u+w "$PROJECT_ROOT" 2>/dev/null || true
 rm -rf -- "$PROJECT_ROOT"
 [ ! -e "$PROJECT_ROOT" ] || fail "Could not completely remove $PROJECT_ROOT."
 
+echo "[AMADEUS] Removing $ADDONS_ROOT (all installed add-ons and their data) ..."
+if [ -d "$ADDONS_ROOT" ]; then
+    chmod -R u+w "$ADDONS_ROOT" 2>/dev/null || true
+    rm -rf -- "$ADDONS_ROOT"
+fi
+[ ! -e "$ADDONS_ROOT" ] || fail "Could not completely remove add-on storage: $ADDONS_ROOT."
+
 echo
 echo "[AMADEUS] Uninstall complete."
-echo "[AMADEUS] The AMADEUS folder and installed command files were removed."
+echo "[AMADEUS] The AMADEUS folder, installed add-ons and command files were removed."
 notify_wsl success
 SELF="$0"
 rm -f -- "$SELF" 2>/dev/null || true
 sleep 3
 exit 0
-""".replace("__AMADEUS_PROJECT_ROOT__", root_literal),
+""".replace("__AMADEUS_PROJECT_ROOT__", root_literal).replace("__AMADEUS_ADDONS_ROOT__", addons_literal),
         encoding="utf-8",
     )
     script.chmod(0o700)
@@ -361,15 +379,38 @@ def start_uninstall(root, *, on_uninstall_start: Callable[[], None]) -> None:
     accepted = messagebox.askyesno(
         "Uninstall AMADEUS",
         "Permanently uninstall AMADEUS?\n\n"
-        "The entire folder below will be deleted, including the virtual "
-        "environment, scripts, Git metadata, and any other files stored inside it:\n\n"
+        "The entire installation folder will be deleted, including its virtual "
+        "environment, scripts and Git metadata:\n\n"
         f"{project_root}\n\n"
-        "Tracking sessions or result folders stored elsewhere are not deleted.\n\n"
+        "All installed add-ons will also be deleted, including their programs, "
+        "Python environments, saved settings, data, caches and logs:\n\n"
+        f"{addon_storage_root()}\n\n"
+        "Videos, tracking sessions and results stored outside these folders are not deleted.\n\n"
         "Continue?",
         parent=root,
         default=messagebox.NO,
     )
     if not accepted:
+        return
+
+    try:
+        addon_store = AddonStore()
+        installed, _errors = addon_store.list()
+        running_addons = [
+            item.manifest["name"]
+            for item in installed
+            if addon_store.running(item.manifest["id"])
+        ]
+    except (OSError, ValueError) as exc:
+        messagebox.showerror("Uninstall AMADEUS", f"Could not check running add-ons:\n\n{exc}", parent=root)
+        return
+    if running_addons:
+        messagebox.showerror(
+            "Uninstall AMADEUS",
+            "Close these add-ons before uninstalling AMADEUS:\n\n"
+            + "\n".join(f"- {name}" for name in running_addons),
+            parent=root,
+        )
         return
 
     try:

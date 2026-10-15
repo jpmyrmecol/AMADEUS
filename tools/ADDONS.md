@@ -37,7 +37,9 @@ A replacement environment is built at its final path before `current.json` is at
 
 Home reconstructs the panels from these records. AMADEUS updates, replacement checkouts and reinstalls therefore do not need to copy add-ons out of the application directory. Corrupt records are reported in the installer without preventing Home from opening.
 
-**Uninstall removes the add-on program and environments but retains `data/` and logs.** The manager does not remove input videos, result CSV files or configuration files. The shared `.python` and `.cache` directories also remain. Independent applications are not sandboxed and can modify files themselves. Back up important research data.
+**Uninstalling one add-on** from its panel removes that add-on's program and virtual environments but retains its `data/` and logs. The shared `.python` and `.cache` directories remain.
+
+**Uninstalling AMADEUS itself** also deletes the entire add-on storage directory, including every add-on, its saved settings, data and logs, and shared add-on Python environments and caches. Videos, tracking sessions and results stored outside the AMADEUS installation and add-on storage are not deleted. Independent applications are not sandboxed and can modify files themselves. Back up important research data.
 
 Do not move installed virtual environments manually. Install the ZIP again at the new location instead. Do not store user data inside `payload/` or `.venv/`; those directories are replaced on update.
 

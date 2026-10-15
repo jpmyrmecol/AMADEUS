@@ -695,7 +695,7 @@ def install_amadeus_command() -> Path:
             "    exit /b 0\n"
             ")\n"
             'if "%AMADEUS_GUI_EXIT%"=="43" (\n'
-            '    cd /d "%AMADEUS_LAUNCH_CWD%"\n'
+            '    cd /d "%USERPROFILE%"\n'
             "    echo [AMADEUS] Uninstall accepted. A separate Command Prompt will remove AMADEUS.\n"
             "    exit /b 0\n"
             ")\n"
