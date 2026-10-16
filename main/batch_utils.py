@@ -623,8 +623,9 @@ TRAIN_COLLAPSE_RATIO = _float_env("AMADEUS_TRAIN_COLLAPSE_RATIO", 0.5)
 # Peak VRAM fraction during the starting epoch below which AMADEUS may raise
 # an automatic NVIDIA training batch once. Below 30% the batch doubles;
 # from 30% up to (but excluding) 40% it grows by 1.5x, rounded down
-# to an integer (but by at least one). Both tiers target at most 60%
-# utilization under the linear memory-cost approximation. Later-epoch
+# to an integer (but by at least one). Both tiers target roughly 60%
+# utilization under a linear memory-cost approximation. Small batches can
+# exceed that estimate when rounded up to the next integer. Later-epoch
 # growth is not predicted, so OOM recovery remains active.
 # The headroom increase is never repeated after a restart, and is disabled
 # permanently if a recovery has already lowered the batch.
