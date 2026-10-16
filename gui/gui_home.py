@@ -55,7 +55,7 @@ else:
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon, tk_font_spec
 
 ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("green")
+ctk.set_default_color_theme(str(gui_asset("deep_green.json")))
 
 APP_TITLE = "AMADEUS"
 
