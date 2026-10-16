@@ -2446,6 +2446,14 @@ def main(
                 nonlocal epoch_started
                 epoch_started = time.monotonic()
                 monitor.begin_epoch_resources(trainer.epoch)
+                if os.environ.get("AMADEUS_GUI_PROGRESS_PROTOCOL") == "1":
+                    # The GUI needs the actual batch and dataset size, including
+                    # AutoBatch and resumed runs, for exact image-count axes.
+                    print(
+                        f"[AMADEUS TRAIN EPOCH] epoch={trainer.epoch + 1}/{trainer.epochs} "
+                        f"images={len(trainer.train_loader.dataset)} batch={trainer.batch_size}",
+                        flush=True,
+                    )
 
             def _on_train_epoch_end(trainer):
                 if epoch_started is None:
