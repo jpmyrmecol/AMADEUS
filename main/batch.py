@@ -40,7 +40,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from gui.project_paths import MAIN_DIR as MAIN_PATH, PROJECT_ROOT, with_pythonpath
-from main.runtime_diagnostics import runtime_details, runtime_summary_lines
+from main.runtime_diagnostics import runtime_details, runtime_summary_lines, system_details
 
 CURRENT_DIR = str(MAIN_PATH)
 
@@ -130,6 +130,7 @@ def _begin_logging(config_path: str) -> str:
     _ARCHIVE_LOG = open(log_path, "a", encoding="utf-8", buffering=1)
     version_status = check_version_status(timeout=2.0)
     runtime = runtime_details()
+    system = system_details()
     separator = (
         f"=== AMADEUS {version_label(version_status.current)} RUN START "
         f"{_iso_timestamp()} PID={os.getpid()} ===\n"
@@ -143,6 +144,11 @@ def _begin_logging(config_path: str) -> str:
         f"python_version={runtime['python_version']}",
         f"platform={platform.platform()}",
         f"machine={platform.machine()}",
+        f"cpu_model={system['cpu_model']}",
+        f"cpu_cores={system['cpu_cores']}",
+        f"ram_total_gib={system['ram_total_gib']}",
+        f"swap_used_gib={system['swap_used_gib']}",
+        f"power_source={system['power_source']}",
         f"cwd={os.getcwd()}",
         f"config_path={cfg_abs}",
         f"argv={sys.argv!r}",
@@ -156,6 +162,15 @@ def _begin_logging(config_path: str) -> str:
         f"torchvision_version={_package_version('torchvision')}",
         f"ultralytics_version={_package_version('ultralytics')}",
     ]
+    if runtime["gpu_backend"] == "Apple MPS":
+        header.extend(
+            f"{name}={os.environ.get(name, 'unset')}"
+            for name in (
+                "PYTORCH_ENABLE_MPS_FALLBACK",
+                "PYTORCH_MPS_HIGH_WATERMARK_RATIO",
+                "PYTORCH_MPS_LOW_WATERMARK_RATIO",
+            )
+        )
     _write_archive("[RUN HEADER] " + "\n[RUN HEADER] ".join(header) + "\n")
     sys.stdout = TeeStream(_CONSOLE_STDOUT, _ARCHIVE_LOG)
     sys.stderr = TeeStream(_CONSOLE_STDERR, _ARCHIVE_LOG)
