@@ -2273,6 +2273,7 @@ def main(
         )
 
         def _do_train():
+            nonlocal batch_size
             train_kwargs = {**base_kwargs, "batch": batch_size}
             watchdog_state_path = os.environ.get(_WATCHDOG_STATE_ENV)
             watchdog_state = (
@@ -2548,6 +2549,16 @@ def main(
             except Exception as exc:
                 is_oom, backend = _is_oom_error(exc)
                 if is_oom:
+                    if batch_size < 1:
+                        # AutoBatch can finish before a later setup allocation fails,
+                        # before on_train_start has synchronized our recovery state.
+                        selected_batch = getattr(getattr(model, "trainer", None), "batch_size", None)
+                        if (
+                            isinstance(selected_batch, int)
+                            and not isinstance(selected_batch, bool)
+                            and selected_batch > 0
+                        ):
+                            batch_size = selected_batch
                     raise _BatchTooLargeError(
                         f"{backend} memory exhaustion mid-training at batch={batch_size}.",
                         action="lower_batch",
@@ -2971,3 +2982,4 @@ if __name__ == "__main__":
         _main_from_config(sys.argv[1])
     else:
         raise SystemExit(_run_supervised_cli(sys.argv[1:]))
+
