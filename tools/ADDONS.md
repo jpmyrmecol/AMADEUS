@@ -18,7 +18,9 @@ Close an add-on before updating or removing it. Home reports failures and leaves
 | --- | --- |
 | Windows | `%LOCALAPPDATA%\AMADEUS\addons` |
 | macOS | `~/Library/Application Support/AMADEUS/addons` |
-| Linux | `$XDG_DATA_HOME/amadeus/addons`, or `~/.local/share/amadeus/addons` when XDG_DATA_HOME is not an absolute path |
+| Linux / WSL2 | `$XDG_DATA_HOME/AMADEUS/addons`, or `~/.local/share/AMADEUS/addons` when XDG_DATA_HOME is unset, empty or relative |
+
+On Linux, the AMADEUS application and its add-ons share the `AMADEUS` directory for a standard installation. Existing add-ons in the former lowercase `amadeus/addons` directory are moved to `AMADEUS/addons` on the first launch of the new Home screen. A symbolic link at the former location is retained because installed Python environments can reference absolute paths. This link is removed when AMADEUS is uninstalled. Close running add-ons before migration. If both the old and new add-on directories already contain data, the migration stops and reports the conflict without overwriting either directory. Do not manually delete the compatibility link while the migrated add-ons are installed.
 
 Each add-on has an immutable ID and its own directory:
 
