@@ -25,6 +25,7 @@ gui/color.py
 gui/config_path_recovery.py
 gui/convert.py
 gui/copyable_text.py
+gui/dark_widgets.py
 gui/gui_advanced_tracking.py
 gui/gui_colab.py
 gui/gui_easy_tracking.py
