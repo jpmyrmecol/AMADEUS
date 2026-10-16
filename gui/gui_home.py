@@ -95,6 +95,7 @@ EASY_PANEL_H = WINDOW_UNIT * 12
 BOTTOM_PANEL_H = WINDOW_UNIT * 3
 WINDOW_H = EASY_PANEL_H + BOTTOM_PANEL_H
 SPLASH_BG = "black"
+SPLASH_CLOSE_TIMEOUT_MS = 1500
 
 
 def python_executable() -> str:
@@ -105,10 +106,10 @@ def python_executable() -> str:
     return str(candidate if candidate.is_file() else Path(sys.executable))
 
 
-def ensure_external_splash() -> bool:
+def ensure_external_splash() -> tuple[bool, subprocess.Popen | None]:
     """Use a separate splash process so reveal stays smooth during GUI setup."""
     if os.environ.get(TOKEN_ENV_VAR):
-        return True
+        return True, None
 
     token = uuid.uuid4().hex
     environment = os.environ.copy()
@@ -120,7 +121,7 @@ def ensure_external_splash() -> bool:
         }
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        subprocess.Popen(
+        process = subprocess.Popen(
             [
                 python_executable(),
                 "-u",
@@ -130,11 +131,12 @@ def ensure_external_splash() -> bool:
             ],
             **kwargs,
         )
-    except OSError:
-        return False
+    except OSError as exc:
+        print(f"[AMADEUS] Could not launch external splash: {exc}", flush=True)
+        return False, None
 
     os.environ[TOKEN_ENV_VAR] = token
-    return True
+    return True, process
 
 
 def show_splash(root: ctk.CTk, reveal: bool = False) -> tk.Toplevel:
@@ -717,8 +719,9 @@ def install_home_video_drop(
 def main() -> int:
     configure_taskbar_identity()
     splash_shown_at = time.monotonic()
-    has_external_splash = ensure_external_splash()
+    has_external_splash, splash_process = ensure_external_splash()
     root = ctk.CTk()
+    print("[AMADEUS] Tk root created.", flush=True)
     root._amadeus_update_requested = False
     root._amadeus_uninstall_requested = False
     configure_dpi_scaling(root)
@@ -739,6 +742,7 @@ def main() -> int:
     install_window_icon(root)
 
     home_drop_targets = build_home(root)
+    print("[AMADEUS] Home panels built.", flush=True)
 
     external_start = external_started_at() if has_external_splash else None
     if external_start is None:
@@ -749,6 +753,7 @@ def main() -> int:
     reveal_job: str | None = None
     dismiss_poll_job: str | None = None
     close_poll_job: str | None = None
+    splash_close_started: float | None = None
     reveal_requested = False
     main_revealed = False
 
@@ -760,6 +765,7 @@ def main() -> int:
         dismiss_poll_job = None
         close_poll_job = None
         root.deiconify()
+        print("[AMADEUS] Home window displayed.", flush=True)
         install_window_icon(root)
         # Initialize tkdnd after the Home window is visible, without delaying
         # the splash reveal or altering the existing panel click actions.
@@ -777,10 +783,32 @@ def main() -> int:
         if external_closed():
             finish_reveal()
             return
+        if splash_process is not None:
+            status = splash_process.poll()
+            if status is not None:
+                print(
+                    f"[AMADEUS] Splash exited without closure confirmation "
+                    f"(exit code {status}); displaying Home.",
+                    flush=True,
+                )
+                finish_reveal()
+                return
+        if (
+            splash_close_started is not None
+            and (time.monotonic() - splash_close_started) * 1000 >= SPLASH_CLOSE_TIMEOUT_MS
+        ):
+            print("[AMADEUS] Splash closure timed out; displaying Home.", flush=True)
+            if splash_process is not None and splash_process.poll() is None:
+                try:
+                    splash_process.terminate()
+                except OSError:
+                    pass
+            finish_reveal()
+            return
         close_poll_job = root.after(20, wait_for_external_splash_close)
 
     def reveal_main_window(_event=None) -> None:
-        nonlocal reveal_requested, reveal_job, dismiss_poll_job
+        nonlocal reveal_requested, reveal_job, dismiss_poll_job, splash_close_started
         if reveal_requested:
             return
         reveal_requested = True
@@ -797,6 +825,7 @@ def main() -> int:
                 pass
             dismiss_poll_job = None
         if has_external_splash:
+            splash_close_started = time.monotonic()
             signal_stop()
             wait_for_external_splash_close()
             return
