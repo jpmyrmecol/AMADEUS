@@ -52,6 +52,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_advanced_t
     from video_input import ask_open_analysis_video, prepare_analysis_video
 
 ensure_import_paths(MAIN_DIR)
+from batch_utils import parse_training_batch_size
 from checkpoint_utils import checkpoint_spec_for_config
 from experiment_utils import (
     DEFAULT_LR0,
@@ -2190,6 +2191,11 @@ class ConfigGUI(ctk.CTk):
 
         training_cfg = dict(cfg.get("training", {}) or {})
         training_cfg.update({k: self._cast(k, w.get()) for k, w in self.sections["Training"]["widgets"].items()})
+        try:
+            training_cfg["BATCH_SIZE"] = parse_training_batch_size(training_cfg.get("BATCH_SIZE"))
+        except ValueError as exc:
+            messagebox.showerror("Error", str(exc))
+            return False
         cfg["training"] = training_cfg
         try:
             lr0_values = parse_lr0_values(cfg["training"].get("LR0"))
