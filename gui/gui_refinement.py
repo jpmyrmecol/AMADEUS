@@ -915,7 +915,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         ctk.CTkButton(ctrl, text="Fit Window Scale", width=120, height=22, corner_radius=3,
                       command=self.fit_window_scale).pack(side="right", padx=(4, 0), pady=4)
 
-        main = tk.PanedWindow(self, orient="horizontal", sashrelief="raised")
+        main = tk.PanedWindow(self, orient="horizontal", bg="#242424", sashrelief="flat", sashwidth=7, bd=0)
         main.pack(fill="both", expand=True, padx=10, pady=(0, 2))
         self._main_pane = main
 
