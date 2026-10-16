@@ -1,0 +1,451 @@
+# Copyright (C) 2026 Yusuke Notomi
+# SPDX-License-Identifier: AGPL-3.0-only
+# Unmodified direction correction from e35c1e438b01785a426b2cb199a4f5e8cbf67346.
+def _eval_direction_segment_flips_id(
+    corrected: dict,
+    tid: int,
+    phase: str,
+    max_axis_error_deg: float,
+    flip_frame_threshold: int,
+) -> tuple[list[tuple[int, float]], list[dict]]:
+    """Resolve direction flips by iterative anchor-run merging.
+
+    Valid heading frames are split into direction runs at >60 degree jumps.
+    Runs spanning at least ``flip_frame_threshold`` video frames are treated as
+    reliable anchors and are preserved.  Short runs are eligible only when an
+    immediate neighboring anchor has a raw boundary jump of at least 120
+    degrees; 60-120 degree boundaries are considered ambiguous and are excluded
+    from the flip evidence.  When a flip is accepted, it is applied to a local
+    direction copy, the runs are rebuilt, and the procedure is repeated until no
+    further eligible flip remains.  This makes a flipped run merge into the
+    adjacent anchor before the next decision is made.
+    """
+    logs: list[dict] = []
+
+    valid = _valid_frames(corrected, tid)
+    n = len(valid)
+    if n < 2:
+        return [], logs
+
+    original_dirs: list[float | None] = [get_dir(corrected, tid, valid[k]) for k in range(n)]
+    current_dirs: list[float | None] = [
+        None if value is None else float(value)
+        for value in original_dirs
+    ]
+
+    split_deg = 60.0
+    anchor_boundary_deg = 120.0
+    max_iterations = max(1, 2 * n)
+
+    def _build_runs() -> list[tuple[int, int]]:
+        """Maximal finite-heading runs separated by >60 degree jumps or missing headings."""
+        runs_local: list[tuple[int, int]] = []
+        k = 0
+        while k < n:
+            if current_dirs[k] is None:
+                k += 1
+                continue
+            j = k
+            while (
+                j + 1 < n
+                and current_dirs[j + 1] is not None
+                and angular_distance_deg(current_dirs[j], current_dirs[j + 1]) <= split_deg  # type: ignore[arg-type]
+            ):
+                j += 1
+            runs_local.append((k, j))
+            k = j + 1
+        return runs_local
+
+    def _run_span(runs_local: list[tuple[int, int]], r: int) -> int:
+        i0, i1 = runs_local[r]
+        return int(valid[i1]) - int(valid[i0]) + 1
+
+    def _run_valid_count(runs_local: list[tuple[int, int]], r: int) -> int:
+        i0, i1 = runs_local[r]
+        return int(i1) - int(i0) + 1
+
+    def _is_reliable_anchor_run(runs_local: list[tuple[int, int]], r: int) -> bool:
+        return _run_span(runs_local, r) >= int(flip_frame_threshold)
+
+    def _boundary_delta(runs_local: list[tuple[int, int]], left_r: int, right_r: int) -> float | None:
+        _, li1 = runs_local[left_r]
+        ri0, _ = runs_local[right_r]
+        if current_dirs[li1] is None or current_dirs[ri0] is None:
+            return None
+        return float(angular_distance_deg(current_dirs[li1], current_dirs[ri0]))  # type: ignore[arg-type]
+
+    def _boundary_anchor_ok(
+        runs_local: list[tuple[int, int]],
+        anchor_r: int,
+        target_r: int,
+    ) -> tuple[bool, float | None, str]:
+        if not _is_reliable_anchor_run(runs_local, anchor_r):
+            return False, None, 'anchor_run_too_short'
+        if anchor_r == target_r - 1:
+            delta = _boundary_delta(runs_local, anchor_r, target_r)
+        elif anchor_r == target_r + 1:
+            delta = _boundary_delta(runs_local, target_r, anchor_r)
+        else:
+            return False, None, 'not_adjacent'
+        if delta is None:
+            return False, None, 'missing_boundary_heading'
+        if delta < anchor_boundary_deg:
+            if delta >= split_deg:
+                return False, delta, 'ambiguous_boundary_90_135'
+            return False, delta, 'boundary_below_90'
+        return True, delta, 'ok'
+
+    def _boundary_cost(
+        runs_local: list[tuple[int, int]],
+        anchor_r: int,
+        target_r: int,
+        target_flip: int,
+    ) -> float:
+        """Squared angular cost at the immediate anchor-target boundary only."""
+        ai0, ai1 = runs_local[anchor_r]
+        ti0, ti1 = runs_local[target_r]
+
+        if anchor_r == target_r - 1:
+            if current_dirs[ai1] is None or current_dirs[ti0] is None:
+                return float('inf')
+            a_dir = float(current_dirs[ai1])  # type: ignore[arg-type]
+            t_dir = float(current_dirs[ti0])  # type: ignore[arg-type]
+            if target_flip:
+                t_dir = (t_dir + 180.0) % 360.0
+            return float(angular_distance_deg(a_dir, t_dir) ** 2)
+
+        if anchor_r == target_r + 1:
+            if current_dirs[ti1] is None or current_dirs[ai0] is None:
+                return float('inf')
+            t_dir = float(current_dirs[ti1])  # type: ignore[arg-type]
+            a_dir = float(current_dirs[ai0])  # type: ignore[arg-type]
+            if target_flip:
+                t_dir = (t_dir + 180.0) % 360.0
+            return float(angular_distance_deg(t_dir, a_dir) ** 2)
+
+        return float('inf')
+
+    def _collect_target_evidence(
+        runs_local: list[tuple[int, int]],
+        r: int,
+    ) -> tuple[list[dict], list[dict]]:
+        anchor_infos: list[dict] = []
+        rejected_neighbors: list[dict] = []
+        for side, anchor_r in (('left', r - 1), ('right', r + 1)):
+            if anchor_r < 0 or anchor_r >= len(runs_local):
+                continue
+            ok, delta, reason = _boundary_anchor_ok(runs_local, anchor_r, r)
+            info = {
+                'side': side,
+                'run_index': int(anchor_r),
+                'frame_start': int(valid[runs_local[anchor_r][0]]),
+                'frame_end': int(valid[runs_local[anchor_r][1]]),
+                'run_span': _run_span(runs_local, anchor_r),
+                'valid_count': _run_valid_count(runs_local, anchor_r),
+                'boundary_delta': None if delta is None else float(delta),
+                'reason': reason,
+            }
+            if not ok:
+                rejected_neighbors.append(info)
+                continue
+            keep_cost = _boundary_cost(runs_local, anchor_r, r, 0)
+            flip_cost = _boundary_cost(runs_local, anchor_r, r, 1)
+            if not (np.isfinite(keep_cost) and np.isfinite(flip_cost)):
+                info['reason'] = 'invalid_boundary_cost'
+                rejected_neighbors.append(info)
+                continue
+            info.update({
+                'reason': 'ok',
+                'cost_keep': float(keep_cost),
+                'cost_flip': float(flip_cost),
+                'cost_pairs': 1,
+            })
+            anchor_infos.append(info)
+        return anchor_infos, rejected_neighbors
+
+    def _flip_run_in_local_dirs(runs_local: list[tuple[int, int]], r: int) -> list[tuple[int, float]]:
+        i0, i1 = runs_local[r]
+        run_changes: list[tuple[int, float]] = []
+        for k_s in range(i0, i1 + 1):
+            if current_dirs[k_s] is None:
+                continue
+            t = int(valid[k_s])
+            new_raw = (float(current_dirs[k_s]) + 180.0) % 360.0
+            obb_t = get_obb(corrected, tid, t)
+            if obb_t is not None:
+                projected = _direction_on_long_axis(
+                    obb_t,
+                    new_raw,
+                    max_axis_error_deg=max_axis_error_deg,
+                )
+                new_dir = projected if projected is not None else new_raw
+            else:
+                new_dir = new_raw
+            current_dirs[k_s] = float(new_dir)
+            run_changes.append((t, float(new_dir)))
+        return run_changes
+
+    def _snapshot_run_dirs(runs_local: list[tuple[int, int]], r: int) -> list[tuple[int, float | None]]:
+        i0, i1 = runs_local[r]
+        return [(k_s, current_dirs[k_s]) for k_s in range(i0, i1 + 1)]
+
+    def _restore_run_dirs(snapshot: list[tuple[int, float | None]]) -> None:
+        for k_s, value in snapshot:
+            current_dirs[int(k_s)] = value
+
+    def _after_run_containing_interval(
+        runs_local: list[tuple[int, int]],
+        i0: int,
+        i1: int,
+    ) -> int | None:
+        for rr, (r0, r1) in enumerate(runs_local):
+            if int(r0) <= int(i0) and int(i1) <= int(r1):
+                return int(rr)
+        return None
+
+    def _anchor_merge_status(
+        runs_before: list[tuple[int, int]],
+        runs_after: list[tuple[int, int]],
+        target_r: int,
+        anchor_infos: list[dict],
+    ) -> dict:
+        """Return whether a tentative flip created a new target-anchor run merge."""
+        ti0, ti1 = runs_before[int(target_r)]
+        target_after = _after_run_containing_interval(runs_after, ti0, ti1)
+        merged_anchors: list[dict] = []
+
+        if target_after is not None:
+            for info in anchor_infos:
+                anchor_r = int(info['run_index'])
+                ai0, ai1 = runs_before[anchor_r]
+                anchor_after = _after_run_containing_interval(runs_after, ai0, ai1)
+                if anchor_after is None or anchor_after != target_after:
+                    continue
+                merged_anchors.append({
+                    'side': info.get('side'),
+                    'run_index_before': int(anchor_r),
+                    'frame_start': int(valid[ai0]),
+                    'frame_end': int(valid[ai1]),
+                    'boundary_delta_before': info.get('boundary_delta'),
+                    'after_run_index': int(anchor_after),
+                })
+
+        return {
+            'merged': bool(merged_anchors),
+            'merged_anchors': merged_anchors,
+            'run_count_before': int(len(runs_before)),
+            'run_count_after': int(len(runs_after)),
+            'target_run_index_before': int(target_r),
+            'target_after_run_index': target_after,
+            'target_frame_start': int(valid[ti0]),
+            'target_frame_end': int(valid[ti1]),
+        }
+
+    total_flipped_runs = 0
+    total_rejected_no_merge = 0
+    terminated_by_limit = False
+
+    for iteration in range(1, max_iterations + 1):
+        runs = _build_runs()
+        if not runs:
+            break
+
+        candidates: list[dict] = []
+        for r in range(len(runs)):
+            if _is_reliable_anchor_run(runs, r):
+                continue
+
+            i0, i1 = runs[r]
+            anchor_infos, rejected_neighbors = _collect_target_evidence(runs, r)
+            if not anchor_infos:
+                continue
+
+            cost_keep = float(sum(info['cost_keep'] for info in anchor_infos))
+            cost_flip = float(sum(info['cost_flip'] for info in anchor_infos))
+            if cost_flip < cost_keep:
+                candidates.append({
+                    'run_index': int(r),
+                    'frame_start': int(valid[i0]),
+                    'frame_end': int(valid[i1]),
+                    'length': int(valid[i1]) - int(valid[i0]) + 1,
+                    'valid_count': _run_valid_count(runs, r),
+                    'run_span': _run_span(runs, r),
+                    'cost_keep': cost_keep,
+                    'cost_flip': cost_flip,
+                    'improvement': float(cost_keep - cost_flip),
+                    'anchors': anchor_infos,
+                    'rejected_neighbors': rejected_neighbors,
+                })
+
+        if not candidates:
+            break
+
+        # Try candidates in deterministic best-first order.  A flip is accepted
+        # only if the tentative 180-degree inversion creates a new run merge
+        # between the target and at least one supporting anchor.  Tentative
+        # flips that do not create a merge are reverted and logged once in this
+        # iteration; if no candidate creates a new merge, the loop stops without
+        # rebuilding the identical state again.
+        candidates.sort(
+            key=lambda item: (
+                -float(item['improvement']),
+                int(item['frame_start']),
+                int(item['frame_end']),
+            ),
+        )
+
+        accepted: tuple[dict, list[tuple[int, float]], dict] | None = None
+        rejected_no_merge_this_iteration = 0
+        runs_before = runs
+
+        for selected in candidates:
+            selected_run = int(selected['run_index'])
+            snapshot = _snapshot_run_dirs(runs_before, selected_run)
+            run_changes = _flip_run_in_local_dirs(runs_before, selected_run)
+            runs_after = _build_runs()
+            merge_status = _anchor_merge_status(
+                runs_before,
+                runs_after,
+                selected_run,
+                selected['anchors'],
+            )
+
+            if bool(merge_status['merged']):
+                accepted = (selected, run_changes, merge_status)
+                break
+
+            _restore_run_dirs(snapshot)
+            rejected_no_merge_this_iteration += 1
+            total_rejected_no_merge += 1
+            logs.append({
+                'type': 'direction_segment_flip',
+                'phase': phase,
+                'iteration': int(iteration),
+                'ids': [tid],
+                'frame_start': int(selected['frame_start']),
+                'frame_end': int(selected['frame_end']),
+                'length': int(selected['length']),
+                'valid_count': int(selected['valid_count']),
+                'run_span': int(selected['run_span']),
+                'action': 'abstain',
+                'reason': 'reject_no_new_anchor_merge',
+                'selection_policy': 'iterative_adjacent_reliable_anchor_boundary_cost_require_merge',
+                'cost_keep': float(selected['cost_keep']),
+                'cost_flip': float(selected['cost_flip']),
+                'improvement': float(selected['improvement']),
+                'anchor_boundary_threshold_deg': float(anchor_boundary_deg),
+                'split_threshold_deg': float(split_deg),
+                'anchor_frame_threshold': int(flip_frame_threshold),
+                'anchors': selected['anchors'],
+                'rejected_neighbors': selected['rejected_neighbors'],
+                'changed_frames_if_accepted': [int(frame) for frame, _ in run_changes],
+                'anchor_merge_status': merge_status,
+                'num_candidate_flips_this_iteration': int(len(candidates)),
+                'anchor_merge_rebuild': False,
+            })
+
+        if accepted is None:
+            logs.append({
+                'type': 'direction_segment_flip',
+                'phase': phase,
+                'iteration': int(iteration),
+                'ids': [tid],
+                'action': 'abstain',
+                'reason': 'stop_no_new_anchor_merge',
+                'selection_policy': 'iterative_adjacent_reliable_anchor_boundary_cost_require_merge',
+                'num_candidate_flips_this_iteration': int(len(candidates)),
+                'num_rejected_no_merge_this_iteration': int(rejected_no_merge_this_iteration),
+                'total_rejected_no_merge': int(total_rejected_no_merge),
+                'anchor_merge_rebuild': False,
+            })
+            break
+
+        selected, run_changes, merge_status = accepted
+        total_flipped_runs += 1
+
+        logs.append({
+            'type': 'direction_segment_flip',
+            'phase': phase,
+            'iteration': int(iteration),
+            'ids': [tid],
+            'frame_start': int(selected['frame_start']),
+            'frame_end': int(selected['frame_end']),
+            'length': int(selected['length']),
+            'valid_count': int(selected['valid_count']),
+            'run_span': int(selected['run_span']),
+            'action': 'segment_flip',
+            'assign_type': int(ATYPE_DIR_FLIP),
+            'assign_type_source': 'correction_direction_segment_flip',
+            'selection_policy': 'iterative_adjacent_reliable_anchor_boundary_cost_require_merge',
+            'cost_keep': float(selected['cost_keep']),
+            'cost_flip': float(selected['cost_flip']),
+            'improvement': float(selected['improvement']),
+            'anchor_boundary_threshold_deg': float(anchor_boundary_deg),
+            'split_threshold_deg': float(split_deg),
+            'anchor_frame_threshold': int(flip_frame_threshold),
+            'anchors': selected['anchors'],
+            'rejected_neighbors': selected['rejected_neighbors'],
+            'changed_frames': [int(frame) for frame, _ in run_changes],
+            'num_candidate_flips_this_iteration': int(len(candidates)),
+            'num_rejected_no_merge_this_iteration': int(rejected_no_merge_this_iteration),
+            'anchor_merge_status': merge_status,
+            'anchor_merge_rebuild': True,
+        })
+    else:
+        terminated_by_limit = True
+
+    # Final abstain log for short runs that still have no reliable adjacent
+    # anchor after all accepted flips have been merged.  Cost-favors-keep cases
+    # are intentionally not logged to avoid noisy expected decisions.
+    final_runs = _build_runs()
+    for r, (i0, i1) in enumerate(final_runs):
+        if _is_reliable_anchor_run(final_runs, r):
+            continue
+        anchor_infos, rejected_neighbors = _collect_target_evidence(final_runs, r)
+        if anchor_infos:
+            continue
+        logs.append({
+            'type': 'direction_segment_flip',
+            'phase': phase,
+            'iteration': int(total_flipped_runs + 1),
+            'ids': [tid],
+            'frame_start': int(valid[i0]),
+            'frame_end': int(valid[i1]),
+            'length': int(valid[i1]) - int(valid[i0]) + 1,
+            'valid_count': int(_run_valid_count(final_runs, r)),
+            'run_span': int(_run_span(final_runs, r)),
+            'action': 'abstain',
+            'reason': 'no_reliable_adjacent_anchor',
+            'selection_policy': 'iterative_adjacent_reliable_anchor_boundary_cost',
+            'details': {
+                'role': 'target',
+                'flip': 0,
+                'reason': 'no_reliable_adjacent_anchor',
+                'run_span': int(_run_span(final_runs, r)),
+                'run_valid_count': int(_run_valid_count(final_runs, r)),
+                'rejected_neighbors': rejected_neighbors,
+                'anchor_boundary_threshold_deg': float(anchor_boundary_deg),
+                'split_threshold_deg': float(split_deg),
+                'anchor_frame_threshold': int(flip_frame_threshold),
+            },
+        })
+
+    if terminated_by_limit:
+        logs.append({
+            'type': 'direction_segment_flip',
+            'phase': phase,
+            'ids': [tid],
+            'action': 'abstain',
+            'reason': 'iteration_limit_reached',
+            'max_iterations': int(max_iterations),
+            'selection_policy': 'iterative_adjacent_reliable_anchor_boundary_cost',
+        })
+
+    changes: list[tuple[int, float]] = []
+    for k, (old_dir, new_dir) in enumerate(zip(original_dirs, current_dirs)):
+        if old_dir is None or new_dir is None:
+            continue
+        if angular_distance_deg(float(old_dir), float(new_dir)) > 1e-6:
+            changes.append((int(valid[k]), float(new_dir)))
+
+    return changes, logs

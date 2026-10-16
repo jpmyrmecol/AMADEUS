@@ -2466,7 +2466,9 @@ def _eval_direction_segment_flips_id(
 ) -> tuple[list[tuple[int, float]], list[dict]]:
     """Resolve direction flips by iterative anchor-run merging.
 
-    Valid heading frames are split into direction runs at >60 degree jumps.
+    Valid heading frames are split at >60 degree jumps and at remaining
+    OBB or heading gaps. Anchor comparisons and rebuilt run merges require
+    consecutive video frames. Frames filled before this step remain eligible.
     Runs spanning at least ``flip_frame_threshold`` video frames are treated as
     reliable anchors and are preserved.  Short runs are eligible only when an
     immediate neighboring anchor has a raw boundary jump of at least 120
@@ -2493,8 +2495,16 @@ def _eval_direction_segment_flips_id(
     anchor_boundary_deg = 120.0
     max_iterations = max(1, 2 * n)
 
+    def _headings_are_consecutive(left: int, right: int) -> bool:
+        """Require consecutive video frames with valid headings on both sides."""
+        return (
+            int(valid[right]) == int(valid[left]) + 1
+            and current_dirs[left] is not None
+            and current_dirs[right] is not None
+        )
+
     def _build_runs() -> list[tuple[int, int]]:
-        """Maximal finite-heading runs separated by >60 degree jumps or missing headings."""
+        """Build contiguous runs, including after each tentative flip."""
         runs_local: list[tuple[int, int]] = []
         k = 0
         while k < n:
@@ -2504,7 +2514,7 @@ def _eval_direction_segment_flips_id(
             j = k
             while (
                 j + 1 < n
-                and current_dirs[j + 1] is not None
+                and _headings_are_consecutive(j, j + 1)
                 and angular_distance_deg(current_dirs[j], current_dirs[j + 1]) <= split_deg  # type: ignore[arg-type]
             ):
                 j += 1
@@ -2526,7 +2536,7 @@ def _eval_direction_segment_flips_id(
     def _boundary_delta(runs_local: list[tuple[int, int]], left_r: int, right_r: int) -> float | None:
         _, li1 = runs_local[left_r]
         ri0, _ = runs_local[right_r]
-        if current_dirs[li1] is None or current_dirs[ri0] is None:
+        if not _headings_are_consecutive(li1, ri0):
             return None
         return float(angular_distance_deg(current_dirs[li1], current_dirs[ri0]))  # type: ignore[arg-type]
 
@@ -2544,7 +2554,7 @@ def _eval_direction_segment_flips_id(
         else:
             return False, None, 'not_adjacent'
         if delta is None:
-            return False, None, 'missing_boundary_heading'
+            return False, None, 'missing_boundary_frame_or_heading'
         if delta < anchor_boundary_deg:
             if delta >= split_deg:
                 return False, delta, 'ambiguous_boundary_90_135'
@@ -2562,7 +2572,7 @@ def _eval_direction_segment_flips_id(
         ti0, ti1 = runs_local[target_r]
 
         if anchor_r == target_r - 1:
-            if current_dirs[ai1] is None or current_dirs[ti0] is None:
+            if not _headings_are_consecutive(ai1, ti0):
                 return float('inf')
             a_dir = float(current_dirs[ai1])  # type: ignore[arg-type]
             t_dir = float(current_dirs[ti0])  # type: ignore[arg-type]
@@ -2571,7 +2581,7 @@ def _eval_direction_segment_flips_id(
             return float(angular_distance_deg(a_dir, t_dir) ** 2)
 
         if anchor_r == target_r + 1:
-            if current_dirs[ti1] is None or current_dirs[ai0] is None:
+            if not _headings_are_consecutive(ti1, ai0):
                 return float('inf')
             t_dir = float(current_dirs[ti1])  # type: ignore[arg-type]
             a_dir = float(current_dirs[ai0])  # type: ignore[arg-type]
