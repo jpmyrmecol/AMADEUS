@@ -2930,8 +2930,7 @@ class EasyTrackingGUI(ctk.CTk):
         self, epoch: int, total_epochs: int, images: int, batch_size: int,
     ) -> None:
         """Use the running trainer's actual dataset size and batch size."""
-        if epoch != self._train_epoch:
-            self._train_epoch_started_at = time.monotonic()
+        self._train_epoch_started_at = time.monotonic()
         self._train_epoch = epoch
         self._train_total_epochs = total_epochs
         self._train_epoch_images = images
@@ -3877,6 +3876,11 @@ class EasyTrackingGUI(ctk.CTk):
         if backend_match:
             self._training_backend_label = backend_match.group(1)
 
+        epoch_meta = _TRAIN_EPOCH_META_PAT.fullmatch(line)
+        if epoch_meta and self._active_step in (2, 7):
+            epoch, total, images, batch_size = map(int, epoch_meta.groups())
+            self._set_training_epoch_metadata(epoch, total, images, batch_size)
+
         if line == "":
             if not state.get("last_was_tqdm", False):
                 _safe_stdout_write("\n")
@@ -3897,25 +3901,26 @@ class EasyTrackingGUI(ctk.CTk):
                 desc = prefix[:colon].strip() if colon >= 0 else prefix.strip()
             else:
                 desc = ""
-            training = self._training_progress(desc, n, tot)
+            training = (
+                self._training_progress(desc, n, tot)
+                if self._active_step in (2, 7) else None
+            )
             if training is not None:
                 pct, text = training
-            else:
-                text = f"{desc}  {n}/{tot}" if desc else f"{n}/{tot}"
-            self._post_ui_event(self._on_tqdm_progress, pct, text)
-
-            # Extract per-batch box_loss from YOLO tqdm lines (training and refine_blobs)
-            if self._active_step in (7, 2):
+                self._post_ui_event(self._on_tqdm_progress, pct, text)
+                # A tqdm row can be redrawn multiple times at the same batch.
+                # Replace its loss sample rather than inflating the Images axis.
                 loss_m = _YOLO_LOSS_PAT.search(line)
-                if loss_m:
-                    try:
-                        box_loss = float(loss_m.group(1))
-                        if self._active_step == 7:
-                            self._batch_losses.append(box_loss)
-                        else:
-                            self._refine_losses.append(box_loss)
-                    except ValueError:
-                        pass
+                if loss_m and n > 0:
+                    self._record_training_loss(
+                        float(loss_m.group(1)), self._train_processed_images,
+                        refine=self._active_step == 2,
+                    )
+            elif not (self._active_step in (2, 7) and self._train_epoch > 0):
+                # Validation's own 0-100% bar must not overwrite the current
+                # training epoch's progress. Other stages retain their tqdm UI.
+                text = f"{desc}  {n}/{tot}" if desc else f"{n}/{tot}"
+                self._post_ui_event(self._on_tqdm_progress, pct, text)
             return
 
         if state.get("last_was_tqdm", False):
