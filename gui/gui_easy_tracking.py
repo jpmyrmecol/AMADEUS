@@ -36,6 +36,7 @@ try:
         with_pythonpath,
     )
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from .dark_widgets import dark_spinbox
     from .config_path_recovery import prepare_config_for_gui
     from .canvas_file_drop import install_canvas_file_drop
     from .attention_border import RotatingBorderHighlight
@@ -56,6 +57,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_easy_track
         with_pythonpath,
     )
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from dark_widgets import dark_spinbox
     from config_path_recovery import prepare_config_for_gui
     from canvas_file_drop import install_canvas_file_drop
     from attention_border import RotatingBorderHighlight
@@ -1518,7 +1520,7 @@ class EasyTrackingGUI(ctk.CTk):
         row = ctk.CTkFrame(inner, corner_radius=0)
         row.pack(fill="x", pady=4)
         pack_question_label(row, "How many animals are in the video?")
-        self._num_objects_sb = tk.Spinbox(
+        self._num_objects_sb = dark_spinbox(
             row,
             from_=1,
             to=999,
