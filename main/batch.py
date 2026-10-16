@@ -431,6 +431,9 @@ def run_lrf_dependent_stages(cfg: dict, cfg_path: str) -> None:
         print("Starting direction-estimation training...")
         run_script(OBB_DETECTOR_TRAINING_SCRIPT, cfg_path)
 
+    from cache_integrity import validate_skipped_analysis
+    validate_skipped_analysis(cfg)
+
     if cfg.get("skip_detection", False):
         skip_stage("obb_detection", "skip_detection is True")
     else:

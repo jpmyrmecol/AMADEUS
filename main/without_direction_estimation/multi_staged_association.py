@@ -59,6 +59,7 @@ from experiment_utils import (
 )
 from weight_utils import deduplicate_best_epoch_weights
 from tracking_video_inputs import configured_tracking_video_files
+from cache_integrity import cache_for_spec
 from video_frame_count import (
     clamp_frame_range_to_usable_count,
     read_video_frame_info,
@@ -2244,29 +2245,19 @@ def _run_single_tracking_job(spec: dict) -> None:
     out_dir = build_tracking_out_dir(
         session_path, model_name, dataset_name, run_name, info['name']
     )
-    direction_pickle = _artifact_path(out_dir, 'all_blobs.pkl')
-    if not pickle_has_data(direction_pickle):
-        raise FileNotFoundError(f'Direction blobs pickle not found or empty: {direction_pickle}')
-
-    fwd_req = required_tracking_outputs(out_dir)
-    fwd_needed = not all(output_has_data(kind, p) for kind, p in fwd_req)
-
-    if not fwd_needed or tracking_analysis_outputs_exist(out_dir):
-        print(f"Tracking outputs already exist. Skipping. [{run_name}:{info['name']}]")
-        if export_final_result:
-            for suffix, family in (('id_resolved', 'id_resolved'), ('filled', 'filled')):
-                buffer_path = _artifact_path(out_dir, BUFFERS_PICKLE_NAME, suffix)
-                if not os.path.exists(buffer_path):
-                    continue
-                with open(buffer_path, 'rb') as f:
-                    existing_buffers = pickle.load(f)
-                save_final_result_csv(
-                    session_path, model_name, dataset_name, run_name, info['name'],
-                    existing_buffers, num_objects, family,
-                )
-                break
+    cache = cache_for_spec(spec, out_dir)
+    cache.require('detection')
+    if cache.current('tracking'):
+        print(f"[CACHE] Reusing tracking [{run_name}:{info['name']}]")
+        if export_final_result and cache.current('refinement'):
+            family = cache.family()
+            with open(_artifact_path(out_dir, BUFFERS_PICKLE_NAME, family), 'rb') as f:
+                existing_buffers = pickle.load(f)
+            save_final_result_csv(session_path, model_name, dataset_name, run_name,
+                                  info['name'], existing_buffers, num_objects, family)
         return
-
+    cache.begin('tracking')
+    direction_pickle = _artifact_path(out_dir, 'all_blobs.pkl')
     direction_rows_df = load_blob_pickle(direction_pickle)
     detection_frames = build_detection_frames(
         direction_rows_df, info['first_frame'], info['last_frame'], conf_th)
@@ -2290,6 +2281,7 @@ def _run_single_tracking_job(spec: dict) -> None:
     )
     save_tracking_outputs(out_dir, fwd_buffers, num_objects,
                           artifact_suffix=FWD_ARTIFACT_SUFFIX, save_csv=False)
+    cache.complete('tracking')
 
 
 def main() -> None:
@@ -2372,6 +2364,7 @@ def main() -> None:
     for info in video_infos:
         for job in tracking_jobs:
             specs.append({
+                'cache_config': cfg,
                 'info': info,
                 'run_name': str(job['run_name']),
                 'session_path': session_path,

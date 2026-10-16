@@ -537,6 +537,9 @@ def _mark_missing_frames(
     )
     return log
 
+from cache_integrity import cache_for_spec
+
+
 def _run_single_correction_job(spec: dict) -> None:
     """Validate a variable-population result without filling missing animals."""
     out_dir          = spec['out_dir']
@@ -572,26 +575,18 @@ def _run_single_correction_job(spec: dict) -> None:
 
     dataset_name, out_dir = _resolve_existing_correction_out_dir(spec)
     spec = {**spec, 'dataset_name': dataset_name, 'out_dir': out_dir}
+    cache = cache_for_spec(spec, out_dir)
+    cache.require('tracking')
 
     observed = load_tracking_buffers(out_dir, FWD_ARTIFACT_SUFFIX)
     num_objects = len(observed['obb_buf'])
     spec = {**spec, 'num_objects': num_objects}
-    id_resolved_req = required_id_resolved_outputs(out_dir)
-    filled_req = required_filled_outputs(out_dir)
-    if emb_enable:
-        if all(output_has_data(kind, p) for kind, p in id_resolved_req):
-            print(f'ID-resolved outputs already exist. Skipping. [{run_name}:{video_name}]')
-            save_existing_corrected_final_result(spec, ID_RESOLVED_ARTIFACT_SUFFIX)
-            return
-        if all(output_has_data(kind, p) for kind, p in filled_req):
-            print(f'Filled outputs already exist. Skipping. [{run_name}:{video_name}]')
-            save_existing_corrected_final_result(spec, FILLED_ARTIFACT_SUFFIX)
-            return
-    else:
-        if all(output_has_data(kind, p) for kind, p in filled_req):
-            print(f'Filled outputs already exist. Skipping. [{run_name}:{video_name}]')
-            save_existing_corrected_final_result(spec, FILLED_ARTIFACT_SUFFIX)
-            return
+    if cache.current('refinement'):
+        family = cache.family()
+        print(f'[CACHE] Reusing {family} refinement [{run_name}:{video_name}]')
+        save_existing_corrected_final_result(spec, family)
+        return
+    cache.begin('refinement')
 
     fwd_pkl = _artifact_path(out_dir, BUFFERS_PICKLE_NAME, FWD_ARTIFACT_SUFFIX)
     if not os.path.exists(fwd_pkl):
@@ -625,6 +620,9 @@ def _run_single_correction_job(spec: dict) -> None:
         best_ss = 0.0
         segmentation_missing = False
 
+        embedding_recompute = not cache.current('embedding')
+        if embedding_recompute:
+            cache.begin('embedding')
         print(f'  [SEED] embedding video={video_name} run={run_name} seed={embedding_seed}')
         try:
             cached_artifacts = load_cached_embedding_artifacts(
@@ -659,6 +657,8 @@ def _run_single_correction_job(spec: dict) -> None:
                     device_config=embedding_device,
                     session_path=session_path,
                 )
+            if embedding_recompute and all(path.is_file() for path in cache.outputs('embedding')):
+                cache.complete('embedding')
         except EmbeddingSegmentationRequired as exc:
             segmentation_missing = True
             centroids = {}
@@ -780,6 +780,7 @@ def _run_single_correction_job(spec: dict) -> None:
         num_objects,
         output_suffix,
     )
+    cache.complete('refinement', output_suffix)
     # 'identity' (embedding positively confirmed no swap was needed) is a
     # completed decision, not an applied change -- excluded here the same
     # way 'abstain' is.
@@ -859,6 +860,7 @@ def main() -> None:
             run_name = str(job['run_name'])
             out_dir = build_tracking_out_dir(session_path, model_name, dataset_name, run_name, video_name)
             specs.append({
+                'cache_config': cfg,
                 'out_dir': out_dir,
                 'session_path': session_path,
                 'model_name': model_name,

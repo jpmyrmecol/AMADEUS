@@ -1159,6 +1159,9 @@ def main():
             )
             if cfg.get('VARIABLE_NUM_OBJECTS', False):
                 out_dir = os.path.join(out_dir, 'variable')
+            from cache_integrity import TrackingCache
+            cache = TrackingCache(cfg, src_video, model_name, dataset_name, run_name, out_dir)
+            cache.require('refinement')
             specs.append({
                 'variable_population': bool(cfg.get('VARIABLE_NUM_OBJECTS', False)),
                 'src_video': src_video,

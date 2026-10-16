@@ -49,6 +49,7 @@ from video_frame_count import (
 from gui.color import OBB_COLOR
 from path_utils import resolve_config_paths
 from tracking_video_inputs import configured_tracking_video_files
+from cache_integrity import TrackingCache
 
 DIRECTION_CLASS_NAMES = ['animal']
 
@@ -724,7 +725,10 @@ def main() -> None:
             blobs_direction_pickle = tracking_artifact_path(out_dir, 'all_blobs.pkl')
             preview_direction_dir = os.path.join(out_dir, 'preview')
 
-            cached_detection = pickle_has_data(blobs_direction_pickle)
+            cache = TrackingCache(cfg, info['path'], model_name, dataset_name, run_name, out_dir)
+            cached_detection = cache.current('detection')
+            if not cached_detection:
+                cache.begin('detection')
             if cached_detection:
                 print(f'[SKIP] Import existing direction pickle without re-filtering: {blobs_direction_pickle}')
                 direction_rows_df = load_blob_pickle(blobs_direction_pickle)
@@ -745,6 +749,7 @@ def main() -> None:
                 filtered_direction_df = filter_candidate_df_for_tracking(direction_df, conf_th)
                 direction_rows_df = candidate_df_to_blob_df(filtered_direction_df, 'direction')
                 save_blob_pickle(blobs_direction_pickle, direction_rows_df)
+                cache.complete('detection')
 
             if not skip_pose_preview_frames and cached_detection:
                 render_blob_preview(info['path'], direction_rows_df, preview_direction_dir, info['first_frame'], info['last_frame'], preview_count, 'all_blobs')

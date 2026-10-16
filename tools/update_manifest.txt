@@ -59,6 +59,7 @@ main/batch.py
 main/batch_utils.py
 main/calibration.py
 main/checkpoint_utils.py
+main/cache_integrity.py
 main/colab_utils.py
 main/compact_log.py
 main/compute_backend.py

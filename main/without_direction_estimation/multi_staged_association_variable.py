@@ -13,6 +13,7 @@ from without_direction_estimation.multi_staged_association import *
 from without_direction_estimation.multi_staged_association import _artifact_path, _worker_budget, _auto_num_workers
 from without_direction_estimation import multi_staged_association as fixed
 from tracking_video_inputs import configured_tracking_video_files
+from cache_integrity import cache_for_spec
 from variable_population import PopulationPolicy, load_population_policy
 import json
 
@@ -238,10 +239,13 @@ def _run_single_tracking_job(spec: dict) -> None:
     out_dir = build_tracking_out_dir(
         session_path, model_name, dataset_name, run_name, info['name']
     )
+    cache = cache_for_spec(spec, out_dir)
+    cache.require('detection')
+    if cache.current('tracking'):
+        print(f"[CACHE] Reusing variable tracking [{run_name}:{info['name']}]")
+        return
+    cache.begin('tracking')
     direction_pickle = _artifact_path(out_dir, 'all_blobs.pkl')
-    if not os.path.isfile(direction_pickle):
-        raise FileNotFoundError(f'Direction blobs pickle not found: {direction_pickle}')
-
     direction_rows_df = load_blob_pickle(direction_pickle)
     detection_frames = build_detection_frames(
         direction_rows_df, info['first_frame'], info['last_frame'], conf_th)
@@ -270,24 +274,9 @@ def _run_single_tracking_job(spec: dict) -> None:
     with open(os.path.join(out_dir, 'population_policy.json'), 'w', encoding='utf-8') as f:
         json.dump(fwd_buffers['variable_population_stats'], f, indent=2)
     print(f"Population policy: {fwd_buffers['variable_population_stats']}", flush=True)
-    # Remove only stale derived files in this dedicated variable-mode directory.
-    import glob
-    stale_patterns = {
-        os.path.join(out_dir, BUFFER_DIR_NAME): (
-            '*_filled.pkl', '*_id_resolved.pkl',
-            'provenance_filled.csv', 'provenance_id_resolved.csv',
-        ),
-        os.path.join(out_dir, LOG_DIR_NAME): (
-            'corrections_log*', 'embedding_vram_calib.json',
-        ),
-        out_dir: ('embedding.h5', 'embedding.pt', 'embedding_training_metrics.csv'),
-    }
-    for directory, patterns in stale_patterns.items():
-        for pattern in patterns:
-            for stale_path in glob.glob(os.path.join(directory, pattern)):
-                os.remove(stale_path)
     save_tracking_outputs(out_dir, fwd_buffers, num_objects,
                           artifact_suffix=FWD_ARTIFACT_SUFFIX, save_csv=False)
+    cache.complete('tracking')
 
 def main() -> None:
     if len(sys.argv) < 2:
@@ -370,6 +359,7 @@ def main() -> None:
     for info in video_infos:
         for job in tracking_jobs:
             specs.append({
+                'cache_config': cfg,
                 'info': info,
                 'run_name': str(job['run_name']),
                 'session_path': session_path,
