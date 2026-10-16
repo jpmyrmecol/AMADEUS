@@ -147,6 +147,7 @@ def _begin_logging(config_path: str) -> str:
         f"cpu_model={system['cpu_model']}",
         f"cpu_cores={system['cpu_cores']}",
         f"ram_total_gib={system['ram_total_gib']}",
+        f"ram_used_gib={system['ram_used_gib']}",
         f"swap_used_gib={system['swap_used_gib']}",
         f"power_source={system['power_source']}",
         f"cwd={os.getcwd()}",
