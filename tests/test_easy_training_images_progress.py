@@ -5,6 +5,7 @@ Extract the real methods without importing Tk or GPU dependencies.
 import ast
 from pathlib import Path
 import re
+import sys
 import time
 import unittest
 
@@ -21,7 +22,7 @@ def progress_harness():
                and n.name == "EasyTrackingGUI")
     names = {
         "_reset_training_progress", "_set_training_epoch_metadata",
-        "_training_progress", "_record_training_loss",
+        "_training_progress", "_record_training_loss", "_handle_batch_output_record",
     }
     methods = [n for n in gui.body if isinstance(n, ast.FunctionDef) and n.name in names]
     assert len(methods) == len(names)
@@ -32,6 +33,15 @@ def progress_harness():
         "time": time,
         "_YOLO_TRAIN_DESC_PAT": TRAIN_DESC,
         "_TRAIN_FIELD_GAP": "   ",
+        "_TQDM_PAT": re.compile(r"(\d+)/(\d+)\s*\["),
+        "_YOLO_LOSS_PAT": re.compile(r"\d+/\d+\s+[\d.]+G?\s+([\d.]+)"),
+        "_TRAIN_EPOCH_META_PAT": re.compile(
+            r"^\[AMADEUS TRAIN EPOCH\] epoch=(\d+)/(\d+) images=(\d+) batch=(\d+)$"
+        ),
+        "_safe_stdout_write": lambda _text: None,
+        "_stdout_supports_overwrite": lambda: False,
+        "sys": sys,
+        "re": re,
     }
     mod = ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[]))
     exec(compile(mod, str(SOURCE), "exec"), ns)
@@ -50,6 +60,8 @@ class EasyTrainingImagesProgressTests(unittest.TestCase):
         self.h._on_tqdm_progress = lambda *args: None
         self.h._post_ui_event = lambda *args: self.display_events.append(args)
         self.h._training_backend_label = "Apple MPS"
+        self.h._active_step = 7
+        self.h._echo_tqdm_line = lambda _line, previous_len: previous_len
 
     def test_epoch_progress_fps_and_partial_batch(self):
         h = self.h
@@ -91,6 +103,23 @@ class EasyTrainingImagesProgressTests(unittest.TestCase):
         h._record_training_loss(1.0, 20, refine=False)
         self.assertEqual(h._batch_loss_images, [16, 20])
         self.assertEqual(h._batch_losses, [1.2, 1.0])
+
+    def test_validation_does_not_replace_epoch_progress(self):
+        h = self.h
+        state = {"last_was_tqdm": False, "last_tqdm_len": 0}
+        h._handle_batch_output_record(
+            "[AMADEUS TRAIN EPOCH] epoch=1/50 images=34 batch=16", state,
+        )
+        h._handle_batch_output_record(
+            "1/50 0G 0.123 0.456 0.789 11 640:  33%|####| 1/3 [00:01<00:02]", state,
+        )
+        self.assertEqual(h._train_processed_images, 16)
+        self.assertEqual(h._batch_loss_images, [16])
+        events_before = len(self.display_events)
+        h._handle_batch_output_record(
+            "Class Images Instances:  50%|####| 1/2 [00:01<00:01]", state,
+        )
+        self.assertEqual(len(self.display_events), events_before)
 
     def test_refine_loss_uses_independent_image_axis(self):
         h = self.h
