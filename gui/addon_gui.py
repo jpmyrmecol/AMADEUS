@@ -74,7 +74,7 @@ class AddonController:
         tk.Label(self.sidebar, text="Add-ons", bg=BG, fg=FG, font=("Arial", 16, "bold")).grid(row=0, column=0, pady=16)
         self.canvas = tk.Canvas(self.sidebar, bg=BG, width=274, highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="nsew")
-        scrollbar = tk.Scrollbar(self.sidebar, orient="vertical", command=self.canvas.yview)
+        scrollbar = ctk.CTkScrollbar(self.sidebar, orientation="vertical", command=self.canvas.yview)
         scrollbar.grid(row=1, column=1, sticky="ns")
         self.canvas.configure(yscrollcommand=scrollbar.set)
         self.cards = tk.Frame(self.canvas, bg=BG)
