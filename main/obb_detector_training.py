@@ -32,6 +32,7 @@ from compute_telemetry import (
 
 from batch_utils import (
     resolve_batch_size,
+    parse_training_batch_size,
     resolve_device,
     resolve_num_workers as _resolve_num_workers,
     auto_batch_size,
@@ -2083,12 +2084,9 @@ def main(
 
     trainer_cls = _get_epochs_obb_trainer()
 
-    ultralytics_auto_batch = str(BATCH_SIZE).strip() == "-1"
-    explicit_batch = not (
-        BATCH_SIZE is None
-        or str(BATCH_SIZE).strip().lower() in {"", "auto"}
-        or ultralytics_auto_batch
-    )
+    requested_batch = parse_training_batch_size(BATCH_SIZE)
+    ultralytics_auto_batch = requested_batch == -1 or isinstance(requested_batch, float)
+    explicit_batch = isinstance(requested_batch, int) and requested_batch > 0
     explicit_workers = not (NUM_WORKERS is None or str(NUM_WORKERS).strip().lower() in {"", "auto"})
     # NVIDIA uses the memory estimate, MPS uses its upstream-compatible
     # default, and ROCm uses Ultralytics AutoBatch at training setup.
@@ -2171,8 +2169,8 @@ def main(
             if override_batch is not None:
                 batch_size = override_batch
             elif ultralytics_auto_batch:
-                # An explicit -1 requests a fresh Ultralytics AutoBatch, even on resume.
-                batch_size = -1
+                # An explicit -1 or memory fraction requests AutoBatch on resume too.
+                batch_size = requested_batch
             else:
                 batch_size = int(ckpt_batch) if ckpt_batch else resolve_batch_size(
                     BATCH_SIZE, int(TRAIN_IMG_SIZE), device, mode="train",
@@ -2224,8 +2222,7 @@ def main(
         else:
             batch_size = (
                 override_batch if override_batch is not None
-                else -1 if ultralytics_auto_batch
-                else max(1, int(BATCH_SIZE)) if explicit_batch
+                else requested_batch if ultralytics_auto_batch or explicit_batch
                 else auto_batch_size(
                     int(TRAIN_IMG_SIZE), device, mode="train",
                     labels_dir=train_labels_dir, task="obb",
@@ -2513,16 +2510,21 @@ def main(
 
             def _on_train_start(trainer):
                 nonlocal batch_size
-                if batch_size == -1:
+                if batch_size < 1:
                     # Ultralytics has just completed AutoBatch during _setup_train.
                     # All AMADEUS monitoring/recovery must use its actual selection.
+                    requested_auto_batch = batch_size
                     selected_batch = int(trainer.batch_size)
                     if selected_batch < 1:
                         raise RuntimeError("Ultralytics AutoBatch did not select a positive batch size.")
                     batch_size = selected_batch
                     monitor.batch_size = selected_batch
                     initial_check.batch_size = selected_batch
-                    print(f"[INFO] Ultralytics AutoBatch selected batch={selected_batch}", flush=True)
+                    print(
+                        f"[INFO] Ultralytics AutoBatch requested={requested_auto_batch} "
+                        f"selected_batch={selected_batch}",
+                        flush=True,
+                    )
                 _enable_cudnn_autotuner(device)
 
             monitor.start()
