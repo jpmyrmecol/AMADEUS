@@ -36,6 +36,7 @@ try:
     from .advanced_tracking_layout import partition_category_items
     from .config_path_recovery import prepare_config_for_gui
     from .video_input import ask_open_analysis_video, prepare_analysis_video
+    from .save_shortcut import bind_save_shortcut
 except ImportError:  # Preserve direct execution with: python gui/gui_advanced_tracking.py
     from project_paths import (
         PROJECT_ROOT,
@@ -52,6 +53,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_advanced_t
     from advanced_tracking_layout import partition_category_items
     from config_path_recovery import prepare_config_for_gui
     from video_input import ask_open_analysis_video, prepare_analysis_video
+    from save_shortcut import bind_save_shortcut
 
 ensure_import_paths(MAIN_DIR)
 from batch_utils import parse_training_batch_size
@@ -830,6 +832,7 @@ class ConfigGUI(ctk.CTk):
         self._refresh_skip_dependent_states()
 
         self._apply_prefill_paths()
+        bind_save_shortcut(self, self.save_yaml)
         _start_maximized(self)
 
     def open_results(self):
