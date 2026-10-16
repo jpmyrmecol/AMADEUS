@@ -90,6 +90,10 @@ def _simplify_progress_line(line: str) -> str:
     return line
 # Matches YOLO training tqdm desc: "3/50  3.05G  0.8756  0.7188  1.492 ..."
 _YOLO_LOSS_PAT = re.compile(r'\d+/\d+\s+[\d.]+G?\s+([\d.]+)')
+# Precise epoch image counts and effective batch sizes are emitted by AMADEUS.
+_TRAIN_EPOCH_META_PAT = re.compile(
+    r"^\[AMADEUS TRAIN EPOCH\] epoch=(\d+)/(\d+) images=(\d+) batch=(\d+)$"
+)
 # The whole row Ultralytics' DetectionTrainer.progress_string() prints:
 # epoch, GPU memory, box/cls/dfl loss, instances, image size. Matching all of it
 # is what tells a training epoch apart from every other tqdm bar (dataset
@@ -340,8 +344,10 @@ class EasyTrackingGUI(ctk.CTk):
         self._last_display_img: str = ""    # last successfully shown image path
         self._canvas_content: dict = {}     # cache for resize re-render
         self._step_start_times: dict[int, float] = {}
-        self._batch_losses: list[float] = []   # live per-batch box_loss from YOLO training
-        self._refine_losses: list[float] = []  # live per-batch box_loss from direction_class_filtering
+        self._batch_losses: list[float] = []   # live box loss per completed batch
+        self._batch_loss_images: list[int] = []  # total images processed at each loss sample
+        self._refine_losses: list[float] = []
+        self._refine_loss_images: list[int] = []
         self._reset_training_progress()
         self._system_monitor_snapshot: dict[str, float | str | None] = {}
         self._system_monitor_canvas: tk.Canvas | None = None
@@ -2888,71 +2894,73 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _reset_training_progress(self) -> None:
         self._training_backend_label = ""
-        self._train_epoch: int = 0
-        self._train_total_epochs: int = 0
-        self._train_epoch_started_at: float = 0.0
-        self._train_first_epoch_at: float = 0.0
-        self._train_epoch_seconds: list[float] = []
+        self._train_epoch = 0
+        self._train_total_epochs = 0
+        self._train_epoch_images = 0
+        self._train_batch_size = 0
+        self._train_epoch_started_at = 0.0
+        self._train_processed_images = 0
 
-    def _training_estimate(self, started_at: float) -> str:
-        """Estimated total run time, or "Calculating..." before an epoch ends."""
-        if not self._train_epoch_seconds:
-            return "Calculating..."
-        # Mean over every finished epoch rather than the latest one, so the
-        # estimate settles instead of following each epoch's noise.
-        mean_epoch = sum(self._train_epoch_seconds) / len(self._train_epoch_seconds)
-        setup = max(0.0, self._train_first_epoch_at - started_at)
-        return _format_estimate(setup + mean_epoch * self._train_total_epochs)
+    def _set_training_epoch_metadata(
+        self, epoch: int, total_epochs: int, images: int, batch_size: int,
+    ) -> None:
+        """Use the running trainer's actual dataset size and batch size."""
+        if epoch != self._train_epoch:
+            self._train_epoch_started_at = time.monotonic()
+        self._train_epoch = epoch
+        self._train_total_epochs = total_epochs
+        self._train_epoch_images = images
+        self._train_batch_size = batch_size
+        self._train_processed_images = (epoch - 1) * images
+        device = f"   {self._training_backend_label}" if self._training_backend_label else ""
+        self._post_ui_event(
+            self._on_tqdm_progress, 0.0,
+            f"Epoch: {epoch}/{total_epochs}{device}   --fps",
+        )
 
     def _training_progress(self, desc: str, batch: int, batch_total: int):
-        """Turn one Ultralytics training row into (fraction, status text).
-
-        Returns None for anything else, which leaves every other progress
-        display exactly as it was. Called on the output-reader thread, like the
-        per-batch loss capture beside it.
-        """
+        """Display progress through the current epoch and image throughput."""
         match = _YOLO_TRAIN_DESC_PAT.match(desc)
         if match is None:
             return None
         epoch = int(match.group(1))
         total_epochs = max(1, int(match.group(2)))
-        reserved_decimal_gb = float(match.group(3))
         image_size = int(match.group(4))
-
-        now = time.time()
-        self._train_total_epochs = total_epochs
-        if epoch != self._train_epoch:
-            if self._train_epoch_started_at:
-                self._train_epoch_seconds.append(now - self._train_epoch_started_at)
-            else:
-                self._train_first_epoch_at = now
+        now = time.monotonic()
+        if epoch != self._train_epoch or not self._train_epoch_started_at:
             self._train_epoch = epoch
             self._train_epoch_started_at = now
+        self._train_total_epochs = total_epochs
 
-        started_at = self._step_start_times.get(
-            self._active_step, self._train_first_epoch_at or now
-        )
-
+        # Trainer metadata supplies the true number of samples in the final
+        # partial batch. For older output without metadata, use batch*steps.
+        epoch_images = self._train_epoch_images or self._train_batch_size * batch_total
+        processed = min(batch * self._train_batch_size, epoch_images)
+        self._train_processed_images = (epoch - 1) * epoch_images + processed
+        elapsed = now - self._train_epoch_started_at
+        fps = processed / elapsed if elapsed > 0 and processed > 0 else None
+        fps_text = f"{fps:.0f}fps" if fps is not None else "--fps"
         fields = [f"Epoch: {epoch}/{total_epochs}"]
         if self._training_backend_label:
             fields.append(self._training_backend_label)
-        # Ultralytics prints 0G whenever torch.cuda is unavailable, which is
-        # exactly the CPU and MPS case where there is no VRAM to report.
-        if reserved_decimal_gb > 0.0:
-            used_gib = reserved_decimal_gb * _DECIMAL_GB_IN_GIB
-            total_gib = _total_vram_gib()
-            fields.append(
-                f"VRAM: {used_gib:.2f}/{total_gib:.1f} GiB" if total_gib
-                else f"VRAM: {used_gib:.2f} GiB"
-            )
-        fields.append(f"Image size: {image_size} px")
-        fields.append(
-            f"Time: {_format_elapsed(now - started_at)} / {self._training_estimate(started_at)}"
-        )
+        fields.extend((f"{image_size}px", fps_text))
+        return max(0.0, min(1.0, batch / max(1, batch_total))), _TRAIN_FIELD_GAP.join(fields)
 
-        # One continuous bar across the whole run, not per-epoch.
-        fraction = ((epoch - 1) + batch / max(1, batch_total)) / total_epochs
-        return max(0.0, min(1.0, fraction)), _TRAIN_FIELD_GAP.join(fields)
+    def _record_training_loss(self, value: float, images: int, *, refine: bool) -> None:
+        """One loss point per processed batch, ordered by cumulative images."""
+        if images <= 0:
+            return
+        values = self._refine_losses if refine else self._batch_losses
+        counts = self._refine_loss_images if refine else self._batch_loss_images
+        # A resumed attempt can replay images after its last checkpoint.
+        while counts and counts[-1] > images:
+            counts.pop()
+            values.pop()
+        if counts and counts[-1] == images:
+            values[-1] = value
+        else:
+            counts.append(images)
+            values.append(value)
 
     def _redraw_progress(self) -> None:
         c = self._progress_canvas
@@ -3986,8 +3994,10 @@ class EasyTrackingGUI(ctk.CTk):
         self._reset_training_progress()
         if script == "obb_detector_training":
             self._batch_losses = []
+            self._batch_loss_images = []
         elif script == "direction_class_filtering":
             self._refine_losses = []
+            self._refine_loss_images = []
         self._display_step = -2
         self._set_block_color(vis_i, "running")
         self._start_shimmer(vis_i)
