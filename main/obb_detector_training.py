@@ -23,7 +23,7 @@ from typing import Callable, List
 import yaml
 from ultralytics import YOLO
 
-from compute_backend import runtime_for
+from compute_backend import Backend, runtime_for
 from compute_telemetry import (
     query_nvidia_smi as _query_nvidia_smi,
     query_wddm_non_local_usage as _query_wddm_non_local_usage,
@@ -2324,7 +2324,11 @@ def main(
                 sampler=sampler,
                 batch_size=batch_size,
                 workers=dl_workers,
-                allow_headroom_raise=not explicit_batch and not vram_headroom_locked,
+                allow_headroom_raise=(
+                    not explicit_batch
+                    and not vram_headroom_locked
+                    and runtime_for(device).backend != Backend.AMD_ROCM
+                ),
             )
             gpu_fallback_watcher = _GpuFallbackWatcher()
             gpu_fallback_floor_warned = False
@@ -2494,6 +2498,17 @@ def main(
                     raise _TrainingAborted("lower_batch", monitor.collapsed_reason())
 
             def _on_train_start(trainer):
+                nonlocal batch_size
+                if batch_size == -1:
+                    # Ultralytics has just completed AutoBatch during _setup_train.
+                    # All AMADEUS monitoring/recovery must use its actual selection.
+                    selected_batch = int(trainer.batch_size)
+                    if selected_batch < 1:
+                        raise RuntimeError("Ultralytics AutoBatch did not select a positive batch size.")
+                    batch_size = selected_batch
+                    monitor.batch_size = selected_batch
+                    initial_check.batch_size = selected_batch
+                    print(f"[INFO] ROCm Ultralytics AutoBatch selected batch={selected_batch}", flush=True)
                 _enable_cudnn_autotuner(device)
 
             monitor.start()
@@ -2576,6 +2591,10 @@ def main(
                     f"to use the available VRAM headroom (attempt {attempt})."
                 )
             elif action == "lower_batch":
+                if batch_size < 1:
+                    raise RuntimeError(
+                        "Ultralytics AutoBatch did not complete before a memory failure."
+                    ) from exc
                 if explicit_batch or batch_size <= 1:
                     verb = "Training cannot proceed with a fixed batch size" if explicit_batch else (
                         f"Giving up after {attempt} recovery attempt(s) at progressively smaller batch sizes "
