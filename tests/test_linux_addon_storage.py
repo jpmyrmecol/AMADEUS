@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from gui import addon_manager
+from gui import addon_manager, update_support
 
 
 class LinuxAddonStorageTests(unittest.TestCase):
@@ -100,6 +100,34 @@ class LinuxAddonStorageTests(unittest.TestCase):
         self.legacy.symlink_to(other, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "Unexpected legacy"):
             addon_manager.Store()
+
+    def test_amadeus_update_does_not_select_addon_process(self):
+        root = self.data_home / "AMADEUS"
+        addon_python = root / "addons" / "example.addon" / "releases" / "build" / ".venv" / "bin" / "python"
+        addon_script = root / "addons" / "example.addon" / "releases" / "build" / "payload" / "app.py"
+        running = SimpleNamespace(info={
+            "pid": os.getpid() + 100000,
+            "name": "python",
+            "exe": str(addon_python),
+            "cwd": str(addon_script.parent),
+            "cmdline": [str(addon_python), "-E", "-s", str(addon_script)],
+        })
+        with patch.object(update_support.psutil, "process_iter", return_value=[running]):
+            selected = update_support.find_other_amadeus_processes(root, current_pid=os.getpid())
+        self.assertEqual(selected, [])
+
+    def test_amadeus_update_still_selects_tracking_process(self):
+        root = self.data_home / "AMADEUS"
+        tracked = SimpleNamespace(info={
+            "pid": os.getpid() + 100000,
+            "name": "python",
+            "exe": str(root / ".venv" / "bin" / "python"),
+            "cwd": str(root),
+            "cmdline": [str(root / ".venv" / "bin" / "python"), str(root / "main" / "batch.py")],
+        })
+        with patch.object(update_support.psutil, "process_iter", return_value=[tracked]):
+            selected = update_support.find_other_amadeus_processes(root, current_pid=os.getpid())
+        self.assertEqual(selected, [(tracked.info["pid"], "python")])
 
     def test_refuses_migration_while_addon_process_is_running(self):
         script = self.legacy / "example.addon" / "releases" / "version" / "payload" / "main.py"
