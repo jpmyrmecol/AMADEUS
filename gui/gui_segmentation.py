@@ -1727,6 +1727,7 @@ class CrossingReviewApp(ctk.CTk):
         self._applying_config = False
         self._loading_video = False
         self._background_building = False
+        self._restore_temporal_after_background = False
 
         self._current_blobs: list[BlobMetrics] = []
         self._tooltip_window: Optional[tk.Toplevel] = None
@@ -2893,6 +2894,7 @@ class CrossingReviewApp(ctk.CTk):
             self.background_ready_var.set(f"background: not required ({self.segmentation_mode_var.get()})")
             if self.bg_preview_button is not None:
                 self.bg_preview_button.configure(state="disabled")
+        self._restore_temporal_after_background = False
         if (
             self.reader is not None
             and self._segmentation_needs_background()
@@ -2900,10 +2902,14 @@ class CrossingReviewApp(ctk.CTk):
         ):
             try:
                 self.compute_background()
+                self._restore_temporal_after_background = self._background_building
             except Exception as exc:
                 self.set_status(f"Background build failed: {exc}")
 
-        self._restore_temporal_search_cache()
+        # On a cache miss the background now finishes asynchronously.
+        # Restore dependent Search data only after its completion.
+        if not self._restore_temporal_after_background:
+            self._restore_temporal_search_cache()
         self._set_workflow_stage("all")
         self._update_analysis_dependent_buttons()
         self._schedule_area_iqr_boxplot_redraw()
@@ -6680,6 +6686,12 @@ class CrossingReviewApp(ctk.CTk):
                 self.set_status(f"Background computed and cached: {active_method}")
             finally:
                 self._background_building = False
+                if self._restore_temporal_after_background:
+                    self._restore_temporal_after_background = False
+                    self._restore_temporal_search_cache()
+                    self._update_temporal_status()
+                    self._refresh_search_glows()
+                    self._set_workflow_stage("all")
 
         self._with_progress_popup("Background extraction", f"Preparing {method_label} background...", work, _finish_background)
         return True
