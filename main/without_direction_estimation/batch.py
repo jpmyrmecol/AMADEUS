@@ -167,6 +167,10 @@ def _begin_logging(config_path: str) -> str:
         f"torchvision_version={_package_version('torchvision')}",
         f"ultralytics_version={_package_version('ultralytics')}",
     ]
+    # Capacity is recorded before any training begins, even if epoch 1 fails.
+    for key in ("vram_total_device", "vram_total_gib", "vram_by_device_gib", "mps_recommended_gib"):
+        if key in runtime:
+            header.append(f"{key}={runtime[key]}")
     if runtime["gpu_backend"] == "Apple MPS":
         header.extend(
             f"{name}={os.environ.get(name, 'unset')}"
