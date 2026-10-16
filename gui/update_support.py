@@ -158,6 +158,14 @@ def find_other_amadeus_processes(
 
         if not _is_amadeus_runtime_process(name, executable, cmdline):
             continue
+
+        # Linux may store add-ons inside PROJECT_ROOT. Their separate Python
+        # processes must not be terminated as AMADEUS tracking processes.
+        addons_root = root / "addons"
+        if (_path_within(executable, addons_root) or _path_within(cwd, addons_root)
+                or any(_path_within(argument, addons_root) for argument in cmdline)):
+            continue
+
         command_path_match = any(_path_within(argument, root) for argument in cmdline)
         module_from_project = (
             _path_within(cwd, root)
