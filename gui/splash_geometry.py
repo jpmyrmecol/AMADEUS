@@ -33,7 +33,7 @@ _XRANDR_MONITOR = re.compile(
 
 
 def parse_xrandr_monitors(output: str) -> tuple[MonitorBounds, ...]:
-    """Parse \`xrandr --listmonitors\` without assuming a monitor arrangement."""
+    """Parse xrandr --listmonitors without assuming a monitor arrangement."""
     monitors = []
     for line in output.splitlines():
         match = _XRANDR_MONITOR.match(line)
