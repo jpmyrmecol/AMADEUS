@@ -75,6 +75,7 @@ from main.roi import (
 )
 from main.video_frame_count import detect_seekable_frame_count
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
+from gui.segmentation_workflow import stage_after_background_change
 from gui.preview_playback_timing import AdaptivePreviewPacer
 from gui.attention_border import RotatingBorderHighlight
 from gui.reverse_playback_buffer import PreparedFrame, SmoothPreviewPlayback
@@ -1638,6 +1639,8 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_gate_frame = None
         self.outlier_section_revealed = False
         self._guidance_stage = "background"
+        # One preview confirmation per video, shared by median/max/min.
+        self._background_preview_seen = False
         self._guidance_glows: dict[str, RotatingBorderHighlight] = {}
 
         self.optional_configurations_var = tk.BooleanVar(value=False)
@@ -2350,7 +2353,9 @@ class CrossingReviewApp(ctk.CTk):
         has_video_path = bool(self.video_path_var.get().strip())
         # RotatingBorderHighlight alone controls button border visibility.
         stage = self._guidance_stage if has_video_path else "video"
-        if stage == "background" and not self._segmentation_needs_background():
+        if stage == "background" and (
+            not self._segmentation_needs_background() or self._background_preview_seen
+        ):
             stage = self._guidance_stage = "threshold"
         if stage in ("outlier", "processing") and not self.outlier_section_revealed:
             stage = self._guidance_stage = "analysis"
@@ -2540,6 +2545,7 @@ class CrossingReviewApp(ctk.CTk):
                 "analysis_bounds": analysis_bounds,
                 "analysis_signature": repr(self.analysis_signature),
                 "analysis_is_stale": bool(self.analysis_is_stale),
+                "background_preview_seen": bool(self._background_preview_seen),
                 "frame_count": int(self.frame_count),
                 "current_frame": int(self.current_frame),
             },
@@ -2874,7 +2880,30 @@ class CrossingReviewApp(ctk.CTk):
             self.analysis_ready_var.set("analysis: not computed")
 
         self.outlier_section_revealed = bool(self.analysis_iqr_stats) and not self.analysis_is_stale
-        self._guidance_stage = "outlier" if self.outlier_section_revealed else "background"
+        # A saved confirmation is specific to the video named by this config.
+        # Older configs with completed analysis necessarily passed onboarding.
+        same_video = bool(
+            self.reader is not None and video_path
+            and os.path.normcase(os.path.abspath(self.reader.video_path))
+            == os.path.normcase(os.path.abspath(video_path))
+        )
+        if same_video:
+            self._background_preview_seen = (
+                self._background_preview_seen
+                or hidden_state.get("background_preview_seen") is True
+                or (
+                    "background_preview_seen" not in hidden_state
+                    and self.outlier_section_revealed
+                )
+            )
+        self._guidance_stage = (
+            "outlier" if self.outlier_section_revealed
+            else stage_after_background_change(
+                "background",
+                needs_background=self._segmentation_needs_background(),
+                preview_seen=self._background_preview_seen,
+            )
+        )
 
         # background.png always lives next to this JSON config itself (see
         # _default_background_path()), so no separate stored path is needed.
@@ -3266,7 +3295,7 @@ class CrossingReviewApp(ctk.CTk):
             if self.bg_preview_button is not None:
                 self.bg_preview_button.configure(state="disabled")
             if self._segmentation_needs_background() or self._additional_outlier_needs_background():
-                self._set_workflow_stage("background")
+                self._set_workflow_stage(self._guidance_stage)
                 self.compute_background()
             else:
                 self._set_workflow_stage("analysis")
@@ -4330,6 +4359,12 @@ class CrossingReviewApp(ctk.CTk):
             messagebox.showerror("Error", str(e))
             return
 
+        previous_video = self.reader.video_path if self.reader is not None else ""
+        if not previous_video or (
+            os.path.normcase(os.path.abspath(previous_video))
+            != os.path.normcase(os.path.abspath(path))
+        ):
+            self._background_preview_seen = False
         self._loading_video = True
         self.video_path_var.set(path)
         if self.background_rebuild_job is not None:
@@ -5045,7 +5080,11 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_is_stale = True
         self.analysis_ready_var.set("analysis: not computed")
         self.outlier_section_revealed = False
-        self._guidance_stage = "background" if self._segmentation_needs_background() else "threshold"
+        self._guidance_stage = stage_after_background_change(
+            self._guidance_stage,
+            needs_background=self._segmentation_needs_background(),
+            preview_seen=self._background_preview_seen,
+        )
         self._update_analysis_dependent_buttons()
         self._refresh_segmentation_controls()
         if not self._segmentation_needs_background():
@@ -5078,7 +5117,7 @@ class CrossingReviewApp(ctk.CTk):
         if self.bg_preview_button is not None:
             self.bg_preview_button.configure(state="disabled")
         if self._segmentation_needs_background():
-            self._set_workflow_stage("background")
+            self._set_workflow_stage(self._guidance_stage)
             self._schedule_background_rebuild()
         else:
             self.background_ready_var.set(f"background: not required ({self.segmentation_mode_var.get()})")
@@ -7865,6 +7904,7 @@ class CrossingReviewApp(ctk.CTk):
         label.configure(image=self.bg_preview_image)
         self.bg_preview_popup = popup
         popup.protocol("WM_DELETE_WINDOW", lambda: self._close_bg_preview())
+        self._background_preview_seen = True
         if self._guidance_stage == "background":
             self._guidance_stage = "threshold"
             self._set_workflow_stage("analysis")
@@ -8016,7 +8056,11 @@ class CrossingReviewApp(ctk.CTk):
         self.analysis_is_stale = True
         self.analysis_ready_var.set("analysis: not computed")
         self.outlier_section_revealed = False
-        self._guidance_stage = "background" if self._segmentation_needs_background() else "threshold"
+        self._guidance_stage = stage_after_background_change(
+            self._guidance_stage,
+            needs_background=self._segmentation_needs_background(),
+            preview_seen=self._background_preview_seen,
+        )
         self._set_workflow_stage("analysis")
 
     def _activate_cached_background(self, method: str, redraw: bool = True) -> bool:
