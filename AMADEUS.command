@@ -17,6 +17,9 @@ if (( status == 43 )); then
   echo "[AMADEUS] Uninstall accepted. A separate terminal will remove AMADEUS."
   exit 0
 fi
+if (( status == 130 )); then
+  exit 130
+fi
 if (( status != 0 )); then
   echo "AMADEUS failed with exit code ${status}. See the run's log.txt for the full diagnostic log."
   if [[ -t 0 && -t 1 ]]; then
