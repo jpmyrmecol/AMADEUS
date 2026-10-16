@@ -940,7 +940,7 @@ class _DeviceSampler:
 
 
 class _PerformanceMonitor:
-    """Periodic [PERF] logger for the whole run, plus a throughput watchdog
+    """In-memory epoch resource sampler, plus a throughput watchdog
     for training and validation. Completed-batch rolling throughput is driven
     by phase-specific callbacks; an in-flight watchdog also handles a batch
     that has stopped producing callbacks long enough to prove a collapse.
@@ -1000,8 +1000,8 @@ class _PerformanceMonitor:
     a lower batch. Once automatic recovery has reached batch=1, a confirmed
     WDDM throughput collapse is warned about but no longer aborts the run:
     there is no smaller usable batch, so slow training is allowed to continue.
-    Disabling PERF output via AMADEUS_DISABLE_PERF_LOG suppresses only log
-    lines; all collapse detection remains active.
+    AMADEUS_DISABLE_PERF_LOG also disables resource sampling. All throughput
+    collapse detection remains active regardless of that setting.
 
     baseline_throughput starts at None until main() sets it once
     _InitialLoadCheck's take_official_throughput() has something to give it.
