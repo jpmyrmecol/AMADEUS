@@ -2704,7 +2704,10 @@ class EasyTrackingGUI(ctk.CTk):
                     "fitness": fitness,
                 }
             )
-            status = f"Images {count}  |  train/box_loss = {self._batch_losses[-1]:.3f}"
+            status = (
+                f"Batch {len(self._batch_losses)}  |  Batch size {self._train_batch_size}  |  "
+                f"Images {count}  |  train/box_loss = {self._batch_losses[-1]:.3f}"
+            )
             if fitness:
                 status += f"  |  fitness(0.1*mAP50+0.9*mAP50-95) = {fitness[-1]:.3f}"
             self._canvas_status.configure(text=status)
@@ -2740,6 +2743,9 @@ class EasyTrackingGUI(ctk.CTk):
             n = len(train_losses)
             status = (
                 f"Images {epoch_size * n}" if epoch_size else f"Epoch {n}"
+            ) + (
+                f"  |  Batch size {self._train_batch_size}"
+                if self._train_batch_size else ""
             ) + f"  |  train/box_loss = {train_losses[-1]:.3f}"
             if val_losses:
                 status += f"  |  val/box_loss = {val_losses[-1]:.3f}"
@@ -2757,7 +2763,10 @@ class EasyTrackingGUI(ctk.CTk):
             "#4dbbd5", x_values=self._refine_loss_images,
         )
         self._canvas_status.configure(
-            text=f"Images {images}  |  train/box_loss = {self._refine_losses[-1]:.3f}"
+            text=(
+                f"Batch {len(self._refine_losses)}  |  Batch size {self._train_batch_size}"
+                f"  |  Images {images}  |  train/box_loss = {self._refine_losses[-1]:.3f}"
+            )
         )
 
     def _show_embedding_loss(self, session: str) -> None:
