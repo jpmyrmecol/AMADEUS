@@ -9,6 +9,7 @@ import queue
 import time
 import threading
 import tkinter as tk
+import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import webbrowser
 
@@ -25,6 +26,21 @@ FG = "#ffffff"
 MUTED = "#aaaaaa"
 GUIDE_URL = "https://github.com/jpmyrmecol/AMADEUS/blob/main/tools/ADDONS.md"
 TEMPLATE_URL = "https://github.com/jpmyrmecol/AMADEUS-Addon-Template"
+
+
+def _dark_button(master, *, text, command, width=120, height=30):
+    """Draw add-on buttons consistently on macOS Aqua and other Tk platforms."""
+    return ctk.CTkButton(
+        master,
+        text=text,
+        command=command,
+        width=width,
+        height=height,
+        fg_color="#222222",
+        hover_color="#333333",
+        text_color=FG,
+        corner_radius=5,
+    )
 
 
 class AddonController:
@@ -158,12 +174,20 @@ class AddonController:
         frame = tk.Frame(self.cards, bg=CARD, highlightbackground="#333333", highlightthickness=1, cursor="hand2" if supported else "arrow")
         frame.pack(fill="x", padx=8, pady=5)
         self.panel_frames[addon_id] = frame
-        menu_button = tk.Menubutton(frame, text="...", bg=CARD, fg=FG, activebackground="#333333", activeforeground=FG, relief="flat")
+        menu_button = _dark_button(frame, text="...", command=lambda: None, width=36, height=26)
         menu_button.pack(anchor="ne", padx=6, pady=(3, 0))
         menu = tk.Menu(menu_button, tearoff=False)
         menu.add_command(label="Update", command=lambda: self.update_addon(item))
         menu.add_command(label="Uninstall", command=lambda: self.uninstall(addon_id, manifest["name"]))
-        menu_button.configure(menu=menu)
+
+        def show_menu():
+            try:
+                menu.tk_popup(menu_button.winfo_rootx(),
+                              menu_button.winfo_rooty() + menu_button.winfo_height())
+            finally:
+                menu.grab_release()
+
+        menu_button.configure(command=show_menu)
         labels = [
             (manifest["name"], ("Arial", 15, "bold"), FG),
             (f"v{manifest['version']}", ("Arial", 11), MUTED),
@@ -252,13 +276,13 @@ class AddonController:
         drop.pack(fill="both", expand=True, padx=20, pady=(0, 10))
         label = drop.create_text(0, 0, text="Drop an add-on ZIP here", fill=FG, font=("Arial", 14))
         drop.bind("<Configure>", lambda e: drop.coords(label, e.width / 2, e.height / 2))
-        tk.Button(dialog, text="Browse...", command=self.browse, bg="#222222", fg=FG, activebackground="#333333", activeforeground=FG).pack(pady=(0, 8))
+        _dark_button(dialog, text="Browse...", command=self.browse, width=100).pack(pady=(0, 8))
         tk.Label(dialog, textvariable=self.status, bg=BG, fg=MUTED, wraplength=560).pack(fill="x", padx=20, pady=4)
         tk.Label(dialog, text="OS support is declared by the developer. Add-ons are not sandboxed.", bg=BG, fg=MUTED, wraplength=560).pack(padx=20, pady=6)
         links = tk.Frame(dialog, bg=BG)
         links.pack(pady=(4, 14))
         for text, url in (("Developer guide", GUIDE_URL), ("Official template", TEMPLATE_URL)):
-            tk.Button(links, text=text, command=lambda value=url: webbrowser.open(value), bg="#222222", fg=FG).pack(side="left", padx=5)
+            _dark_button(links, text=text, command=lambda value=url: webbrowser.open(value), width=134).pack(side="left", padx=5)
         if self.errors:
             self.status.set("Some installation records could not be read: " + " | ".join(self.errors)[:600])
         def register_drop():
