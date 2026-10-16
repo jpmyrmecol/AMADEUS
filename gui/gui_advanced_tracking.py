@@ -32,6 +32,7 @@ try:
         with_pythonpath,
     )
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from .dark_widgets import dark_spinbox
     from .advanced_tracking_layout import partition_category_items
     from .config_path_recovery import prepare_config_for_gui
     from .video_input import ask_open_analysis_video, prepare_analysis_video
@@ -47,6 +48,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_advanced_t
         with_pythonpath,
     )
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from dark_widgets import dark_spinbox
     from advanced_tracking_layout import partition_category_items
     from config_path_recovery import prepare_config_for_gui
     from video_input import ask_open_analysis_video, prepare_analysis_video
@@ -373,7 +375,7 @@ class ConfigGUI(ctk.CTk):
         row = _layout_frame(basic)
         row.pack(fill="x", pady=4)
         ctk.CTkLabel(row, text="Number of Objects", width=140, anchor="w").pack(side="left", padx=(6, 0))
-        sb = tk.Spinbox(row, from_=1, to=999, increment=1, width=5, **_SPIN_CFG)
+        sb = dark_spinbox(row, from_=1, to=999, increment=1, width=5, **_SPIN_CFG)
         sb.pack(side="left", padx=5)
         self.basic_entries["NUM_OBJECTS"] = sb
         self.variable_count = tk.BooleanVar(value=False)
@@ -382,7 +384,7 @@ class ConfigGUI(ctk.CTk):
                        command=self._toggle_variable_count).pack(side="left", padx=6)
 
         ctk.CTkLabel(row, text="Training Image Size (px)", width=175, anchor="w").pack(side="left", padx=(20, 0))
-        training_image_size = tk.Spinbox(row, from_=32, to=8192, increment=32, width=8, **_SPIN_CFG)
+        training_image_size = dark_spinbox(row, from_=32, to=8192, increment=32, width=8, **_SPIN_CFG)
         training_image_size.delete(0, tk.END)
         training_image_size.insert(0, "640")
         training_image_size.pack(side="left", padx=5)
@@ -410,14 +412,14 @@ class ConfigGUI(ctk.CTk):
         self.basic_entries["NUM_PREVIEW_FRAMES"] = num_preview
 
         ctk.CTkLabel(preview_row, text="Frame Interval", width=105, anchor="w").pack(side="left", padx=(10, 0))
-        frame_interval_sb = tk.Spinbox(preview_row, from_=1, to=1000, increment=1, width=5, **_SPIN_CFG)
+        frame_interval_sb = dark_spinbox(preview_row, from_=1, to=1000, increment=1, width=5, **_SPIN_CFG)
         frame_interval_sb.delete(0, tk.END)
         frame_interval_sb.insert(0, "5")
         frame_interval_sb.pack(side="left", padx=5)
         self.basic_entries["FRAME_INTERVAL"] = frame_interval_sb
 
         ctk.CTkLabel(preview_row, text="Num Train+Test", width=120, anchor="w").pack(side="left", padx=(10, 0))
-        num_total_sb = tk.Spinbox(preview_row, from_=1, to=10**8, increment=100, width=8, **_SPIN_CFG)
+        num_total_sb = dark_spinbox(preview_row, from_=1, to=10**8, increment=100, width=8, **_SPIN_CFG)
         num_total_sb.delete(0, tk.END)
         num_total_sb.insert(0, "10000")
         num_total_sb.pack(side="left", padx=5)
@@ -431,7 +433,7 @@ class ConfigGUI(ctk.CTk):
                     (s.lstrip("-").isdigit() and int(s) >= m)
                 )
             ), "%P")
-            sp = tk.Spinbox(
+            sp = dark_spinbox(
                 parent, from_=min_val, to=10**12, increment=1, width=width,
                 validate="key", validatecommand=vcmd, **_SPIN_CFG
             )
