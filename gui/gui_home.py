@@ -25,6 +25,7 @@ if __package__:
     from .app_update import probe_update_status, start_update_check
     from .project_paths import PROJECT_ROOT, gui_asset, gui_script
     from .canvas_file_drop import install_canvas_file_drop
+    from .home_drop_routes import home_drop_args, home_drop_suffixes
     from .video_input import VIDEO_DROP_SUFFIXES
     from .splash_ipc import (
         TOKEN_ENV_VAR,
@@ -42,6 +43,7 @@ else:
     from app_update import probe_update_status, start_update_check
     from project_paths import PROJECT_ROOT, gui_asset, gui_script
     from canvas_file_drop import install_canvas_file_drop
+    from home_drop_routes import home_drop_args, home_drop_suffixes
     from video_input import VIDEO_DROP_SUFFIXES
     from splash_ipc import (
         TOKEN_ENV_VAR,
@@ -630,7 +632,7 @@ def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
         ("Cropping\n&\nTrimming", launch_preprocess, "gui_preprocess.py"),
         ("Segmentation", launch_segmentation, "gui_segmentation.py"),
         ("Advanced Tracking", launch_advanced_tracking, "gui_advanced_tracking.py"),
-        ("Multi Config Batch", launch_multi_config_batch, None),
+        ("Multi Config Batch", launch_multi_config_batch, "gui_multi_config_batch.py"),
         ("Refinement", launch_refinement, "gui_refinement.py"),
         (
             "Colab (beta)" if sys.platform.startswith("linux") else "Colab（beta）",
@@ -648,19 +650,23 @@ def build_home(root: ctk.CTk) -> tuple[tuple[tk.Canvas, str], ...]:
 def install_home_video_drop(
     root: ctk.CTk, targets: tuple[tuple[tk.Canvas, str], ...],
 ) -> None:
-    """Open the GUI belonging to the canvas that receives the video drop."""
+    """Open the target GUI with the video or configuration dropped on its panel."""
     if not root.winfo_exists():
         return
 
     def show_rejection(message: str) -> None:
-        messagebox.showwarning("Video drop", message, parent=root)
+        messagebox.showwarning("File drop", message, parent=root)
 
     for canvas, script in targets:
-        def on_video(path: str, target_script: str = script) -> None:
+        def on_files(paths: tuple[str, ...], target_script: str = script) -> None:
+            try:
+                arguments = home_drop_args(target_script, paths, VIDEO_DROP_SUFFIXES)
+            except ValueError as exc:
+                show_rejection(str(exc))
+                return
             try:
                 process = launch_gui_script(
-                    target_script, "--dropped-video", os.path.abspath(path),
-                    capture_errors=True,
+                    target_script, *arguments, capture_errors=True,
                 )
             except OSError as exc:
                 messagebox.showerror("Unable to open GUI", str(exc), parent=root)
@@ -709,10 +715,11 @@ def install_home_video_drop(
 
         install_canvas_file_drop(
             root, canvas,
-            allowed_suffixes=VIDEO_DROP_SUFFIXES,
-            on_path=on_video,
+            allowed_suffixes=home_drop_suffixes(script, VIDEO_DROP_SUFFIXES),
+            on_paths=on_files,
+            allow_multiple=(script == "gui_multi_config_batch.py"),
             status_callback=show_rejection,
-            label="video",
+            label="video or config",
         )
 
 
