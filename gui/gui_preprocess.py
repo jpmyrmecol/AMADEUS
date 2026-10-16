@@ -680,6 +680,8 @@ class PreprocessApp(ctk.CTk):
         self.playback_job: str | None = None
         self.status_clear_job: str | None = None
         self.config_save_job: str | None = None
+        self._loading_cropping_config = False
+        self._pending_gpu_acceleration_preference: bool | None = None
         self.export_queue: queue.Queue = queue.Queue()
         self.gpu_encoder_queue: queue.Queue = queue.Queue()
         self.gpu_encoder_detection_complete = False
@@ -1317,6 +1319,7 @@ class PreprocessApp(ctk.CTk):
         if detected is None:
             self.gpu_video_encoder = None
             self.gpu_video_encoder_device = None
+            self._pending_gpu_acceleration_preference = None
             self.gpu_acceleration_var.set(False)
             self.gpu_acceleration_check.configure(
                 text="GPU acceleration",
@@ -1328,7 +1331,9 @@ class PreprocessApp(ctk.CTk):
         encoder, device = detected
         self.gpu_video_encoder = encoder
         self.gpu_video_encoder_device = device
-        self.gpu_acceleration_var.set(True)
+        saved_preference = self._pending_gpu_acceleration_preference
+        self._pending_gpu_acceleration_preference = None
+        self.gpu_acceleration_var.set(True if saved_preference is None else saved_preference)
         self.gpu_acceleration_check.configure(
             text="GPU acceleration",
             state="disabled" if self.export_running else "normal",
@@ -1731,7 +1736,7 @@ class PreprocessApp(ctk.CTk):
         return data
 
     def _write_crop_trimming_config(self, *, log_success: bool = False) -> str | None:
-        if self.reader is None:
+        if self.reader is None or self._loading_cropping_config:
             return None
         path = self._crop_trimming_config_path()
         try:
@@ -1751,7 +1756,7 @@ class PreprocessApp(ctk.CTk):
             return None
 
     def _schedule_crop_trimming_config_save(self) -> None:
-        if self.reader is None:
+        if self.reader is None or self._loading_cropping_config:
             return
         if self.config_save_job is not None:
             try:
@@ -1765,6 +1770,8 @@ class PreprocessApp(ctk.CTk):
         self._write_crop_trimming_config()
 
     def _flush_crop_trimming_config_save(self, *, log_success: bool = False) -> None:
+        if self._loading_cropping_config:
+            return
         if self.config_save_job is not None:
             try:
                 self.after_cancel(self.config_save_job)
