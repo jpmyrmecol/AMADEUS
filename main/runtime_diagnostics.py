@@ -9,7 +9,9 @@ that every tracking stage is configured to execute on that accelerator.
 
 from __future__ import annotations
 
+import os
 import platform
+import subprocess
 import sys
 
 import torch
@@ -59,3 +61,45 @@ def runtime_summary_lines(details: dict[str, str]) -> list[str]:
         f"[AMADEUS] GPU: {details['gpu_devices']} ({details['gpu_backend']}, {available})",
         f"[AMADEUS] Automatic PyTorch device: {details['automatic_torch_device']}",
     ]
+
+
+def system_details() -> dict[str, str]:
+    """Collect small, non-identifying hardware facts for reproducible run logs."""
+    cpu_model = platform.processor() or "unknown"
+    if sys.platform == "darwin":
+        try:
+            value = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                stderr=subprocess.DEVNULL, text=True, timeout=2,
+            ).strip()
+            if value:
+                cpu_model = value
+        except (OSError, subprocess.SubprocessError):
+            pass
+    elif sys.platform.startswith("linux"):
+        try:
+            with open("/proc/cpuinfo", encoding="utf-8") as stream:
+                for line in stream:
+                    if line.startswith("model name"):
+                        cpu_model = line.partition(":")[2].strip()
+                        break
+        except OSError:
+            pass
+    elif sys.platform == "win32":
+        cpu_model = os.environ.get("PROCESSOR_IDENTIFIER") or cpu_model
+
+    import psutil
+
+    gib = 1024 ** 3
+    battery = psutil.sensors_battery()
+    return {
+        "cpu_model": cpu_model,
+        "cpu_cores": f"{psutil.cpu_count(logical=False) or 'n/a'} physical/"
+                     f"{psutil.cpu_count(logical=True) or 'n/a'} logical",
+        "ram_total_gib": f"{psutil.virtual_memory().total / gib:.1f}",
+        "swap_used_gib": f"{psutil.swap_memory().used / gib:.2f}",
+        "power_source": (
+            "unknown" if battery is None
+            else "AC" if battery.power_plugged else "battery"
+        ),
+    }
