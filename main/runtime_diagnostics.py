@@ -32,13 +32,16 @@ def accelerator_memory_details(backend: Backend) -> dict[str, str]:
             except Exception:
                 value = "unavailable"
             capacities.append((index, value))
-        return {
+        details = {
             # The automatic PyTorch device is cuda:0; other GPUs are listed separately.
             "vram_total_device": "cuda:0" if capacities else "unavailable",
             "vram_total_gib": capacities[0][1] if capacities else "unavailable",
-            "vram_by_device_gib": ", ".join(f"cuda:{idx}:{size}" for idx, size in capacities)
-            if capacities else "unavailable",
         }
+        if len(capacities) > 1:
+            details["vram_by_device_gib"] = ", ".join(
+                f"cuda:{idx}={size}" for idx, size in capacities
+            )
+        return details
     if backend == Backend.APPLE_MPS:
         try:
             value = f"{torch.mps.recommended_max_memory() / gib:.2f}"
