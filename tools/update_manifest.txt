@@ -34,6 +34,7 @@ gui/gui_multi_config_batch.py
 gui/gui_preprocess.py
 gui/gui_refinement.py
 gui/gui_segmentation.py
+gui/home_drop_routes.py
 gui/preview_key_navigation.py
 gui/preview_playback_timing.py
 gui/project_paths.py
