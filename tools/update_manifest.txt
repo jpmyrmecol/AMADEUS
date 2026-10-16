@@ -40,6 +40,7 @@ gui/preview_playback_timing.py
 gui/project_paths.py
 gui/reverse_playback_buffer.py
 gui/runtime.py
+gui/segmentation_workflow.py
 gui/save_shortcut.py
 gui/splash_geometry.py
 gui/splash_ipc.py
