@@ -4640,11 +4640,17 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--dropped-video", default="")
+    parser.add_argument("--load-config", default="", help="Tracking YAML config to load.")
     args = parser.parse_args()
 
     configure_taskbar_identity()
     app = UmaDirectionRefinementApp()
-    if args.dropped_video:
+    if args.load_config:
+        def load_home_config(path=args.load_config):
+            app.config_path_var.set(path)
+            app.load_config_and_discover_datasets(path)
+        app.after(300, load_home_config)
+    elif args.dropped_video:
         # Reuse Refinement's direct Video/CSV mode, just like a canvas drop.
         # Video-only input opens the video; users may select tracking CSV later.
         app.after(300, lambda path=args.dropped_video: app._handle_dropped_file(path))
