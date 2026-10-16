@@ -109,56 +109,6 @@ _VISUAL_PROGRESS_FONT_SIZE = 13
 _VISUAL_PROGRESS_FONT = ("TkDefaultFont", _VISUAL_PROGRESS_FONT_SIZE)
 _VISUAL_PROGRESS_TITLE_FONT = ("TkDefaultFont", _VISUAL_PROGRESS_FONT_SIZE, "bold")
 
-# Both halves of the VRAM field are shown in GiB so they share one unit.
-# Ultralytics prints reserved memory as bytes / 1e9, nvidia-smi reports MiB, and
-# GiB is what nvidia-smi, Task Manager and the card's own advertised capacity
-# all use -- a 12 GiB board reads 12.0.
-_DECIMAL_GB_IN_GIB = 1e9 / (1024 ** 3)
-
-_total_vram_gib_cache: list = []
-
-
-def _total_vram_gib() -> float | None:
-    """Dedicated memory of the visible CUDA/HIP device, or None."""
-    if _total_vram_gib_cache:
-        return _total_vram_gib_cache[0]
-
-    # Respect visible PyTorch devices and avoid treating HIP as NVIDIA.
-    if str(MAIN_PATH) not in sys.path:
-        sys.path.insert(0, str(MAIN_PATH))
-    from compute_backend import runtime_for
-    runtime = runtime_for()
-    total = None
-    if runtime.capabilities.memory_model == "dedicated":
-        _, budget = runtime.memory()
-        total = None if budget is None else budget / (1024.0 ** 3)
-    _total_vram_gib_cache.append(total)
-    return total
-
-
-def _format_elapsed(seconds: float) -> str:
-    """Running time, to the second: "8s", "2m 08s", "1h 05m 08s"."""
-    seconds = max(0, int(seconds))
-    hours, rest = divmod(seconds, 3600)
-    minutes, secs = divmod(rest, 60)
-    if hours:
-        return f"{hours}h {minutes:02d}m {secs:02d}s"
-    if minutes:
-        return f"{minutes}m {secs:02d}s"
-    return f"{secs}s"
-
-
-def _format_estimate(seconds: float) -> str:
-    """Estimated run, to the minute: "~52m", "~1h 30m".
-
-    Whole minutes only, so the figure does not twitch on every redraw.
-    """
-    minutes = max(1, int(round(max(0.0, seconds) / 60.0)))
-    hours, minutes = divmod(minutes, 60)
-    if hours:
-        return f"~{hours}h {minutes:02d}m"
-    return f"~{minutes}m"
-
 try:
     import cv2
     _HAS_CV2 = True
