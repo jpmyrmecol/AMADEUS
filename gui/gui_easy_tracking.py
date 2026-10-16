@@ -3345,7 +3345,11 @@ class EasyTrackingGUI(ctk.CTk):
     @staticmethod
     def _img_size_from_short(short: int) -> int:
         size = min(1024, max(32, (short // 32) * 32))
-        return min(size, 640) if sys.platform == "darwin" else size
+        if sys.platform == "darwin":
+            return min(size, 640)
+        from main.compute_backend import Backend, detect_backend
+
+        return min(size, 640) if detect_backend() == Backend.AMD_ROCM else size
 
     def _derive_dataset_geometry_flags(self, video_path: str, image_size: int) -> tuple[bool, int, bool]:
         try:
