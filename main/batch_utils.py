@@ -558,10 +558,9 @@ def run_with_oom_retry(fn, initial_batch: int):
 
 # --- Real-training starting-epoch sanity check --------------------------------
 #
-# There is no more preflight calibration (a separate throwaway probe before
-# real training). auto_batch_size dispatches to the memory estimator or the
-# upstream-compatible MPS default; workers default to a fixed count, and real
-# training then starts immediately. _InitialLoadCheck owns RAM pressure, WDDM
+# AMADEUS no longer runs separate preflight calibration. NVIDIA uses its
+# memory estimator, MPS uses the upstream default, and ROCm delegates
+# batch=-1 to Ultralytics AutoBatch during trainer setup. _InitialLoadCheck owns RAM pressure, WDDM
 # observation, and VRAM headroom during the starting epoch; the separate
 # _PerformanceMonitor watches measured training/validation throughput for the
 # whole run. Once the starting epoch finishes cleanly, its own full
