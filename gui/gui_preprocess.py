@@ -1780,6 +1780,165 @@ class PreprocessApp(ctk.CTk):
             self.config_save_job = None
         self._write_crop_trimming_config(log_success=log_success)
 
+    @staticmethod
+    def _regions_from_cropping_config(raw_regions: object, width: int, height: int) -> list[Region]:
+        """Validate and restore the saved full-image and crop regions."""
+        if not isinstance(raw_regions, list) or not raw_regions:
+            raise ValueError("Cropping config contains no regions.")
+        regions: list[Region] = []
+        for index, raw in enumerate(raw_regions):
+            if not isinstance(raw, dict):
+                raise ValueError(f"Region {index} is invalid.")
+            kind = str(raw.get("kind", ""))
+            if kind != ("full" if index == 0 else "crop"):
+                raise ValueError(f"Unexpected kind in region {index}: {kind!r}")
+            square = bool(raw.get("square", False))
+            rect = raw.get("rect")
+            if index > 0:
+                if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+                    raise ValueError(f"Crop {index} has no valid rectangle.")
+                rect = tuple(int(value) for value in rect)
+                if rect[2] <= 0 or rect[3] <= 0:
+                    raise ValueError(f"Crop {index} has invalid dimensions.")
+                rect = (_normalize_square_rect(rect, width, height)
+                        if square else _normalize_rect(rect, width, height))
+            else:
+                rect = None
+
+            brightness = float(raw.get("brightness", 0.0))
+            contrast = float(raw.get("contrast", 1.0))
+            angle = float(raw.get("angle_degrees_clockwise", 0.0))
+            if not all(math.isfinite(value) for value in (brightness, contrast, angle)):
+                raise ValueError(f"Region {index} has nonfinite numeric settings.")
+            color_mode = str(raw.get("color_mode", "color")).lower()
+            if color_mode not in {"color", "grayscale"}:
+                raise ValueError(f"Region {index} has an invalid color mode.")
+            regions.append(Region(
+                uid=index, kind=kind, rect=rect, square=square,
+                brightness=_clamp(brightness, BRIGHTNESS_MIN, BRIGHTNESS_MAX),
+                contrast=_clamp(contrast, CONTRAST_MIN, CONTRAST_MAX),
+                color_mode=color_mode,
+                export_enabled=bool(raw.get("export", True)),
+                angle=(angle + 180.0) % 360.0 - 180.0,
+            ))
+        return regions
+
+    def load_cropping_config(self, path: str) -> bool:
+        """Load the saved cropping/trimming YAML without starting an export."""
+        if self.export_running:
+            messagebox.showwarning("Cropping config", "Wait for export to finish.", parent=self)
+            return False
+        try:
+            import yaml
+
+            config_path = Path(path).expanduser().resolve()
+            with config_path.open("r", encoding="utf-8") as stream:
+                cfg = yaml.safe_load(stream)
+            if not isinstance(cfg, dict) or cfg.get("tool") != "AMADEUS Cropping & Trimming":
+                raise ValueError("This is not an AMADEUS Cropping & Trimming YAML config.")
+            video_name = str(cfg.get("video_path", "")).strip()
+            if not video_name:
+                raise ValueError("Cropping config has no video_path.")
+            video = Path(video_name).expanduser()
+            if not video.is_absolute():
+                video = config_path.parent / video
+            if not video.is_file():
+                sibling = config_path.parent / Path(video_name).name
+                if sibling.is_file():
+                    video = sibling
+                else:
+                    raise FileNotFoundError(
+                        f"Source video not found: {video_name}. "
+                        "Place it next to the config or select the video directly."
+                    )
+            saved_width = int(cfg.get("source_width", 0))
+            saved_height = int(cfg.get("source_height", 0))
+            if saved_width < 1 or saved_height < 1:
+                raise ValueError("Cropping config has invalid source dimensions.")
+            regions = self._regions_from_cropping_config(
+                cfg.get("regions"), saved_width, saved_height,
+            )
+            trim = cfg.get("trim", {})
+            output = cfg.get("output", {})
+            if not isinstance(trim, dict) or not isinstance(output, dict):
+                raise ValueError("Cropping config trim/output must be mappings.")
+            speed = float(output.get("speed", 1.0))
+            output_fps = float(output.get("fps", 30.0))
+            if not (math.isfinite(speed) and math.isfinite(output_fps)
+                    and OUTPUT_SPEED_MIN <= speed <= OUTPUT_SPEED_MAX
+                    and 1.0 <= output_fps <= 240.0):
+                raise ValueError("Cropping config has an invalid output speed or FPS.")
+            turns = int(round(float(output.get("view_rotation_degrees_clockwise", 0)) / 90.0)) % 4
+            in_frame = int(trim.get("in_frame", 0))
+            out_frame = int(trim.get("out_frame", 0))
+        except (OSError, ValueError, TypeError, OverflowError) as exc:
+            messagebox.showerror("Cropping config", str(exc), parent=self)
+            return False
+
+        prepared = prepare_analysis_video(self, str(video), log=self._log)
+        if prepared is None:
+            return False
+
+        if self.config_save_job is not None:
+            self.after_cancel(self.config_save_job)
+            self.config_save_job = None
+        self._loading_cropping_config = True
+        success = False
+        try:
+            self.load_video(prepared.path)
+            if self.reader is None or Path(self.reader.video_path).resolve() != Path(prepared.path).resolve():
+                return False
+            if (self.reader.width, self.reader.height) != (saved_width, saved_height):
+                raise ValueError(
+                    "Video dimensions differ from this cropping config: "
+                    f"saved={saved_width}x{saved_height}, "
+                    f"actual={self.reader.width}x{self.reader.height}."
+                )
+            last = max(0, self.reader.frame_count - 1)
+            self.in_frame = max(0, min(in_frame, last))
+            self.out_frame = max(self.in_frame, min(max(0, out_frame), last))
+            self.regions = regions
+            self.next_region_uid = len(regions)
+            self.active_region_idx = 0
+            self.editing_crop_idx = None
+            self.preview_turns = turns
+            self.view_initialized = False
+            mode = str(cfg.get("default_color_mode", self.default_color_mode)).lower()
+            if mode in {"color", "grayscale"}:
+                self.default_color_mode = mode
+            self._refresh_region_list(select_index=0)
+
+            folder = str(output.get("folder", "") or "").strip()
+            if folder and not Path(folder).expanduser().is_absolute():
+                folder = str((config_path.parent / folder).resolve())
+            self.output_folder_var.set(folder or str(Path(prepared.path).parent))
+            self.template_var.set(str(output.get("template", "{stem}_{region}")))
+            self.output_speed_var.set(speed)
+            self.output_speed_spin.delete(0, tk.END)
+            self.output_speed_spin.insert(0, f"{speed:.2f}")
+            self.output_fps_var.set(output_fps)
+            self.output_fps_spin.delete(0, tk.END)
+            self.output_fps_spin.insert(0, f"{output_fps:.3f}")
+            self.export_view_rotation_var.set(bool(output.get("apply_view_rotation", True)))
+            acceleration = bool(output.get("use_gpu_acceleration", False))
+            if self.gpu_encoder_detection_complete:
+                self.gpu_acceleration_var.set(acceleration and bool(self.gpu_video_encoder))
+            else:
+                self._pending_gpu_acceleration_preference = acceleration
+            self._refresh_video_controls()
+            self._update_timeline_labels()
+            self.redraw_current_frame()
+            success = True
+        except (OSError, ValueError, TypeError, tk.TclError) as exc:
+            messagebox.showerror("Cropping config", str(exc), parent=self)
+        finally:
+            self._loading_cropping_config = False
+
+        if success:
+            self._flush_crop_trimming_config_save(log_success=True)
+            self.set_status(f"Cropping config loaded: {config_path}")
+        return success
+
     def _detect_default_color_mode(self, reader: VideoFrameReader) -> str:
         sample_indices = sorted({
             0,
@@ -3602,11 +3761,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--video", default="")
     parser.add_argument("--dropped-video", default="")
+    parser.add_argument("--load-config", default="", help="Saved cropping/trimming YAML config.")
     args = parser.parse_args()
 
     configure_taskbar_identity()
     app = PreprocessApp()
-    if args.dropped_video:
+    if args.load_config:
+        app.after(300, lambda path=args.load_config: app.load_cropping_config(path))
+    elif args.dropped_video:
         # The same compatibility/normalization prompts as canvas drop.
         app.after(300, lambda path=args.dropped_video: app.select_video(path))
     elif args.video and os.path.isfile(args.video):
