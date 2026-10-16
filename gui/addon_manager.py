@@ -60,14 +60,26 @@ def platform_key() -> str:
     return f"{system}-{arch}"
 
 
+def _linux_data_home() -> Path:
+    value = os.environ.get("XDG_DATA_HOME")
+    if value and Path(value).is_absolute():
+        return Path(value)
+    return Path.home() / ".local" / "share"
+
+
+def legacy_linux_storage_root() -> Path | None:
+    if not sys.platform.startswith("linux"):
+        return None
+    return _linux_data_home() / "amadeus" / "addons"
+
+
 def storage_root() -> Path:
     if sys.platform == "win32":
         base = Path(os.environ["LOCALAPPDATA"]) / "AMADEUS"
     elif sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / "AMADEUS"
     else:
-        value = os.environ.get("XDG_DATA_HOME")
-        base = (Path(value) if value and Path(value).is_absolute() else Path.home() / ".local" / "share") / "amadeus"
+        base = _linux_data_home() / "AMADEUS"
     return base / "addons"
 
 
@@ -276,6 +288,54 @@ def _lock(path: Path) -> Iterator[None]:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
+def _migrate_linux_addon_storage(destination: Path) -> None:
+    """Move legacy data into AMADEUS; retain its old path for existing venvs."""
+    legacy = legacy_linux_storage_root()
+    if legacy is None or (not legacy.exists() and not legacy.is_symlink()):
+        return
+
+    destination = destination.resolve()
+    if legacy.is_symlink():
+        if legacy.resolve() != destination:
+            raise ValueError(f"Unexpected legacy add-on storage link: {legacy}")
+        return
+    if not legacy.is_dir() or legacy.parent.is_symlink():
+        raise ValueError(f"Unsafe legacy add-on storage: {legacy}")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with _lock(destination.parent / ".addon-storage-migration.lock"):
+        if legacy.is_symlink():
+            if legacy.resolve() != destination:
+                raise ValueError(f"Unexpected legacy add-on storage link: {legacy}")
+            return
+        if destination.exists() or destination.is_symlink():
+            raise ValueError(
+                "Both legacy and new add-on storage directories exist. "
+                f"Resolve the conflict before starting AMADEUS: {legacy} and {destination}"
+            )
+
+        prefix = str(legacy.resolve()) + os.sep
+        for process in psutil.process_iter(["cmdline"]):
+            try:
+                if any(isinstance(arg, str) and arg.startswith(prefix)
+                       for arg in process.info["cmdline"] or []):
+                    raise RuntimeError(
+                        "Close running add-ons before migrating their storage: "
+                        f"{legacy}"
+                    )
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        legacy.rename(destination)
+        try:
+            # Existing uv-managed Python and venv entry points contain absolute
+            # paths into the former lowercase directory.
+            legacy.symlink_to(destination, target_is_directory=True)
+        except OSError:
+            destination.rename(legacy)
+            raise
+
+
 def clean_environment() -> dict[str, str]:
     blocked = {"VIRTUAL_ENV", "TCL_LIBRARY", "TK_LIBRARY", "__PYVENV_LAUNCHER__", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"}
     return {key: value for key, value in os.environ.items()
@@ -303,6 +363,8 @@ class Store:
         if self.root.is_symlink():
             raise ValueError("Add-on storage must not be a symbolic link.")
         self.root = self.root.resolve()
+        if root is None and sys.platform.startswith("linux"):
+            _migrate_linux_addon_storage(self.root)
 
     def path(self, relative: str) -> Path:
         return _safe_path(self.root, relative)
