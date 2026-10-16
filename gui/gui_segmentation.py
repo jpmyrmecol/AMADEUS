@@ -3805,8 +3805,8 @@ class CrossingReviewApp(ctk.CTk):
         self._iqr_drag_index = None
         self._iqr_drag_start_x = None
         self.area_iqr_boxplot = tk.Canvas(
-            parent, height=38, bg="white",
-            highlightthickness=1, highlightbackground="#cccccc",
+            parent, height=38, bg="#242424",
+            highlightthickness=1, highlightbackground="#565B5E",
         )
         self.area_iqr_boxplot.bind("<Configure>", lambda _e: self._redraw_area_iqr_boxplot())
         self.area_iqr_boxplot.bind("<Motion>", self._update_iqr_boxplot_cursor)
@@ -4011,21 +4011,21 @@ class CrossingReviewApp(ctk.CTk):
         box_top = y - box_half
         box_bottom = y + box_half
         canvas.create_line(x_ref_min, y, x_ref_max, y, fill="#888888", width=1)
-        canvas.create_rectangle(x_q1, box_top, x_q3, box_bottom, outline="#333333", fill="#dddddd")
-        canvas.create_line(x_med, box_top, x_med, box_bottom, fill="#000000", width=2)
+        canvas.create_rectangle(x_q1, box_top, x_q3, box_bottom, outline="#AAB0B5", fill="#6B7280")
+        canvas.create_line(x_med, box_top, x_med, box_bottom, fill="#DCE4EE", width=2)
 
         cut_top = box_top
         cut_bottom = box_bottom
         self._iqr_plot_axis = (vmin, vmax, left, right, x_lo, x_hi, cut_top, cut_bottom)
         hook_len = 4
         # Lower cut: bracket opens inward to the right. Upper cut: bracket opens inward to the left.
-        canvas.create_line(x_lo, cut_top, x_lo, cut_bottom, fill="#cc2222", width=2)
-        canvas.create_line(x_lo, cut_top, x_lo + hook_len, cut_top, fill="#cc2222", width=2)
-        canvas.create_line(x_lo, cut_bottom, x_lo + hook_len, cut_bottom, fill="#cc2222", width=2)
+        canvas.create_line(x_lo, cut_top, x_lo, cut_bottom, fill="#FF7777", width=2)
+        canvas.create_line(x_lo, cut_top, x_lo + hook_len, cut_top, fill="#FF7777", width=2)
+        canvas.create_line(x_lo, cut_bottom, x_lo + hook_len, cut_bottom, fill="#FF7777", width=2)
 
-        canvas.create_line(x_hi, cut_top, x_hi, cut_bottom, fill="#cc2222", width=2)
-        canvas.create_line(x_hi, cut_top, x_hi - hook_len, cut_top, fill="#cc2222", width=2)
-        canvas.create_line(x_hi, cut_bottom, x_hi - hook_len, cut_bottom, fill="#cc2222", width=2)
+        canvas.create_line(x_hi, cut_top, x_hi, cut_bottom, fill="#FF7777", width=2)
+        canvas.create_line(x_hi, cut_top, x_hi - hook_len, cut_top, fill="#FF7777", width=2)
+        canvas.create_line(x_hi, cut_bottom, x_hi - hook_len, cut_bottom, fill="#FF7777", width=2)
 
     def _schedule_area_iqr_boxplot_redraw(self):
         """Redraw the Area IQR boxplot after Tk has completed layout updates.
