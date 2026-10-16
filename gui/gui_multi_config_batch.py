@@ -523,8 +523,16 @@ class MultiVideosetBatchGUI(ctk.CTk):
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run multiple saved AMADEUS tracking configs.")
+    parser.add_argument("--load-config", action="append", default=[],
+                        help="Append a YAML config file to the initial queue (repeatable).")
+    args = parser.parse_args()
     configure_taskbar_identity()
     app = MultiVideosetBatchGUI()
+    if args.load_config:
+        app.after(200, lambda paths=list(args.load_config): app._add_paths(paths))
     app.mainloop()
 
 
