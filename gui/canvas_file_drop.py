@@ -99,7 +99,9 @@ def install_canvas_file_drop(
     canvas: tk.Canvas,
     *,
     allowed_suffixes: Iterable[str],
-    on_path: Callable[[str], None],
+    on_path: Callable[[str], None] | None = None,
+    on_paths: Callable[[tuple[str, ...]], None] | None = None,
+    allow_multiple: bool = False,
     accept_path: Callable[[str], bool] | None = None,
     status_callback: Callable[[str], None] | None = None,
     label: str = "file",
@@ -111,6 +113,8 @@ def install_canvas_file_drop(
     children without attaching their own handlers does not forward those events
     to the parent.
     """
+    if (on_path is None) == (on_paths is None):
+        raise ValueError("Specify exactly one of on_path or on_paths.")
     state = CanvasFileDropState()
 
     def log(message: str) -> None:
@@ -202,12 +206,14 @@ def install_canvas_file_drop(
             log(f"drop parsed={parsed_paths!r}")
             paths = accepted_drop_paths(parsed_paths, allowed_suffixes, accept_path)
             log(f"drop accepted={paths!r}")
-            if len(paths) > 1:
+            if len(paths) > 1 and not allow_multiple:
                 return reject(f"Please drop one {label} at a time.")
             if not paths:
                 return reject(f"Please drop one {label} file.")
-            selected_path = paths[0]
-            window.after_idle(lambda path=selected_path: on_path(path))
+            if on_paths is not None:
+                window.after_idle(lambda selected=paths: on_paths(selected))
+            else:
+                window.after_idle(lambda path=paths[0]: on_path(path))
             return COPY
 
         registered_count = 0
