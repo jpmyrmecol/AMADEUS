@@ -308,7 +308,9 @@ def _migrate_linux_addon_storage(destination: Path) -> None:
             if legacy.resolve() != destination:
                 raise ValueError(f"Unexpected legacy add-on storage link: {legacy}")
             return
-        if destination.exists() or destination.is_symlink():
+        if destination.is_dir() and not destination.is_symlink() and not any(destination.iterdir()):
+            destination.rmdir()
+        elif destination.exists() or destination.is_symlink():
             raise ValueError(
                 "Both legacy and new add-on storage directories exist. "
                 f"Resolve the conflict before starting AMADEUS: {legacy} and {destination}"
