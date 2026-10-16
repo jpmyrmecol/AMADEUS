@@ -7740,13 +7740,25 @@ class CrossingReviewApp(ctk.CTk):
 
     def _close_progress_popup(self):
         if self._progress_poll_job is not None:
-            self.after_cancel(self._progress_poll_job)
+            try:
+                self.after_cancel(self._progress_poll_job)
+            except tk.TclError:
+                pass
             self._progress_poll_job = None
         if self.progress_bar is not None:
-            self.progress_bar.stop()
+            try:
+                self.progress_bar.stop()
+            except tk.TclError:
+                pass
         if self.progress_popup is not None:
-            self.progress_popup.grab_release()
-            self.progress_popup.destroy()
+            try:
+                self.progress_popup.grab_release()
+            except tk.TclError:
+                pass
+            try:
+                self.progress_popup.destroy()
+            except tk.TclError:
+                pass
         self.progress_popup = None
         self.progress_bar = None
         self._progress_indeterminate = False
