@@ -620,18 +620,20 @@ TRAIN_INITIAL_RAM_TARGET = _float_env("AMADEUS_TRAIN_INITIAL_RAM_TARGET", 0.90)
 # actual CUDA OOM and Ultralytics' silent CUDA-OOM CPU fallback.
 TRAIN_COLLAPSE_RATIO = _float_env("AMADEUS_TRAIN_COLLAPSE_RATIO", 0.5)
 
-# VRAM fraction (peak, over the whole starting epoch) below which VRAM is
-# considered clearly underused -- batch may be raised once via
-# next_batch_candidate(batch, "up") (~1.25x, not a closed-form estimate: VRAM
-# use isn't reliably linear in batch size, so extrapolating a target
-# utilization from one data point risks overshooting straight into the next
-# OOM). Never re-evaluated after that single recovery, so this can't turn
-# into an iterative max-batch search, and is permanently disabled for the
-# rest of a run's recovery series the moment a batch has ever been lowered
-# (see main()) -- otherwise a lower/raise pair could oscillate indefinitely
-# around the same unsafe batch.
-TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER = _float_env("AMADEUS_TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER", 0.40)
-
+# Peak VRAM fraction during the starting epoch below which AMADEUS may raise
+# an automatic NVIDIA training batch once. Below 30% the batch doubles;
+# from 30% up to (but excluding) 40% it grows by 1.5x, rounded down
+# to an integer (but by at least one). Both tiers target at most 60%
+# utilization under the linear memory-cost approximation. Later-epoch
+# growth is not predicted, so OOM recovery remains active.
+# The headroom increase is never repeated after a restart, and is disabled
+# permanently if a recovery has already lowered the batch.
+TRAIN_INITIAL_VRAM_HEADROOM_DOUBLE_TRIGGER = _float_env(
+    "AMADEUS_TRAIN_INITIAL_VRAM_HEADROOM_DOUBLE_TRIGGER", 0.30
+)
+TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER = _float_env(
+    "AMADEUS_TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER", 0.40
+)
 
 _DATALOADER_FAILURE_MARKERS = (
     "dataloader worker",
