@@ -11,7 +11,7 @@ import unittest
 
 SOURCE = Path(__file__).resolve().parents[1] / "gui" / "gui_easy_tracking.py"
 TRAIN_DESC = re.compile(
-    r"^(\\d+)/(\\d+)\\s+([\\d.]+)G\\s+\\S+\\s+\\S+\\s+\\S+\\s+\\d+\\s+(\\d+)$"
+    r"^(\d+)/(\d+)\s+([\d.]+)G\s+\S+\s+\S+\s+\S+\s+\d+\s+(\d+)$"
 )
 
 
