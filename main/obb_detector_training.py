@@ -1421,9 +1421,10 @@ class _PerformanceMonitor:
                 psutil.cpu_percent(interval=None)
             except Exception:
                 pass
+            pending_batch = "AutoBatch pending" if self.batch_size < 1 else str(self.batch_size)
             print(
                 f"[PERF] monitor started: interval={self.interval:.0f}s, "
-                f"batch={self.batch_size}, imgsz={self.image_size}, "
+                f"batch={pending_batch}, imgsz={self.image_size}, "
                 f"workers={self.effective_workers} (configured={self.workers}), "
                 f"device={self.device}",
                 flush=True,
