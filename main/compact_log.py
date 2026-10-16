@@ -16,7 +16,6 @@ tracebacks are never summarized.
 from __future__ import annotations
 
 import re
-import time
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -53,8 +52,6 @@ class CompactChildOutput:
         self._omitted_progress_updates = 0
         self._omitted_perf_samples = 0
         self._omitted_training_rows = 0
-        self._last_perf_log_time = time.monotonic()
-        self._pending_perf: str | None = None
 
     @staticmethod
     def _clean_record(record: str) -> str:
@@ -73,11 +70,9 @@ class CompactChildOutput:
         if epoch_match is not None:
             epoch = int(epoch_match.group("epoch"))
             epochs = int(epoch_match.group("epochs"))
-            return (
-                ("epoch", epoch, epochs),
-                pct,
-                f"[PROGRESS] training epoch {epoch}/{epochs} complete",
-            )
+            # The trainer emits one [TRAIN EPOCH] line with throughput and
+            # aggregated memory statistics. Do not duplicate it with tqdm.
+            return (None, pct, None)
 
         # During training, Ultralytics also shows validation and data-loader
         # bars.  The completed epoch line above is the useful concise status;
@@ -104,16 +99,6 @@ class CompactChildOutput:
             f"[PROGRESS] {description}: {count}/{total} complete",
         )
 
-    def _take_perf_snapshot(self) -> str:
-        """Keep one recent measurement without retaining every 15-second sample."""
-        if self._pending_perf is None:
-            return ""
-        snapshot = self._pending_perf
-        self._pending_perf = None
-        self._last_perf_log_time = time.monotonic()
-        self._omitted_perf_samples -= 1
-        return snapshot + "\n"
-
     def _consume_record(self, record: str) -> str:
         line = self._clean_record(record)
         if not line.strip():
@@ -122,23 +107,12 @@ class CompactChildOutput:
         # A traceback or an error must win over every progress heuristic, even
         # when a library happened to write it while a progress bar was active.
         if _IMPORTANT_RE.search(line) or _DIAGNOSTIC_PREFIX_RE.match(line):
-            recent_perf = (
-                self._take_perf_snapshot()
-                if self.training and (
-                    "throughput" in line.lower() or "batch" in line.lower()
-                    or "out of memory" in line.lower()
-                )
-                else ""
-            )
-            return recent_perf + line + "\n"
+            return line + "\n"
 
+        # Older training scripts may still print periodic measurements.
+        # Only completed [TRAIN EPOCH] summaries belong in the persistent log.
         if line.lstrip().startswith("[PERF]"):
-            if line.lstrip().startswith("[PERF] monitor started"):
-                return ""
-            self._pending_perf = line
             self._omitted_perf_samples += 1
-            if self.training and time.monotonic() - self._last_perf_log_time >= 300.0:
-                return self._take_perf_snapshot()
             return ""
 
         if self.training and _TRAINING_TABLE_RE.match(line):
@@ -155,8 +129,7 @@ class CompactChildOutput:
             return ""
 
         self._emitted_progress.add(key)
-        snapshot = self._take_perf_snapshot() if self.training and key[0] == "epoch" else ""
-        return summary + "\n" + snapshot
+        return summary + "\n"
 
     def feed(self, text: str) -> str:
         """Consume a decoded stream chunk and return compacted complete records."""
@@ -180,13 +153,13 @@ class CompactChildOutput:
         return "".join(output)
 
     def flush(self) -> str:
-        """Return the last record and the final measurement if training stopped."""
+        """Return a final non-progress record left without a newline."""
+        if not self._record:
+            return ""
         record = "".join(self._record)
         self._record.clear()
         self._last_delimiter_was_cr = False
-        return (self._consume_record(record) if record else "") + (
-            self._take_perf_snapshot() if self.training else ""
-        )
+        return self._consume_record(record)
 
     def summary_line(self) -> str:
         """Describe suppressed routine output once, without hiding diagnostics."""
