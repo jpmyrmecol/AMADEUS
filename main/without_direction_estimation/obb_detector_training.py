@@ -2176,9 +2176,9 @@ def main(
                     BATCH_SIZE, int(TRAIN_IMG_SIZE), device, mode="train",
                     labels_dir=train_labels_dir, task="obb",
                 )
-                if ckpt_batch and explicit_batch and int(BATCH_SIZE) != batch_size:
+                if ckpt_batch and explicit_batch and requested_batch != batch_size:
                     print(
-                        f"[WARN] Configured BATCH_SIZE={int(BATCH_SIZE)} differs from this run's "
+                        f"[WARN] Configured BATCH_SIZE={requested_batch} differs from this run's "
                         f"original batch={batch_size}; resuming with the original batch to avoid "
                         "mixing batch sizes within one run."
                     )
