@@ -138,7 +138,11 @@ def system_details() -> dict[str, str]:
 
     gib = 1024 ** 3
     memory = psutil.virtual_memory()
-    battery = psutil.sensors_battery()
+    try:
+        battery = psutil.sensors_battery()
+    except (OSError, psutil.Error, NotImplementedError):
+        # Battery telemetry is optional, including on Linux without sysfs power supplies.
+        battery = None
     return {
         "cpu_model": cpu_model,
         "cpu_cores": f"{psutil.cpu_count(logical=False) or 'n/a'} physical/"
