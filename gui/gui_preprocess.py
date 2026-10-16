@@ -24,10 +24,12 @@ try:
     from .project_paths import PROJECT_ROOT, ensure_import_paths, gui_asset, gui_script
     from .canvas_file_drop import install_canvas_file_drop
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from .dark_widgets import dark_spinbox
 except ImportError:
     from project_paths import PROJECT_ROOT, ensure_import_paths, gui_asset, gui_script
     from canvas_file_drop import install_canvas_file_drop
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from dark_widgets import dark_spinbox
 
 ensure_import_paths(PROJECT_ROOT)
 from gui.color import CYAN_RGB, GREEN_RGB, ORANGE_RGB, WHITE_RGB
@@ -822,7 +824,7 @@ class PreprocessApp(ctk.CTk):
         angle_cell = ctk.CTkFrame(grid, corner_radius=0)
         angle_cell.grid(row=2, column=0, columnspan=2, sticky="ew", pady=2)
         ctk.CTkLabel(angle_cell, text="Angle (°, clockwise)").pack(side="left")
-        self.crop_angle_spin = tk.Spinbox(angle_cell, from_=-180, to=180, increment=0.1,
+        self.crop_angle_spin = dark_spinbox(angle_cell, from_=-180, to=180, increment=0.1,
                                          textvariable=self.crop_angle_var, width=8, **_SPIN_CFG)
         self.crop_angle_spin.pack(side="left", fill="x", expand=True)
         self.crop_angle_spin.configure(command=self._on_crop_angle_changed)
@@ -913,7 +915,7 @@ class PreprocessApp(ctk.CTk):
         fps_row = ctk.CTkFrame(export, corner_radius=0)
         fps_row.pack(fill="x", padx=8, pady=(0, 8))
         ctk.CTkLabel(fps_row, text="Output", width=58, anchor="w").pack(side="left")
-        self.output_speed_spin = tk.Spinbox(
+        self.output_speed_spin = dark_spinbox(
             fps_row,
             from_=OUTPUT_SPEED_MIN,
             to=OUTPUT_SPEED_MAX,
@@ -931,7 +933,7 @@ class PreprocessApp(ctk.CTk):
         self.output_speed_spin.bind("<FocusOut>", self._commit_output_speed, add="+")
         ctk.CTkLabel(fps_row, text="x", width=16, anchor="w").pack(side="left", padx=(2, 4))
         ctk.CTkLabel(fps_row, text="fps", width=24, anchor="e").pack(side="left", padx=(0, 4))
-        self.output_fps_spin = tk.Spinbox(
+        self.output_fps_spin = dark_spinbox(
             fps_row,
             from_=1.0,
             to=240.0,
@@ -1064,7 +1066,7 @@ class PreprocessApp(ctk.CTk):
         ctk.CTkLabel(self.timeline_pane, text="In frame", width=58, anchor="e").grid(
             row=0, column=7, padx=(0, 3), pady=(7, 3)
         )
-        self.in_frame_spin = tk.Spinbox(
+        self.in_frame_spin = dark_spinbox(
             self.timeline_pane,
             from_=0,
             to=0,
@@ -1077,7 +1079,7 @@ class PreprocessApp(ctk.CTk):
         ctk.CTkLabel(self.timeline_pane, text="Out frame", width=68, anchor="e").grid(
             row=0, column=9, padx=(0, 3), pady=(7, 3)
         )
-        self.out_frame_spin = tk.Spinbox(
+        self.out_frame_spin = dark_spinbox(
             self.timeline_pane,
             from_=0,
             to=0,
@@ -1151,7 +1153,7 @@ class PreprocessApp(ctk.CTk):
         row = ctk.CTkFrame(outer, corner_radius=0)
         row.pack(fill="x")
         ctk.CTkLabel(row, text=label, width=110, anchor="w").pack(side="left")
-        spinbox = tk.Spinbox(row, from_=lo, to=hi, increment=step, width=8, format="%.2f", **_SPIN_CFG)
+        spinbox = dark_spinbox(row, from_=lo, to=hi, increment=step, width=8, format="%.2f", **_SPIN_CFG)
         spinbox.pack(side="right")
         slider = ctk.CTkSlider(outer, from_=lo, to=hi, orientation="horizontal", command=command)
         slider.set(float(var.get()))
@@ -1214,7 +1216,7 @@ class PreprocessApp(ctk.CTk):
         cell = ctk.CTkFrame(parent, corner_radius=0)
         cell.grid(row=row, column=col, sticky="ew", padx=(0 if col == 0 else 5, 0), pady=2)
         ctk.CTkLabel(cell, text=label, width=18, anchor="w").pack(side="left")
-        spinbox = tk.Spinbox(cell, from_=lo, to=999999, increment=1, width=7, **_SPIN_CFG)
+        spinbox = dark_spinbox(cell, from_=lo, to=999999, increment=1, width=7, **_SPIN_CFG)
         spinbox.pack(side="left", fill="x", expand=True)
 
         def commit(_event=None):
