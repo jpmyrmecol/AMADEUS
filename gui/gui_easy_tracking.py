@@ -2691,18 +2691,20 @@ class EasyTrackingGUI(ctk.CTk):
         data = self._read_yolo_results_csv(paths[0]) if paths else {}
         fitness = data.get("fitness", [])
 
-        # Prefer live per-batch losses extracted from tqdm (available while training runs)
+        # Use cumulative processed images, including partial batches and
+        # changes to the batch size after automatic recovery.
         if self._batch_losses:
-            n = len(self._batch_losses)
+            count = self._batch_loss_images[-1]
             self._draw_training_monitor(
                 {
                     "loss_series": [(self._batch_losses, "#1f8040", "train")],
                     "loss_title": "Loss",
-                    "loss_x_label": "batch",
+                    "loss_x_label": "Images",
+                    "loss_x_values": self._batch_loss_images,
                     "fitness": fitness,
                 }
             )
-            status = f"Batch {n}  |  train/box_loss = {self._batch_losses[-1]:.3f}"
+            status = f"Images {count}  |  train/box_loss = {self._batch_losses[-1]:.3f}"
             if fitness:
                 status += f"  |  fitness(0.1*mAP50+0.9*mAP50-95) = {fitness[-1]:.3f}"
             self._canvas_status.configure(text=status)
@@ -2720,16 +2722,25 @@ class EasyTrackingGUI(ctk.CTk):
                 (train_losses, "#1f8040", "train"),
                 (val_losses,   "#f0a000", "val"),
             ]
+            # An epoch-level CSV is used only if no live batch data arrived.
+            # Image coordinates require a known per-epoch dataset size.
+            epoch_size = self._train_epoch_images
             self._draw_training_monitor(
                 {
                     "loss_series": series,
                     "loss_title": "Loss",
-                    "loss_x_label": "epoch",
+                    "loss_x_label": "Images" if epoch_size else "epoch",
+                    "loss_x_values": (
+                        [epoch_size * (i + 1) for i in range(len(train_losses))]
+                        if epoch_size else None
+                    ),
                     "fitness": fitness,
                 }
             )
             n = len(train_losses)
-            status = f"Epoch {n}  |  train/box_loss = {train_losses[-1]:.3f}"
+            status = (
+                f"Images {epoch_size * n}" if epoch_size else f"Epoch {n}"
+            ) + f"  |  train/box_loss = {train_losses[-1]:.3f}"
             if val_losses:
                 status += f"  |  val/box_loss = {val_losses[-1]:.3f}"
             if fitness:
@@ -2740,12 +2751,13 @@ class EasyTrackingGUI(ctk.CTk):
             self._canvas_status.configure(text="Waiting for first epoch...")
 
     def _show_refine_training_loss(self) -> None:
-        n = len(self._refine_losses)
+        images = self._refine_loss_images[-1]
         self._draw_loss_chart(
-            self._refine_losses, "Refine Blobs: Training Loss (batch)", "batch", "#4dbbd5"
+            self._refine_losses, "Refine Blobs: Training Loss", "Images",
+            "#4dbbd5", x_values=self._refine_loss_images,
         )
         self._canvas_status.configure(
-            text=f"Batch {n}  |  train/box_loss = {self._refine_losses[-1]:.3f}"
+            text=f"Images {images}  |  train/box_loss = {self._refine_losses[-1]:.3f}"
         )
 
     def _show_embedding_loss(self, session: str) -> None:
