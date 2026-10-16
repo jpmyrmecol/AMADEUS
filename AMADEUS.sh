@@ -272,6 +272,10 @@ if (( status == 43 )); then
     echo "[AMADEUS] Uninstall accepted. A separate terminal will remove AMADEUS."
     exit 0
 fi
+if (( status == 130 )); then
+    echo "[AMADEUS] Interrupted (SIGINT)."
+    exit 130
+fi
 if (( status != 0 )); then
     echo "[ERROR] AMADEUS exited with an error." >&2
     exit "$status"
