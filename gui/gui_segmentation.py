@@ -3080,11 +3080,12 @@ class CrossingReviewApp(ctk.CTk):
                 return candidate
         return ""
 
-    def load_config(self):
-        path = filedialog.askopenfilename(
-            title="Load config",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-        )
+    def load_config(self, path: str = ""):
+        if not path:
+            path = filedialog.askopenfilename(
+                title="Load config",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            )
         if not path:
             return
         try:
@@ -9059,6 +9060,7 @@ def main():
         help="Open a video dropped onto Home using the normal compatibility check.",
     )
     parser.add_argument("--session", default="")
+    parser.add_argument("--load-config", default="", help="Segmentation GUI JSON config to load.")
     parser.add_argument("--no-launch-tracking", action="store_true")
     parser.add_argument("--return-to-easy", action="store_true")
     parser.add_argument("--easy-handoff-file", default="")
@@ -9068,7 +9070,9 @@ def main():
     app = CrossingReviewApp(no_launch_tracking=args.no_launch_tracking or args.return_to_easy)
     app._easy_handoff_file = str(args.easy_handoff_file or "").strip() if args.return_to_easy else ""
     app.session_path = str(args.session or "").strip()
-    if args.dropped_video:
+    if args.load_config:
+        app.after(300, lambda path=args.load_config: app.load_config(path))
+    elif args.dropped_video:
         # Home drops follow the same validation, optional conversion, and
         # existing-config recovery path as selecting a video inside this GUI.
         app.after(300, lambda path=args.dropped_video: app._handle_selected_video(path))
