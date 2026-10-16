@@ -91,7 +91,10 @@ def _simplify_progress_line(line: str) -> str:
         line = line[len("[initial_tracking]"):].strip()
     return line
 # Matches YOLO training tqdm desc: "3/50  3.05G  0.8756  0.7188  1.492 ..."
-_YOLO_LOSS_PAT = re.compile(r'\d+/\d+\s+[\d.]+G?\s+([\d.]+)')
+_YOLO_NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+_YOLO_LOSS_PAT = re.compile(
+    rf"\d+/\d+\s+{_YOLO_NUMBER}G?\s+({_YOLO_NUMBER})(?=\s|$)"
+)
 # Precise epoch image counts and effective batch sizes are emitted by AMADEUS.
 _TRAIN_EPOCH_META_PAT = re.compile(
     r"^\[AMADEUS TRAIN EPOCH\] epoch=(\d+)/(\d+) images=(\d+) batch=(\d+)$"
@@ -101,7 +104,7 @@ _TRAIN_EPOCH_META_PAT = re.compile(
 # is what tells a training epoch apart from every other tqdm bar (dataset
 # scanning, validation, the non-YOLO steps), which keep their existing display.
 _YOLO_TRAIN_DESC_PAT = re.compile(
-    r'^(\d+)/(\d+)\s+([\d.]+)G\s+\S+\s+\S+\s+\S+\s+\d+\s+(\d+)$'
+    rf'^(\d+)/(\d+)\s+({_YOLO_NUMBER})G\s+\S+\s+\S+\s+\S+\s+\d+\s+(\d+)$'
 )
 # Field separator in the training status line; wide enough to read at a glance.
 _TRAIN_FIELD_GAP = "   "
@@ -2635,17 +2638,10 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _show_training_loss(self, session: str) -> None:
         """Plot completed training epochs from CSV plus the active epoch's live Loss."""
-        paths = []
-        for stage in TRAINING_STAGE_DIRS:
-            paths.extend(glob.glob(
-                os.path.join(session, OUTPUT_ROOT_DIR, "*", stage, "dataset*", "results.csv")
-            ))
-        paths = list(dict.fromkeys(paths))
-        try:
-            paths = sorted(paths, key=os.path.getmtime, reverse=True)
-        except Exception:
-            paths = sorted(paths)
-        data = self._read_yolo_results_csv(paths[0]) if paths else {}
+        # The running trainer identifies its own CSV, including resumed
+        # and direction-free runs. Never borrow another experiment's CSV.
+        path = self._train_results_csv
+        data = self._read_yolo_results_csv(path) if path and os.path.isfile(path) else {}
         fitness = data.get("fitness", [])
 
         # The checkpoint defines which epochs are complete. During a recovery,
@@ -2657,7 +2653,9 @@ class EasyTrackingGUI(ctk.CTk):
             if active_epoch == 0 or epoch < active_epoch
         ]
         epoch_size = self._train_epoch_images
+        batch_size = self._train_batch_size
         live = list(zip(self._batch_loss_images, self._batch_losses))
+        live_count = len(live)
         # Rendering at most about 1200 current-epoch points prevents the Tk
         # Canvas from slowing down on exceptionally large training datasets.
         if len(live) > 1200:
@@ -2690,17 +2688,17 @@ class EasyTrackingGUI(ctk.CTk):
                 "fitness": fitness,
             }
         )
-        if self._batch_losses:
+        if live:
             status = (
-                f"Batch {len(self._batch_losses)}  |  Batch size {self._train_batch_size}"
-                f"  |  Images {self._batch_loss_images[-1]}"
-                f"  |  train/box_loss = {self._batch_losses[-1]:.3f}"
+                f"Batch {live_count}  |  Batch size {batch_size}"
+                f"  |  Images {live[-1][0]}"
+                f"  |  train/box_loss = {live[-1][1]:.3f}"
             )
         else:
             latest_epoch, latest_loss = saved[-1]
             status = f"Epoch {latest_epoch}  |  train/box_loss = {latest_loss:.3f}"
-            if self._train_batch_size:
-                status += f"  |  Batch size {self._train_batch_size}"
+            if batch_size:
+                status += f"  |  Batch size {batch_size}"
             if epoch_size:
                 status += f"  |  Images {latest_epoch * epoch_size}"
         if fitness:
@@ -2885,12 +2883,13 @@ class EasyTrackingGUI(ctk.CTk):
         self._train_batch_size = 0
         self._train_epoch_started_at = 0.0
         self._train_processed_images = 0
+        self._train_results_csv = ""
 
     def _set_training_epoch_metadata(
-        self, epoch: int, total_epochs: int, images: int, batch_size: int,
+        self, epoch: int, total_epochs: int, images: int, batch_size: int, received_at: float,
     ) -> None:
         """Use the running trainer's actual dataset size and batch size."""
-        self._train_epoch_started_at = time.monotonic()
+        self._train_epoch_started_at = received_at
         if self._active_step == 7:
             # Keep fine-grained Loss data for the active epoch only. On OOM
             # recovery the callback fires again for the restarted epoch.
@@ -2902,12 +2901,12 @@ class EasyTrackingGUI(ctk.CTk):
         self._train_batch_size = batch_size
         self._train_processed_images = (epoch - 1) * images
         device = f"   {self._training_backend_label}" if self._training_backend_label else ""
-        self._post_ui_event(
-            self._on_tqdm_progress, 0.0,
+        self._on_tqdm_progress(
+            0.0,
             f"Epoch: {epoch}/{total_epochs}{device}   --fps",
         )
 
-    def _training_progress(self, desc: str, batch: int, batch_total: int):
+    def _training_progress(self, desc: str, batch: int, batch_total: int, received_at: float):
         """Display progress through the current epoch and image throughput."""
         match = _YOLO_TRAIN_DESC_PAT.match(desc)
         if match is None:
@@ -2915,7 +2914,7 @@ class EasyTrackingGUI(ctk.CTk):
         epoch = int(match.group(1))
         total_epochs = max(1, int(match.group(2)))
         image_size = int(match.group(4))
-        now = time.monotonic()
+        now = received_at
         if epoch != self._train_epoch or not self._train_epoch_started_at:
             self._train_epoch = epoch
             self._train_epoch_started_at = now
@@ -3835,16 +3834,66 @@ class EasyTrackingGUI(ctk.CTk):
         sys.stdout.flush()
         return len(text)
 
-    def _handle_batch_output_record(self, line: str, state: dict) -> None:
-        line = _ANSI_ESCAPE_RE.sub("", line.rstrip("\r\n"))
+    def _apply_batch_progress_record(self, line: str, received_at: float) -> None:
+        """Apply ordered reader events on Tk's thread using their receipt times."""
         backend_match = re.match(r"\[INFO\] training device: .* \(([^)]+)\)$", line)
         if backend_match:
             self._training_backend_label = backend_match.group(1)
+            return
+
+        run_prefix = "[AMADEUS TRAIN RUN] "
+        if line.startswith(run_prefix):
+            if self._active_step == 7:
+                run = json.loads(line[len(run_prefix):])
+                self._train_results_csv = run["results_csv"]
+                self._train_epoch = int(run["completed_epochs"]) + 1
+                self._batch_losses = []
+                self._batch_loss_images = []
+            return
 
         epoch_meta = _TRAIN_EPOCH_META_PAT.fullmatch(line)
-        if epoch_meta and self._active_step in (2, 7):
-            epoch, total, images, batch_size = map(int, epoch_meta.groups())
-            self._set_training_epoch_metadata(epoch, total, images, batch_size)
+        if epoch_meta:
+            if self._active_step in (2, 7):
+                epoch, total, images, batch_size = map(int, epoch_meta.groups())
+                self._set_training_epoch_metadata(epoch, total, images, batch_size, received_at)
+            return
+
+        match = _TQDM_PAT.search(line)
+        if match is None:
+            return
+        n, tot = int(match.group(1)), int(match.group(2))
+        desc_m = re.search(r"\s(\d+)%\|", line)
+        if desc_m:
+            prefix = line[:desc_m.start()]
+            colon = prefix.rfind(":")
+            desc = prefix[:colon].strip() if colon >= 0 else prefix.strip()
+        else:
+            desc = ""
+        training = (
+            self._training_progress(desc, n, tot, received_at)
+            if self._active_step in (2, 7) else None
+        )
+        if training is not None:
+            pct, text = training
+            self._on_tqdm_progress(pct, text)
+            loss_m = _YOLO_LOSS_PAT.search(line)
+            if loss_m and n > 0:
+                self._record_training_loss(
+                    float(loss_m.group(1)), self._train_processed_images,
+                    refine=self._active_step == 2,
+                )
+        elif not (self._active_step in (2, 7) and self._train_epoch > 0):
+            text = f"{desc}  {n}/{tot}" if desc else f"{n}/{tot}"
+            self._on_tqdm_progress(n / max(tot, 1), text)
+
+
+
+    def _handle_batch_output_record(self, line: str, state: dict) -> None:
+        line = _ANSI_ESCAPE_RE.sub("", line.rstrip("\r\n"))
+        if (line.startswith("[INFO] training device:")
+                or line.startswith("[AMADEUS TRAIN RUN] ")
+                or _TRAIN_EPOCH_META_PAT.fullmatch(line)):
+            self._post_ui_event(self._apply_batch_progress_record, line, time.monotonic())
 
         if line == "":
             if not state.get("last_was_tqdm", False):
@@ -3856,36 +3905,9 @@ class EasyTrackingGUI(ctk.CTk):
         if match:
             state["last_tqdm_len"] = self._echo_tqdm_line(line, int(state.get("last_tqdm_len", 0)))
             state["last_was_tqdm"] = True
-
-            n, tot = int(match.group(1)), int(match.group(2))
-            pct = n / max(tot, 1)
-            desc_m = re.search(r"\s(\d+)%\|", line)
-            if desc_m:
-                prefix = line[:desc_m.start()]
-                colon = prefix.rfind(":")
-                desc = prefix[:colon].strip() if colon >= 0 else prefix.strip()
-            else:
-                desc = ""
-            training = (
-                self._training_progress(desc, n, tot)
-                if self._active_step in (2, 7) else None
-            )
-            if training is not None:
-                pct, text = training
-                self._post_ui_event(self._on_tqdm_progress, pct, text)
-                # A tqdm row can be redrawn multiple times at the same batch.
-                # Replace its loss sample rather than inflating the Images axis.
-                loss_m = _YOLO_LOSS_PAT.search(line)
-                if loss_m and n > 0:
-                    self._record_training_loss(
-                        float(loss_m.group(1)), self._train_processed_images,
-                        refine=self._active_step == 2,
-                    )
-            elif not (self._active_step in (2, 7) and self._train_epoch > 0):
-                # Validation's own 0-100% bar must not overwrite the current
-                # training epoch's progress. Other stages retain their tqdm UI.
-                text = f"{desc}  {n}/{tot}" if desc else f"{n}/{tot}"
-                self._post_ui_event(self._on_tqdm_progress, pct, text)
+            # Stage changes, epoch resets and loss samples share one FIFO queue.
+            # The reader never mutates the training state used by Tk rendering.
+            self._post_ui_event(self._apply_batch_progress_record, line, time.monotonic())
             return
 
         if state.get("last_was_tqdm", False):

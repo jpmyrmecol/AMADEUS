@@ -307,7 +307,11 @@ def _reconcile_results_csv_for_resume(results_csv: str, checkpoint_path: str, ch
     elif first_epoch == 1:
         expected_prefix = list(range(1, completed_epoch + 1))
     else:
-        expected_prefix = []
+        raise RuntimeError(
+            "results.csv must start at epoch 0 or 1. Refusing to modify its history. "
+            f"results_csv={results_csv}, first_epoch={first_epoch}, "
+            f"checkpoint_file={os.path.basename(checkpoint_path)}"
+        )
 
     prefix = parsed[: len(expected_prefix)]
     if [epoch for epoch, _ in prefix] != expected_prefix:
@@ -2542,6 +2546,14 @@ def main(
                         flush=True,
                     )
                 _enable_cudnn_autotuner(device)
+                if os.environ.get("AMADEUS_GUI_PROGRESS_PROTOCOL") == "1":
+                    print(
+                        "[AMADEUS TRAIN RUN] " + json.dumps({
+                            "results_csv": os.path.abspath(trainer.csv),
+                            "completed_epochs": int(trainer.start_epoch),
+                        }),
+                        flush=True,
+                    )
 
             monitor.start()
             ultralytics_logger.addHandler(gpu_fallback_watcher)
