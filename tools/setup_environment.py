@@ -264,7 +264,6 @@ def sync_environment(uv_executable: str, profile: str, python: str) -> None:
     command = [
         uv_executable,
         "sync",
-        "--quiet",
         "--locked",
         "--inexact",
         "--python",
@@ -575,7 +574,6 @@ def install_exact_pytorch_profile(uv_executable: str, profile: str) -> None:
         uv_executable,
         "pip",
         "install",
-        "--quiet",
         "--python",
         str(python),
     ]
