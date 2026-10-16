@@ -573,18 +573,18 @@ def _parse_cuda_device_index(device) -> int | None:
 
 def _query_torch_vram(device) -> tuple[float | None, float | None]:
     runtime = runtime_for(device)
-    if runtime.capabilities.memory_model != "dedicated":
+    if runtime.capabilities.memory_model == "system":
         return None, None
     allocated = runtime.allocated_memory()
-    reserved, _ = runtime.memory()
+    reserved = runtime.memory()[0] if runtime.capabilities.memory_model == "dedicated" else None
     gib = 1024.0 ** 3
     return (None if allocated is None else allocated / gib,
             None if reserved is None else reserved / gib)
 
 
 
-def _query_cpu_memory() -> tuple[float | None, float | None, float | None, float | None, float | None]:
-    """Return (cpu_percent, ram_used_gib, ram_total_gib, proc_rss_gib, child_rss_gib)."""
+def _query_cpu_memory() -> tuple[float | None, float | None, float | None, float | None, float | None, float | None]:
+    """Return CPU, system RAM, process RSS and used system swap in GiB."""
     try:
         import psutil
 
@@ -592,6 +592,7 @@ def _query_cpu_memory() -> tuple[float | None, float | None, float | None, float
         vm = psutil.virtual_memory()
         ram_used_gib = (vm.total - vm.available) / (1024.0 ** 3)
         ram_total_gib = vm.total / (1024.0 ** 3)
+        swap_used_gib = psutil.swap_memory().used / (1024.0 ** 3)
 
         proc = psutil.Process(os.getpid())
         proc_rss = proc.memory_info().rss
@@ -601,9 +602,10 @@ def _query_cpu_memory() -> tuple[float | None, float | None, float | None, float
                 child_rss += child.memory_info().rss
             except Exception:
                 pass
-        return cpu_percent, ram_used_gib, ram_total_gib, proc_rss / (1024.0 ** 3), child_rss / (1024.0 ** 3)
+        return (cpu_percent, ram_used_gib, ram_total_gib,
+                proc_rss / (1024.0 ** 3), child_rss / (1024.0 ** 3), swap_used_gib)
     except Exception:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
 
 def _query_ram_fraction() -> float | None:
@@ -1484,7 +1486,7 @@ class _PerformanceMonitor:
             next_perf_log = now + self.interval
             gpu_util, vram_used, vram_total, _vram_frac, wddm_non_local = self.sampler.snapshot()
             torch_alloc, torch_reserved = _query_torch_vram(self.device)
-            cpu_percent, ram_used, ram_total, proc_rss, child_rss = _query_cpu_memory()
+            cpu_percent, ram_used, ram_total, proc_rss, child_rss, swap_used = _query_cpu_memory()
             bottleneck = _infer_bottleneck(
                 gpu_util,
                 vram_used,
@@ -1493,21 +1495,31 @@ class _PerformanceMonitor:
                 ram_used,
                 ram_total,
                 child_rss,
-                self.workers,
+                self.effective_workers,
             )
             ratio = (
                 self._last_rolling_throughput / self.baseline_throughput
                 if self._last_rolling_throughput is not None and self.baseline_throughput
                 else None
             )
+            device_memory = (
+                f"mps_alloc={_fmt_gib(torch_alloc)} "
+                f"mps_driver={_fmt_gib(vram_used)} "
+                f"mps_recommended={_fmt_gib(vram_total)}"
+                if runtime_for(self.device).capabilities.memory_model == "unified"
+                else (
+                    f"gpu={_fmt_pct(gpu_util)} "
+                    f"vram={_fmt_gib(vram_used)}/{_fmt_gib(vram_total)} "
+                    f"torch_alloc={_fmt_gib(torch_alloc)} torch_reserved={_fmt_gib(torch_reserved)} "
+                    f"wddm_non_local={_fmt_gib(wddm_non_local)}"
+                )
+            )
             print(
                 "[PERF] "
-                f"gpu={_fmt_pct(gpu_util)} "
-                f"vram={_fmt_gib(vram_used)}/{_fmt_gib(vram_total)} "
-                f"torch_alloc={_fmt_gib(torch_alloc)} torch_reserved={_fmt_gib(torch_reserved)} "
-                f"wddm_non_local={_fmt_gib(wddm_non_local)} "
+                f"{device_memory} "
                 f"cpu={_fmt_pct(cpu_percent)} "
                 f"ram={_fmt_gib(ram_used)}/{_fmt_gib(ram_total)} "
+                f"swap_used={_fmt_gib(swap_used)} "
                 f"proc_ram={_fmt_gib(proc_rss)} child_ram={_fmt_gib(child_rss)} "
                 f"throughput={_fmt_rate(self._last_rolling_throughput)} "
                 f"baseline={_fmt_rate(self.baseline_throughput)} "
@@ -2355,6 +2367,25 @@ def main(
                 if monitor.collapsed():
                     raise _TrainingAborted("lower_batch", monitor.collapsed_reason())
 
+            epoch_started: float | None = None
+
+            def _on_train_epoch_start(trainer):
+                nonlocal epoch_started
+                epoch_started = time.monotonic()
+
+            def _on_train_epoch_end(trainer):
+                if epoch_started is None:
+                    return
+                seconds = time.monotonic() - epoch_started
+                images = len(trainer.train_loader.dataset)
+                rate = images / seconds if seconds > 0 else None
+                print(
+                    f"[TRAIN EPOCH] epoch={trainer.epoch + 1}/{trainer.epochs} "
+                    f"images={images} train_time={seconds:.1f}s "
+                    f"throughput={_fmt_rate(rate)}",
+                    flush=True,
+                )
+
             def _on_fit_epoch_end(trainer):
                 # Runs after validation and checkpoint save, but before the
                 # next epoch. Finalize the baseline here so the in-flight
@@ -2418,6 +2449,8 @@ def main(
                 if resume_checkpoint:
                     train_kwargs["resume"] = resume_checkpoint
                 model.add_callback("on_train_start", _on_train_start)
+                model.add_callback("on_train_epoch_start", _on_train_epoch_start)
+                model.add_callback("on_train_epoch_end", _on_train_epoch_end)
                 model.add_callback("on_train_batch_start", _on_batch_start)
                 model.add_callback("on_train_batch_end", _on_batch_end)
                 model.add_callback("on_fit_epoch_end", _on_fit_epoch_end)
