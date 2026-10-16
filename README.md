@@ -44,8 +44,6 @@ After setup, use the desktop shortcut on Windows or run `amadeus` or `amade` in 
 
 Use **Advanced Tracking** to configure individual stages and parameters, or **Multi Config Batch** to run several saved configurations.
 
-Home panels also accept drag-and-drop inputs: drop an AMADEUS tracking `config.yaml` on **Easy Tracking**, **Advanced Tracking**, **Refinement**, **Multi Config Batch**, or **Colab**; drop `segmentation_gui_config.json` on **Segmentation**; or drop a `*_cropping_trimming_config.yaml` file on **Cropping & Trimming**. **Multi Config Batch** accepts several YAML files at once and adds them to the queue without running them. Video drops remain supported on the original video-enabled panels.
-
 ## Outputs and recording conditions
 
 The standard output includes individual identity, OBB center and dimensions, and head direction in degrees over time. Front and rear keypoints are derived from OBB geometry; they are not directly detected anatomical landmarks. In the final CSV, columns named `heading` store head direction. See the [output format](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-12) for coordinates, angles, and processing stages.
