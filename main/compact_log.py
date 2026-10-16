@@ -67,16 +67,13 @@ class CompactChildOutput:
             return None
 
         epoch_match = _EPOCH_PREFIX_RE.match(line)
-        if epoch_match is not None:
-            epoch = int(epoch_match.group("epoch"))
-            epochs = int(epoch_match.group("epochs"))
+        if epoch_match is not None and self.training:
             # The trainer emits one [TRAIN EPOCH] line with throughput and
             # aggregated memory statistics. Do not duplicate it with tqdm.
             return (None, pct, None)
 
         # During training, Ultralytics also shows validation and data-loader
-        # bars.  The completed epoch line above is the useful concise status;
-        # keeping the nested bars would make the training log longer again.
+        # bars. Keep only the explicit summary generated at epoch completion.
         if self.training:
             return (None, pct, None)
 
