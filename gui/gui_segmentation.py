@@ -43,9 +43,11 @@ except Exception as exc:
 try:
     from .project_paths import PROJECT_ROOT, ensure_import_paths, gui_asset, gui_script
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from .dark_widgets import dark_spinbox
 except ImportError:  # Preserve direct execution with: python gui/gui_segmentation.py
     from project_paths import PROJECT_ROOT, ensure_import_paths, gui_asset, gui_script
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from dark_widgets import dark_spinbox
 
 ensure_import_paths(PROJECT_ROOT)
 from gui.color import (
@@ -1846,7 +1848,7 @@ class CrossingReviewApp(ctk.CTk):
         ctk.CTkButton(nav, text=">", width=40, command=lambda: self.step_frame(1)).pack(side="left", padx=4)
         ctk.CTkButton(nav, text=">|", width=40, command=lambda: self.set_frame(self.frame_count - 1)).pack(side="left", padx=(0, 12))
         ctk.CTkLabel(nav, text="frame").pack(side="left")
-        self.frame_spin = tk.Spinbox(nav, width=10, textvariable=self.frame_var, command=self.on_frame_spin, **_SPIN_CFG)
+        self.frame_spin = dark_spinbox(nav, width=10, textvariable=self.frame_var, command=self.on_frame_spin, **_SPIN_CFG)
         self.frame_spin.pack(side="left", padx=(6, 12))
         self.frame_spin.bind("<Return>", self.on_frame_entry_commit, add="+")
         self.frame_spin.bind("<KP_Enter>", self.on_frame_entry_commit, add="+")
@@ -3326,7 +3328,7 @@ class CrossingReviewApp(ctk.CTk):
             row = tk.Frame(parent, bg="#f3f4f6")
             row.pack(fill="x", pady=2)
             tk.Label(row, text=label, width=16, anchor="w", bg=_POPUP_BG, fg=_POPUP_FG).pack(side="left")
-            sp = tk.Spinbox(row, from_=from_, to=max(int(to_ if to_ is not None else last), 1), increment=1, width=12, **_POPUP_SPIN_CFG)
+            sp = dark_spinbox(row, from_=from_, to=max(int(to_ if to_ is not None else last), 1), increment=1, width=12, **_POPUP_SPIN_CFG)
             sp.delete(0, tk.END)
             sp.insert(0, str(int(initial)))
             sp.pack(side="left")
@@ -3418,7 +3420,7 @@ class CrossingReviewApp(ctk.CTk):
         default_value = float(var.get()) if is_float else int(var.get())
         state = {"updating": False}
 
-        spinbox = tk.Spinbox(row, from_=lo, to=hi, increment=resolution, width=8, **_SPIN_CFG)
+        spinbox = dark_spinbox(row, from_=lo, to=hi, increment=resolution, width=8, **_SPIN_CFG)
 
         def clamp_value(v):
             lo, hi = float(spinbox.cget("from")), float(spinbox.cget("to"))
@@ -3564,7 +3566,7 @@ class CrossingReviewApp(ctk.CTk):
             side = "w" if index == 0 else "e"
             ctk.CTkLabel(row, text=label).grid(row=0, column=index, sticky=side)
             entry = tk.StringVar(value=str(int(variables[index].get())))
-            spin = tk.Spinbox(
+            spin = dark_spinbox(
                 row, from_=0, to=sys.maxsize, increment=1, width=12,
                 textvariable=entry, validate="key", validatecommand=validate,
                 command=lambda i=index: self._commit_absolute_entry(i, result=result),
@@ -3790,7 +3792,7 @@ class CrossingReviewApp(ctk.CTk):
                 row=0, column=index, sticky=side,
             )
             entry_var = tk.StringVar()
-            spin = tk.Spinbox(
+            spin = dark_spinbox(
                 self.area_iqr_bounds_row,
                 from_=-1.0, to=AREA_IQR_MULTIPLIER_MAX, increment=0.1,
                 width=10, format="%.1f",
@@ -8841,7 +8843,7 @@ class CrossingReviewApp(ctk.CTk):
             row = tk.Frame(range_frame, bg="#f3f4f6")
             row.pack(fill="x", pady=2)
             tk.Label(row, text=label, width=12, anchor="w", bg=_POPUP_BG, fg=_POPUP_FG).pack(side="left")
-            sp = tk.Spinbox(row, from_=0, to=last, increment=1, width=12, **_POPUP_SPIN_CFG)
+            sp = dark_spinbox(row, from_=0, to=last, increment=1, width=12, **_POPUP_SPIN_CFG)
             sp.delete(0, tk.END)
             sp.insert(0, str(int(initial)))
             sp.pack(side="left")
