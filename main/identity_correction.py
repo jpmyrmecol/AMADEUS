@@ -1351,9 +1351,10 @@ class _PairSampler:
         # the embedding is even remotely converged; from 10, the same bump
         # is a ~10% nudge, ramping in the hard-pair bias more gradually.
         self.pos_scores = np.full(n, 10.0, dtype=np.float64)
-        self.neg_scores = np.full((n, n), 10.0, dtype=np.float64)
         self._fi_sizes = np.array([len(f.frames) for f in fragments], dtype=np.float64)
         self._negative_candidates = self._build_negative_candidates()
+        # Only eligible unordered pairs need a score.
+        self.neg_scores = np.full(len(self._negative_candidates), 10.0, dtype=np.float64)
 
         # [D] Cache eligible index lists and size weights; avoids per-batch rebuild.
         # crop_indices are populated by _prepare_frame_to_crops before __init__ is called.
@@ -1368,12 +1369,14 @@ class _PairSampler:
             _neg_idx = np.array(self._negative_candidates, dtype=np.intp)
             self._neg_fi_idx: np.ndarray = _neg_idx[:, 0]
             self._neg_fj_idx: np.ndarray = _neg_idx[:, 1]
+            self._neg_pair_keys = self._neg_fi_idx * n + self._neg_fj_idx
             self._neg_size_w: np.ndarray = (
                 self._fi_sizes[self._neg_fi_idx] + self._fi_sizes[self._neg_fj_idx]
             )
         else:
             self._neg_fi_idx = np.empty(0, dtype=np.intp)
             self._neg_fj_idx = np.empty(0, dtype=np.intp)
+            self._neg_pair_keys = np.empty(0, dtype=np.intp)
             self._neg_size_w = np.empty(0, dtype=np.float64)
 
     @staticmethod
@@ -1407,18 +1410,32 @@ class _PairSampler:
         return weights / weights.sum()
 
     def _build_negative_candidates(self) -> list[tuple[int, int]]:
+        """Find overlapping fragments and preserve the original pair order."""
+        import heapq
+
+        ordered = sorted(
+            (int(frag.frames[0]), i)
+            for i, frag in enumerate(self.fragments)
+            if frag.crop_indices and frag.frames
+        )
+        active: dict[int, Fragment] = {}
+        endings: list[tuple[int, int]] = []
         candidates: list[tuple[int, int]] = []
-        for i, frag_i in enumerate(self.fragments):
-            if not frag_i.crop_indices:
-                continue
-            for j in range(i + 1, len(self.fragments)):
-                frag_j = self.fragments[j]
+        for start, i in ordered:
+            while endings and endings[0][0] < start:
+                _, expired = heapq.heappop(endings)
+                del active[expired]
+            frag_i = self.fragments[i]
+            for j, frag_j in active.items():
                 if (
                     frag_i.obj_id != frag_j.obj_id
-                    and frag_j.crop_indices
                     and self._temporally_overlap(frag_i, frag_j)
                 ):
-                    candidates.append((i, j))
+                    candidates.append((min(i, j), max(i, j)))
+            active[i] = frag_i
+            heapq.heappush(endings, (int(frag_i.frames[-1]), i))
+        # Sampling probabilities and RNG consumption depend on this order.
+        candidates.sort()
         return candidates
 
     def _decay(self) -> None:
@@ -1426,8 +1443,6 @@ class _PairSampler:
         self.neg_scores *= _SCORE_DECAY
 
     def update_scores(self, pairs: list[_SampledPair], losses: torch.Tensor) -> None:
-        # [B] Vectorised score updates via np.add.at (handles duplicate indices
-        # correctly, identical to sequential += loop, bit-exact for float64 + 1.0).
         loss_values = losses.detach().cpu().numpy()
         pos_fi: list[int] = []
         neg_fi: list[int] = []
@@ -1443,8 +1458,17 @@ class _PairSampler:
         if pos_fi:
             np.add.at(self.pos_scores, pos_fi, _SCORE_BUMP)
         if neg_fi:
-            np.add.at(self.neg_scores, (neg_fi, neg_fj), _SCORE_BUMP)
-            np.add.at(self.neg_scores, (neg_fj, neg_fi), _SCORE_BUMP)
+            left = np.minimum(neg_fi, neg_fj)
+            right = np.maximum(neg_fi, neg_fj)
+            keys = left * len(self.fragments) + right
+            indices = np.searchsorted(self._neg_pair_keys, keys)
+            if np.any(indices >= len(self._neg_pair_keys)) or not np.array_equal(
+                self._neg_pair_keys[indices], keys,
+            ):
+                raise ValueError('Score update contains an ineligible negative pair.')
+            # Each unordered pair had equal scores in both dense-matrix cells.
+            # Store it once, retaining duplicate updates and float64 arithmetic.
+            np.add.at(self.neg_scores, indices, _SCORE_BUMP)
         self._decay()
 
     def sample_positive(self, batch_size: int) -> list[_SampledPair]:
@@ -1473,7 +1497,7 @@ class _PairSampler:
             return []
         frags = self.fragments
         # score_w order matches original list comprehension over eligible.
-        score_w = self.neg_scores[self._neg_fi_idx, self._neg_fj_idx]
+        score_w = self.neg_scores
         pair_w = self._blend_weights(score_w, self._neg_size_w)
         chosen = self.np_rng.choice(len(eligible), size=batch_size, p=pair_w)
         pairs: list[_SampledPair] = []

@@ -1219,23 +1219,50 @@ def _select_initial_assignment(
     detection_frames: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]],
     num_objects: int,
 ) -> tuple[int, np.ndarray]:
-    """Return the first S0 with enough score>=0.5 YOLO detections."""
+    """Prefer the first frame meeting 0.5, otherwise maximize the Nth score.
+
+    Lowering the initialization threshold only uses detections already retained
+    by the detector. It cannot recover boxes removed during detection.
+    Equal thresholds use the earliest frame, with stable score ordering for IDs.
+    """
     if int(num_objects) <= 0:
         raise ValueError('num_objects must be positive.')
+    best_frame: int | None = None
+    best_order: np.ndarray | None = None
+    best_threshold = -float('inf')
+    max_count = 0
     for abs_fid in sorted(int(f) for f in detection_frames):
-        yolo_obbs, yolo_scores, _ = detection_frames[abs_fid]
+        _, yolo_scores, _ = detection_frames[abs_fid]
         yolo_scores = np.asarray(yolo_scores, dtype=float)
-        eligible = np.flatnonzero(yolo_scores >= INITIAL_CONFIDENCE_THRESHOLD)
+        eligible = np.flatnonzero(np.isfinite(yolo_scores))
+        max_count = max(max_count, len(eligible))
         if len(eligible) < num_objects:
             continue
         ranked_keep = eligible[np.argsort(-yolo_scores[eligible], kind='stable')]
         selected_order = np.asarray(ranked_keep[:num_objects], dtype=int)
-        assert len(selected_order) == num_objects
-        assert np.array_equal(selected_order, ranked_keep[:num_objects])
-        return int(abs_fid), selected_order
+        threshold = float(yolo_scores[selected_order[-1]])
+        if threshold >= INITIAL_CONFIDENCE_THRESHOLD:
+            return int(abs_fid), selected_order
+        if threshold > best_threshold:
+            best_frame = int(abs_fid)
+            best_order = selected_order
+            best_threshold = threshold
+
+    if best_frame is not None and best_order is not None:
+        print(
+            f'[WARN] No initial frame contains {num_objects} detections at '
+            f'confidence >= {INITIAL_CONFIDENCE_THRESHOLD:g}; '
+            f'initializing at frame {best_frame} with confidence >= '
+            f'{best_threshold:.8g} (the highest threshold retaining '
+            f'{num_objects} detections in any frame).',
+            flush=True,
+        )
+        return best_frame, best_order
     raise RuntimeError(
-        f'Could not find an initial frame with at least {num_objects} detections '
-        f'after confidence >= {INITIAL_CONFIDENCE_THRESHOLD:g} filtering.'
+        f'Could not find an initial frame with at least {num_objects} '
+        f'finite-confidence detections after detection filtering '
+        f'(maximum available: {max_count}). '
+        'Check NUM_OBJECTS and the detection settings.'
     )
 
 
