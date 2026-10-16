@@ -6603,6 +6603,7 @@ class CrossingReviewApp(ctk.CTk):
                 stack = self._parallel_read_background_stack(idx.tolist(), on_progress=_report)
                 if self._progress_cancel or stack is None:
                     return False
+                print(f"[Segmentation] Background extraction: decoded {total} frames", flush=True)
                 frames_complete = f"Frames loaded: {total}/{total} (100%)"
                 self._set_progress_popup(
                     f"{frames_complete}\nPreparing background calculation...",
@@ -6630,6 +6631,7 @@ class CrossingReviewApp(ctk.CTk):
                     )
                     if not cv2.imwrite(method_path, background):
                         raise RuntimeError(f"Failed to save background: {method_path}")
+                    print(f"[Segmentation] Background extraction: saved {method_path}", flush=True)
                     computed[method] = background
                 computed_box[0] = computed
                 self._set_progress_popup(
@@ -6661,6 +6663,7 @@ class CrossingReviewApp(ctk.CTk):
                     self._write_background_cache_metadata(sample_count, idx, existing_methods | set(computed.keys()))
                     active_method = selected_method
                     shutil.copyfile(self._method_background_path(active_method), self._default_background_path())
+                    print("[Segmentation] Background extraction: background cache finalized", flush=True)
                     self.background_bgr = background
                     self.active_background_method = active_method
                 except Exception as exc:
