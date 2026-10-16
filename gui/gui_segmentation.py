@@ -44,10 +44,12 @@ try:
     from .project_paths import PROJECT_ROOT, ensure_import_paths, gui_asset, gui_script
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from .dark_widgets import dark_spinbox
+    from .save_shortcut import bind_save_shortcut
 except ImportError:  # Preserve direct execution with: python gui/gui_segmentation.py
     from project_paths import PROJECT_ROOT, ensure_import_paths, gui_asset, gui_script
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
     from dark_widgets import dark_spinbox
+    from save_shortcut import bind_save_shortcut
 
 ensure_import_paths(PROJECT_ROOT)
 from gui.color import (
@@ -1747,6 +1749,7 @@ class CrossingReviewApp(ctk.CTk):
         self.bind_all("<Map>", self._tag_numeric_click_target, add="+")
         self._build_ui()
         self._bind_events()
+        bind_save_shortcut(self, self._save_config_shortcut)
         self._bind_traces()
         self._refresh_guidance_ui()
         _start_maximized(self)
@@ -3020,6 +3023,14 @@ class CrossingReviewApp(ctk.CTk):
         path = self.config_path or self._default_config_path()
         self._write_config_to_path(path)
         return path
+
+    def _save_config_shortcut(self):
+        # Clicking Save config commits the active numeric entry first. Do the
+        # same when a keyboard shortcut is used without changing focus.
+        commit = self._numeric_entry_commits.get(self.focus_get())
+        if commit is not None:
+            commit()
+        self.save_config()
 
     def save_config(self):
         """Save config and confirm success with a dialog only after the write completes."""
