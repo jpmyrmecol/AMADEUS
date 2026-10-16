@@ -25,7 +25,7 @@ Download and run the [installer for your operating system](https://amadeus.jpmyr
 
 AMADEUS supports NVIDIA GPUs on Windows and Linux, Apple Silicon on macOS, and some AMD GPUs via ROCm. For NVIDIA and AMD GPUs, 8 GB or more of VRAM is recommended; memory requirements depend on the video and animal count. Operation has also been confirmed on an NVIDIA laptop GPU with 4 GB of VRAM.
 
-You can also install using Git or a ZIP download. See the [Git and ZIP instructions](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-1). A Git clone creates a new `AMADEUS` folder in the current directory and cannot overwrite an existing folder. For an existing installation, use the downloadable OS installer or the in-app Update button. For ZIP installation, choose **Code → Download ZIP** on [GitHub](https://github.com/jpmyrmecol/AMADEUS) and extract the archive.
+You can also install using Git or a ZIP download. See the [Git and ZIP instructions](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-1).
 
 | Operating system | Launcher |
 | --- | --- |
@@ -33,9 +33,7 @@ You can also install using Git or a ZIP download. See the [Git and ZIP instructi
 | macOS on Apple Silicon | Open `AMADEUS.command` |
 | Linux / WSL2 | Run `bash AMADEUS.sh` |
 
-After setup, use the desktop shortcut on Windows or run `amadeus` in a terminal. For platform-specific instructions and troubleshooting, see the [manual](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-1).
-
-To update, select **Update** on the Home screen.
+After setup, use the desktop shortcut on Windows or run `amadeus` or `amade` in a terminal.
 
 ## Run tracking
 
@@ -47,12 +45,6 @@ To update, select **Update** on the Home screen.
 Use **Advanced Tracking** to configure individual stages and parameters, or **Multi Config Batch** to run several saved configurations.
 
 Home panels also accept drag-and-drop inputs: drop an AMADEUS tracking `config.yaml` on **Easy Tracking**, **Advanced Tracking**, **Refinement**, **Multi Config Batch**, or **Colab**; drop `segmentation_gui_config.json` on **Segmentation**; or drop a `*_cropping_trimming_config.yaml` file on **Cropping & Trimming**. **Multi Config Batch** accepts several YAML files at once and adds them to the queue without running them. Video drops remain supported on the original video-enabled panels.
-
-## Add-ons
-
-Select **Add-ons** above **Update** on Home to install an independent application from a ZIP using drag and drop or **Browse**. Installed add-ons appear on the right with their version, declared OS support, and **Update** / **Uninstall** menus. Drag the panels to reorder them; order is saved. Developers can optionally enable Home file/video drops using `drop_extensions` in `addon.json`. Their environments and settings remain separate from AMADEUS's Python environment and are retained across AMADEUS updates. On Linux, they reside under the same AMADEUS data directory as a standard installation. Uninstalling an individual add-on deletes its complete folder, including settings, data and logs; updating an add-on preserves these files. Uninstalling AMADEUS also removes all installed add-ons, including their saved settings, data and logs.
-
-Only install add-ons from developers you trust. They are not sandboxed. See the [add-on guide](tools/ADDONS.md) and [official template](https://github.com/jpmyrmecol/AMADEUS-Addon-Template) for the file interface, package format, licensing boundary and developer instructions.
 
 ## Outputs and recording conditions
 
