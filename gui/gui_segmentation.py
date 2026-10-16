@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import threading
+import traceback
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
@@ -1684,6 +1685,9 @@ class CrossingReviewApp(ctk.CTk):
         self.progress_popup = None
         self.progress_bar = None
         self._progress_indeterminate = False
+        self._progress_busy = False
+        self._progress_poll_job: Optional[str] = None
+        self._progress_close_requested = False
         self.progress_label_var = tk.StringVar(value="")
         self.progress_value_var = tk.DoubleVar(value=0.0)
         self._progress_cancel = False
@@ -4462,6 +4466,10 @@ class CrossingReviewApp(ctk.CTk):
     def on_close(self):
         if self._closing:
             return
+        if self._progress_busy:
+            self._progress_close_requested = True
+            self._request_progress_cancel()
+            return
         self._closing = True
         for glow in self._guidance_glows.values():
             glow.stop()
@@ -5818,7 +5826,7 @@ class CrossingReviewApp(ctk.CTk):
         persistent-static and the temporal-merge filters need data. A
         temporal parameter change only re-evaluates the stored graph.
         """
-        if self.reader is None or self.progress_popup is not None:
+        if self.reader is None or self._progress_busy:
             return
         static_on = bool(self.static_exclusion_enabled_var.get())
         temporal_on = bool(self.temporal_merge_enabled_var.get())
@@ -5929,55 +5937,57 @@ class CrossingReviewApp(ctk.CTk):
                 error[0] = exc
                 return False
 
-        ok = self._with_progress_popup(title, "Searching...", work)
-        if not ok:
-            if run_static:
-                self.static_search_status_var.set("Search cancelled or failed — press Search again")
-            if run_temporal:
-                self.temporal_search_status_var.set("Search cancelled or failed — press Search again")
-            self._refresh_search_glows()
-            if error[0] is not None:
-                messagebox.showerror(title, str(error[0]))
-            return
+        def _finish_search(ok):
+            if not ok:
+                if run_static:
+                    self.static_search_status_var.set("Search cancelled or failed — press Search again")
+                if run_temporal:
+                    self.temporal_search_status_var.set("Search cancelled or failed — press Search again")
+                self._refresh_search_glows()
+                if error[0] is not None:
+                    messagebox.showerror(title, str(error[0]))
+                return
 
-        if "static" in outcome:
-            if static_key != self._static_search_key():
-                self.static_search_status_var.set("Settings changed — press Search again")
+            if "static" in outcome:
+                if static_key != self._static_search_key():
+                    self.static_search_status_var.set("Settings changed — press Search again")
+                else:
+                    excluded, digests, count, windows = outcome["static"]
+                    self._static_exclusions = excluded
+                    self._static_digests = digests
+                    self._static_scan_start = start
+                    self._static_search_signature = static_key
+                    self.static_search_status_var.set(
+                        f"Found {count} blob occurrences in {windows} qualifying windows.")
+            if "temporal" in outcome:
+                graph, result = outcome["temporal"]
+                if geometry_key != self._temporal_geometry_key():
+                    self._temporal_search = None
+                    self.temporal_search_status_var.set("Settings changed — press Search again")
+                else:
+                    self._temporal_search = _TemporalSearchState(
+                        geometry_key=geometry_key, kinds_key=kinds_key, eval_key=eval_key,
+                        reclassifiable=reclassifiable, start=start, end=end,
+                        graph=graph, result=result, params=params,
+                    )
+                    self._update_temporal_status()
+                    try:
+                        self._save_config_to_default_path()
+                        self._set_progress_popup("Saving temporal Search cache...", None)
+                        self._save_temporal_search_cache()
+                    except (OSError, ValueError, TypeError) as exc:
+                        self.set_status(f"Temporal Search completed but could not save cache: {exc}")
+            self._refresh_search_glows()
+            self.redraw_current_frame()
+            if "temporal" in outcome and not self.outlier_section_revealed:
+                self._set_workflow_stage("analysis")
+            if self._temporal_search is not None and "temporal" in outcome:
+                self.set_status("Temporal merges: " + self._temporal_summary_text(
+                    self._temporal_search.result, detailed=True), auto_clear=False)
             else:
-                excluded, digests, count, windows = outcome["static"]
-                self._static_exclusions = excluded
-                self._static_digests = digests
-                self._static_scan_start = start
-                self._static_search_signature = static_key
-                self.static_search_status_var.set(
-                    f"Found {count} blob occurrences in {windows} qualifying windows.")
-        if "temporal" in outcome:
-            graph, result = outcome["temporal"]
-            if geometry_key != self._temporal_geometry_key():
-                self._temporal_search = None
-                self.temporal_search_status_var.set("Settings changed — press Search again")
-            else:
-                self._temporal_search = _TemporalSearchState(
-                    geometry_key=geometry_key, kinds_key=kinds_key, eval_key=eval_key,
-                    reclassifiable=reclassifiable, start=start, end=end,
-                    graph=graph, result=result, params=params,
-                )
-                self._update_temporal_status()
-                try:
-                    self._save_config_to_default_path()
-                    self._set_progress_popup("Saving temporal Search cache...", None)
-                    self._save_temporal_search_cache()
-                except (OSError, ValueError, TypeError) as exc:
-                    self.set_status(f"Temporal Search completed but could not save cache: {exc}")
-        self._refresh_search_glows()
-        self.redraw_current_frame()
-        if "temporal" in outcome and not self.outlier_section_revealed:
-            self._set_workflow_stage("analysis")
-        if self._temporal_search is not None and "temporal" in outcome:
-            self.set_status("Temporal merges: " + self._temporal_summary_text(
-                self._temporal_search.result, detailed=True), auto_clear=False)
-        else:
-            self.set_status("Optional filter search completed")
+                self.set_status("Optional filter search completed")
+
+        self._with_progress_popup(title, "Searching...", work, _finish_search)
 
     def _toggle_single_blob_smoothing_params(self):
         if self.single_blob_smoothing_enabled_var.get():
@@ -6506,15 +6516,23 @@ class CrossingReviewApp(ctk.CTk):
     def compute_background(self):
         if self._background_building:
             return
-        # Frame preview prefetch uses another decoder.  Stop feeding it new
-        # work before opening the background decoders, especially for 4K H.264.
+        if self._progress_busy:
+            self._schedule_background_rebuild(delay_ms=300)
+            return
+        # Pause speculative preview decoding before opening background readers.
         self._prefetch_cancel.set()
+        if self.prefetch_after_id is not None:
+            self.after_cancel(self.prefetch_after_id)
+            self.prefetch_after_id = None
         if self.reader is not None:
             self.reader.clear_cache()
         self._background_building = True
         try:
-            return self._compute_background_impl()
-        finally:
+            started = self._compute_background_impl()
+        except Exception:
+            self._background_building = False
+            raise
+        if not started:
             self._background_building = False
 
     def _compute_background_impl(self):
@@ -6623,39 +6641,45 @@ class CrossingReviewApp(ctk.CTk):
                 return False
             return True
 
-        ok = self._with_progress_popup("Background extraction", f"Preparing {method_label} background...", work)
-        if not ok:
-            if error_box[0] is not None:
-                messagebox.showerror("Error", str(error_box[0]))
-            self.set_status("", auto_clear=False)
-            return
+        def _finish_background(ok):
+            try:
+                if not ok:
+                    if error_box[0] is not None:
+                        messagebox.showerror("Error", str(error_box[0]))
+                    self.set_status("", auto_clear=False)
+                    return
 
-        try:
-            computed = computed_box[0]
-            background = computed.get(selected_method)
-            if background is None and self.background_bgr is not None and self.active_background_method == selected_method:
-                background = self.background_bgr
-            if background is None:
-                background = cv2.imread(self._method_background_path(selected_method), cv2.IMREAD_COLOR)
-            if background is None:
-                raise RuntimeError(f"Failed to compute background: {selected_method}")
-            self._write_background_cache_metadata(sample_count, idx, existing_methods | set(computed.keys()))
-            active_method = selected_method
-            shutil.copyfile(self._method_background_path(active_method), self._default_background_path())
-            self.background_bgr = background
-            self.active_background_method = active_method
-        except Exception as exc:
-            messagebox.showerror("Error", str(exc))
-            self.set_status("", auto_clear=False)
-            return
+                try:
+                    computed = computed_box[0]
+                    background = computed.get(selected_method)
+                    if background is None and self.background_bgr is not None and self.active_background_method == selected_method:
+                        background = self.background_bgr
+                    if background is None:
+                        background = cv2.imread(self._method_background_path(selected_method), cv2.IMREAD_COLOR)
+                    if background is None:
+                        raise RuntimeError(f"Failed to compute background: {selected_method}")
+                    self._write_background_cache_metadata(sample_count, idx, existing_methods | set(computed.keys()))
+                    active_method = selected_method
+                    shutil.copyfile(self._method_background_path(active_method), self._default_background_path())
+                    self.background_bgr = background
+                    self.active_background_method = active_method
+                except Exception as exc:
+                    messagebox.showerror("Error", str(exc))
+                    self.set_status("", auto_clear=False)
+                    return
 
-        self._invalidate_analysis_for_background_change()
-        self.background_ready_var.set(f"background: ready ({active_method}, samples={sample_count})")
-        if self.bg_preview_button is not None:
-            self.bg_preview_button.configure(state="normal")
-        self._set_workflow_stage("analysis")
-        self.redraw_current_frame()
-        self.set_status(f"Background computed and cached: {active_method}")
+                self._invalidate_analysis_for_background_change()
+                self.background_ready_var.set(f"background: ready ({active_method}, samples={sample_count})")
+                if self.bg_preview_button is not None:
+                    self.bg_preview_button.configure(state="normal")
+                self._set_workflow_stage("analysis")
+                self.redraw_current_frame()
+                self.set_status(f"Background computed and cached: {active_method}")
+            finally:
+                self._background_building = False
+
+        self._with_progress_popup("Background extraction", f"Preparing {method_label} background...", work, _finish_background)
+        return True
 
     def _segment_frame(self, frame_bgr: np.ndarray, frame_idx: int) -> tuple[np.ndarray, list[BlobMetrics]]:
         key = (frame_idx, self._segmentation_signature())
@@ -6987,7 +7011,7 @@ class CrossingReviewApp(ctk.CTk):
         return np.linspace(start, end, sample_count, dtype=int).tolist()
 
     def _run_analysis(self):
-        if self.reader is None:
+        if self.reader is None or self._progress_busy:
             return
         # Temporal merging is the preceding step when enabled. Require its
         # current graph before fitting area outlier limits from samples.
@@ -7119,42 +7143,44 @@ class CrossingReviewApp(ctk.CTk):
             )
             return True
 
-        ok = self._with_progress_popup("Analysis", "Preparing analysis...", work)
-        if not ok:
-            return
+        def _finish_analysis(ok):
+            if not ok:
+                return
 
-        classified_by_frame = result["classified_by_frame"]
-        iqr_stats_fixed = result["iqr_stats"]
-        bounds = result["bounds"]
-        total = int(result["total"])
-        outliers = int(result["outliers"])
+            classified_by_frame = result["classified_by_frame"]
+            iqr_stats_fixed = result["iqr_stats"]
+            bounds = result["bounds"]
+            total = int(result["total"])
+            outliers = int(result["outliers"])
 
-        self.analysis_blobs_by_frame = classified_by_frame
-        self.analysis_outlier_frames = sorted(
-            fid for fid, blobs in classified_by_frame.items()
-            if any(blob.is_crossing for blob in blobs)
-        )
-        self.analysis_frames = frame_indices
-        self.analysis_signature = (self._segmentation_signature(), tuple(frame_indices), self._classifier_signature())
-        self.analysis_iqr_stats = iqr_stats_fixed
-        self.analysis_bounds = bounds
-        self.analysis_is_stale = False
-        self._update_analysis_dependent_buttons()
-        self.analysis_ready_var.set(f"analysis: ready ({scope_text}, blobs={total}, outliers={outliers})")
-        self.outlier_section_revealed = True
-        self._guidance_stage = "outlier"
-        self._set_workflow_stage("processing")
-        self._redraw_area_iqr_boxplot()
-        self.redraw_current_frame()
-        try:
-            config_path = self._save_config_to_default_path()
-        except OSError as exc:
-            self.set_status("Analysis completed, but config could not be saved.", auto_clear=False)
-            messagebox.showwarning("Save config", f"Analysis completed, but config could not be saved:\n{exc}")
-        else:
-            self.set_status(
-                f"Analysis complete: blobs={total}, outliers={outliers} / config saved: {config_path}"
+            self.analysis_blobs_by_frame = classified_by_frame
+            self.analysis_outlier_frames = sorted(
+                fid for fid, blobs in classified_by_frame.items()
+                if any(blob.is_crossing for blob in blobs)
             )
+            self.analysis_frames = frame_indices
+            self.analysis_signature = (self._segmentation_signature(), tuple(frame_indices), self._classifier_signature())
+            self.analysis_iqr_stats = iqr_stats_fixed
+            self.analysis_bounds = bounds
+            self.analysis_is_stale = False
+            self._update_analysis_dependent_buttons()
+            self.analysis_ready_var.set(f"analysis: ready ({scope_text}, blobs={total}, outliers={outliers})")
+            self.outlier_section_revealed = True
+            self._guidance_stage = "outlier"
+            self._set_workflow_stage("processing")
+            self._redraw_area_iqr_boxplot()
+            self.redraw_current_frame()
+            try:
+                config_path = self._save_config_to_default_path()
+            except OSError as exc:
+                self.set_status("Analysis completed, but config could not be saved.", auto_clear=False)
+                messagebox.showwarning("Save config", f"Analysis completed, but config could not be saved:\n{exc}")
+            else:
+                self.set_status(
+                    f"Analysis complete: blobs={total}, outliers={outliers} / config saved: {config_path}"
+                )
+
+        self._with_progress_popup("Analysis", "Preparing analysis...", work, _finish_analysis)
 
     def analyze_sample_frames(self):
         self._run_analysis()
@@ -7641,7 +7667,8 @@ class CrossingReviewApp(ctk.CTk):
         popup.deiconify()
         popup.lift()
         popup.focus_force()
-        self._flush_ui(maximize=False)
+        popup.update_idletasks()
+        popup.grab_set()
 
     def _place_progress_popup(self):
         if self.progress_popup is None:
@@ -7672,95 +7699,114 @@ class CrossingReviewApp(ctk.CTk):
         self._progress_queue.put_nowait((text, normalized))
 
     def _drain_progress_queue(self):
-        try:
-            while True:
-                text, val = self._progress_queue.get_nowait()
-                if self.progress_popup is not None:
-                    self.progress_label_var.set(text)
-                    if val is None:
-                        if self.progress_bar is not None and not self._progress_indeterminate:
-                            self.progress_value_var.set(0.0)
-                            self.progress_bar.configure(mode="indeterminate")
-                            self.progress_bar.start(12)
-                            self._progress_indeterminate = True
-                    else:
-                        if self.progress_bar is not None and self._progress_indeterminate:
-                            self.progress_bar.stop()
-                            self.progress_bar.configure(mode="determinate")
-                            self._progress_indeterminate = False
-                        self.progress_value_var.set(val)
-        except queue.Empty:
-            pass
+        # Coalesce frame updates; only Tk's main thread changes widget state.
+        latest = None
+        while True:
+            try:
+                latest = self._progress_queue.get_nowait()
+            except queue.Empty:
+                break
+        if latest is None or self.progress_popup is None:
+            return
+        text, value = latest
+        self.progress_label_var.set(text)
+        if value is None:
+            if self.progress_bar is not None and not self._progress_indeterminate:
+                self.progress_value_var.set(0.0)
+                self.progress_bar.configure(mode="indeterminate")
+                self.progress_bar.start(12)
+                self._progress_indeterminate = True
+        else:
+            if self.progress_bar is not None and self._progress_indeterminate:
+                self.progress_bar.stop()
+                self.progress_bar.configure(mode="determinate")
+                self._progress_indeterminate = False
+            self.progress_value_var.set(value)
 
     def _close_progress_popup(self):
+        if self._progress_poll_job is not None:
+            self.after_cancel(self._progress_poll_job)
+            self._progress_poll_job = None
         if self.progress_bar is not None:
-            try:
-                self.progress_bar.stop()
-            except Exception:
-                pass
+            self.progress_bar.stop()
         if self.progress_popup is not None:
-            try:
-                self.progress_popup.grab_release()
-            except Exception:
-                pass
-            try:
-                self.progress_popup.destroy()
-            except Exception:
-                pass
+            self.progress_popup.grab_release()
+            self.progress_popup.destroy()
         self.progress_popup = None
         self.progress_bar = None
         self._progress_indeterminate = False
 
     def _request_progress_cancel(self):
+        # Keep the window and lock until the worker acknowledges cancellation.
         self._progress_cancel = True
-        self._close_progress_popup()
-
-    def _with_progress_popup(self, title: str, start_text: str, func):
-        self._progress_cancel = False
-        # Flush stale messages from a previous run.
-        while not self._progress_queue.empty():
-            try:
-                self._progress_queue.get_nowait()
-            except queue.Empty:
-                break
-
-        self._open_progress_popup(title)
         if self.progress_popup is not None:
+            self.progress_label_var.set("Cancelling... waiting for the operation to stop.")
+
+    def _with_progress_popup(self, title: str, start_text: str, func, on_done) -> None:
+        """Run work on a thread; poll with after() and finalize on the Tk thread."""
+        if self._progress_busy:
+            raise RuntimeError("Another Segmentation operation is in progress.")
+        self._progress_busy = True
+        self._progress_cancel = False
+        self._progress_close_requested = False
+        while not self._progress_queue.empty():
+            self._progress_queue.get_nowait()
+        try:
+            self._open_progress_popup(title)
             self.progress_label_var.set(start_text)
             self.progress_value_var.set(0.0)
             self._place_progress_popup()
+        except Exception:
+            self._progress_busy = False
+            self._close_progress_popup()
+            raise
 
-        result_box: list = [None]
+        result_box = [False]
         done_event = threading.Event()
+        started = time.perf_counter()
+        print(f"[Segmentation] {title}: worker started", flush=True)
 
         def worker():
             try:
-                result_box[0] = func()
+                result_box[0] = bool(func())
             except Exception:
-                result_box[0] = False
+                traceback.print_exc()
             finally:
+                print(
+                    f"[Segmentation] {title}: worker finished after "
+                    f"{time.perf_counter() - started:.2f}s",
+                    flush=True,
+                )
                 done_event.set()
 
-        threading.Thread(target=worker, daemon=True).start()
-
-        # Polling loop: keeps the main thread responsive while the worker runs.
-        while not done_event.is_set():
+        def poll():
+            self._progress_poll_job = None
+            if self._closing:
+                return
             self._drain_progress_queue()
-            if self.progress_popup is not None:
+            if done_event.is_set():
+                cancelled = self._progress_cancel
+                self._progress_busy = False
+                self._close_progress_popup()
+                print(
+                    f"[Segmentation] {title}: popup closed after "
+                    f"{time.perf_counter() - started:.2f}s",
+                    flush=True,
+                )
                 try:
-                    self._place_progress_popup()
-                except Exception:
-                    pass
-            try:
-                self.update()
-            except tk.TclError:
-                pass
-            done_event.wait(timeout=0.02)
+                    on_done(bool(result_box[0]) and not cancelled)
+                except Exception as exc:
+                    traceback.print_exc()
+                    messagebox.showerror(title, str(exc), parent=self)
+                finally:
+                    if self._progress_close_requested:
+                        self._progress_close_requested = False
+                        self.on_close()
+                return
+            self._progress_poll_job = self.after(50, poll)
 
-        # Final drain after worker completes.
-        self._drain_progress_queue()
-        self._close_progress_popup()
-        return result_box[0]
+        threading.Thread(target=worker, daemon=True, name="segmentation-progress-worker").start()
+        self._progress_poll_job = self.after(50, poll)
 
     def show_background_popup(self):
         if self.background_bgr is None:
@@ -8460,7 +8506,7 @@ class CrossingReviewApp(ctk.CTk):
         return lines
 
     def run_processing(self):
-        if self.progress_popup is not None:
+        if self._progress_busy:
             messagebox.showwarning("Processing", "Another run is already in progress.")
             return
         if self.reader is None:
@@ -8611,58 +8657,60 @@ class CrossingReviewApp(ctk.CTk):
 
         self.set_status("Processing...", auto_clear=False)
         _t0 = time.perf_counter()
-        ok = self._with_progress_popup("Processing", "Preparing...", work)
-        _elapsed = time.perf_counter() - _t0
-        if not ok or self._progress_cancel:
-            if isinstance(completed[0], Exception):
-                messagebox.showerror("Error", str(completed[0]))
-                self.set_status("", auto_clear=False)
-            return
-        config_path, background_path, pickle_path, project_dir = completed[0]
-        self._last_filter_stats = filters.stats
-        # Tell the invoking Easy Tracking GUI where the actual completed
-        # segmentation was saved. An existing segmentation GUI config can
-        # redirect output to a different session than the launch argument.
-        handoff_path = getattr(self, "_easy_handoff_file", "")
-        if handoff_path:
+        def _finish_processing(ok):
+            _elapsed = time.perf_counter() - _t0
+            if not ok or self._progress_cancel:
+                if isinstance(completed[0], Exception):
+                    messagebox.showerror("Error", str(completed[0]))
+                    self.set_status("", auto_clear=False)
+                return
+            config_path, background_path, pickle_path, project_dir = completed[0]
+            self._last_filter_stats = filters.stats
+            # Tell the invoking Easy Tracking GUI where the actual completed
+            # segmentation was saved. An existing segmentation GUI config can
+            # redirect output to a different session than the launch argument.
+            handoff_path = getattr(self, "_easy_handoff_file", "")
+            if handoff_path:
+                try:
+                    if not (os.path.isfile(pickle_path) and os.path.isfile(background_path)):
+                        raise FileNotFoundError("Segmentation output is incomplete")
+                    handoff = {
+                        "video_path": self.video_path_var.get().strip(),
+                        "session_path": project_dir,
+                        "pickle_path": pickle_path,
+                        "background_path": background_path,
+                    }
+                    temp_handoff = handoff_path + ".tmp"
+                    with open(temp_handoff, "w", encoding="utf-8") as file:
+                        json.dump(handoff, file)
+                    os.replace(temp_handoff, handoff_path)
+                except (OSError, ValueError) as exc:
+                    print(f"[Segmentation] Could not write Easy Tracking handoff: {exc}", flush=True)
+            self.config_path = config_path
             try:
-                if not (os.path.isfile(pickle_path) and os.path.isfile(background_path)):
-                    raise FileNotFoundError("Segmentation output is incomplete")
-                handoff = {
-                    "video_path": self.video_path_var.get().strip(),
-                    "session_path": project_dir,
-                    "pickle_path": pickle_path,
-                    "background_path": background_path,
-                }
-                temp_handoff = handoff_path + ".tmp"
-                with open(temp_handoff, "w", encoding="utf-8") as file:
-                    json.dump(handoff, file)
-                os.replace(temp_handoff, handoff_path)
-            except (OSError, ValueError) as exc:
-                print(f"[Segmentation] Could not write Easy Tracking handoff: {exc}", flush=True)
-        self.config_path = config_path
-        try:
-            self._write_processing_log(
-                _elapsed,
-                self.video_path_var.get().strip(),
-                self.frame_count,
-                pickle_path,
-                self.segmentation_mode_var.get(),
-            )
-        except Exception:
-            pass
-        self.set_status(f"Processing complete: {project_dir} / config saved: {config_path}")
+                self._write_processing_log(
+                    _elapsed,
+                    self.video_path_var.get().strip(),
+                    self.frame_count,
+                    pickle_path,
+                    self.segmentation_mode_var.get(),
+                )
+            except Exception:
+                pass
+            self.set_status(f"Processing complete: {project_dir} / config saved: {config_path}")
 
-        # Hide this window immediately so the next GUI is visible.
-        # Show the completion popup after a short delay (the next GUI needs time to appear).
-        self.withdraw()
-        msg = f"Saved:\n{config_path}\n{background_path}\n{pickle_path}"
+            # Hide this window immediately so the next GUI is visible.
+            # Show the completion popup after a short delay (the next GUI needs time to appear).
+            self.withdraw()
+            msg = f"Saved:\n{config_path}\n{background_path}\n{pickle_path}"
 
-        def _show_done():
-            messagebox.showinfo("Completed", msg)
-            self.on_close()
+            def _show_done():
+                messagebox.showinfo("Completed", msg)
+                self.on_close()
 
-        self.after(1200, _show_done)
+            self.after(1200, _show_done)
+
+        self._with_progress_popup("Processing", "Preparing...", work, _finish_processing)
 
     def _default_screenshot_path(self) -> str:
         stem = os.path.splitext(os.path.basename(self.video_path_var.get().strip() or "segmentation"))[0]
@@ -8841,6 +8889,8 @@ class CrossingReviewApp(ctk.CTk):
         return result
 
     def export_labeled_video(self):
+        if self._progress_busy:
+            return
         if self.reader is None:
             messagebox.showerror("Error", "No video has been loaded.")
             return
@@ -8952,20 +9002,22 @@ class CrossingReviewApp(ctk.CTk):
                 return False
 
         self.set_status("Exporting labeled video...", auto_clear=False)
-        ok = self._with_progress_popup("Export Labeled Video", "Preparing...", work)
-        if not ok or self._progress_cancel:
-            if isinstance(completed[0], Exception):
-                messagebox.showerror("Error", str(completed[0]))
-            self.set_status("", auto_clear=False)
-            return
-        saved_path, saved_start, saved_end = completed[0]
-        self.set_status(f"Labeled video saved: {saved_path}")
-        note = ""
-        mismatched = int(filters.stats.get("mismatched_frames", 0))
-        if mismatched:
-            note = (f"\n\n{mismatched} frame(s) segmented differently from the Search; "
-                    "optional filter colors were omitted there.")
-        messagebox.showinfo("Completed", f"Labeled video saved:\n{saved_path}\nframes: {saved_start}-{saved_end}{note}")
+        def _finish_export(ok):
+            if not ok or self._progress_cancel:
+                if isinstance(completed[0], Exception):
+                    messagebox.showerror("Error", str(completed[0]))
+                self.set_status("", auto_clear=False)
+                return
+            saved_path, saved_start, saved_end = completed[0]
+            self.set_status(f"Labeled video saved: {saved_path}")
+            note = ""
+            mismatched = int(filters.stats.get("mismatched_frames", 0))
+            if mismatched:
+                note = (f"\n\n{mismatched} frame(s) segmented differently from the Search; "
+                        "optional filter colors were omitted there.")
+            messagebox.showinfo("Completed", f"Labeled video saved:\n{saved_path}\nframes: {saved_start}-{saved_end}{note}")
+
+        self._with_progress_popup("Export Labeled Video", "Preparing...", work, _finish_export)
 
 
 def main():
