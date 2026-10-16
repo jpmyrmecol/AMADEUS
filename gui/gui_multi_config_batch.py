@@ -21,6 +21,7 @@ try:
         PROJECT_ROOT,
         MAIN_DIR as MAIN_PATH,
         ensure_import_paths,
+        gui_asset,
         main_script,
         with_pythonpath,
     )
@@ -31,6 +32,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_multi_vide
         PROJECT_ROOT,
         MAIN_DIR as MAIN_PATH,
         ensure_import_paths,
+        gui_asset,
         main_script,
         with_pythonpath,
     )
@@ -40,7 +42,7 @@ ensure_import_paths(PROJECT_ROOT, MAIN_PATH)
 from path_utils import resolve_config_paths
 
 ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("green")
+ctk.set_default_color_theme(str(gui_asset("deep_green.json")))
 
 CURRENT_DIR = str(GUI_DIR)
 MAIN_DIR = str(MAIN_PATH)
