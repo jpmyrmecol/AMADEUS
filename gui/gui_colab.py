@@ -35,7 +35,7 @@ from main.colab_utils import (
 
 
 ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("green")
+ctk.set_default_color_theme(str(PROJECT_ROOT / "assets" / "deep_green.json"))
 
 
 def _set_readonly(entry: ctk.CTkEntry, value: str) -> None:
