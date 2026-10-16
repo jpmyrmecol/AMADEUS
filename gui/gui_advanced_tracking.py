@@ -2552,23 +2552,28 @@ class ConfigGUI(ctk.CTk):
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, **kw,
         )
 
-        popup = tk.Toplevel(self)
+        popup = ctk.CTkToplevel(self)
         popup.title("Adjust Parameters")
         popup.transient(self)
         popup.resizable(False, False)
+        popup.configure(fg_color="#242424")
         popup.protocol("WM_DELETE_WINDOW", lambda: None)
-        tk.Label(
+        ctk.CTkLabel(
             popup,
             text="Measuring segmentation results and updating auto parameters...",
-            anchor="w", justify="left", wraplength=420,
+            text_color="#ffffff", anchor="w", justify="left", wraplength=420,
         ).pack(fill="x", padx=16, pady=(16, 8))
-        from tkinter import ttk
-        bar = ttk.Progressbar(popup, mode="indeterminate", length=420)
+        bar = ctk.CTkProgressBar(
+            popup, mode="indeterminate", width=420,
+            fg_color="#343638", progress_color="#25804d",
+        )
         bar.pack(padx=16, pady=4)
-        bar.start(12)
+        bar.start()
         status_var = tk.StringVar(value="Starting...")
-        tk.Label(popup, textvariable=status_var, anchor="w", justify="left",
-                 fg="#888888", wraplength=420).pack(fill="x", padx=16, pady=(4, 16))
+        ctk.CTkLabel(
+            popup, textvariable=status_var, anchor="w", justify="left",
+            text_color="#c4c4c4", wraplength=420,
+        ).pack(fill="x", padx=16, pady=(4, 16))
         popup.update_idletasks()
         px = self.winfo_rootx() + max(0, (self.winfo_width() - popup.winfo_reqwidth()) // 2)
         py = self.winfo_rooty() + max(0, (self.winfo_height() - popup.winfo_reqheight()) // 2)
