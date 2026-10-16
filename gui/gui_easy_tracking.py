@@ -2008,8 +2008,10 @@ class EasyTrackingGUI(ctk.CTk):
         subtitle: str = "",
         tick_decimals: int | None = None,
         x_values: list[int] | None = None,
+        history_count: int = 0,
+        show_legend: bool = True,
     ) -> None:
-        """Draw multiple series on the same axes. series: [(values, color, label), ...]"""
+        """Draw series on shared axes, optionally separating saved epoch means."""
         cw = max(canvas.winfo_width(), 100)
         ph = panel_height or max(canvas.winfo_height(), 100)
 
@@ -2081,27 +2083,32 @@ class EasyTrackingGUI(ctk.CTk):
 
         for vals, color, label in valid_series:
             n = len(vals)
-            if n >= 2:
-                pts = []
-                for i, v in enumerate(vals):
-                    pts.append(px(i, n))
-                    pts.append(py(v))
-                canvas.create_line(pts, fill=color, width=3, smooth=True)
-            elif n == 1:
-                x0, y0 = px(0, 1), py(vals[0])
-                canvas.create_oval(x0 - 3, y0 - 3, x0 + 3, y0 + 3, fill=color, outline="")
-
-        ly = y_offset + mt + 8
-        for vals, color, label in valid_series:
-            if not vals:
-                continue
-            lx = ml + pw - 4
-            canvas.create_line(lx - 18, ly + 4, lx - 4, ly + 4, fill=color, width=3)
-            canvas.create_text(
-                lx - 22, ly + 4, text=label, fill=color,
-                font=_VISUAL_PROGRESS_FONT, anchor="e",
+            cutoff = min(max(0, history_count), n) if not show_legend else 0
+            segments = (
+                [(0, cutoff, "#87a793"), (cutoff, n, color)]
+                if cutoff else [(0, n, color)]
             )
-            ly += 18
+            for start, stop, segment_color in segments:
+                if stop - start >= 2:
+                    pts = []
+                    for i in range(start, stop):
+                        pts.extend((px(i, n), py(vals[i])))
+                    canvas.create_line(pts, fill=segment_color, width=3, smooth=True)
+                elif stop - start == 1:
+                    x0, y0 = px(start, n), py(vals[start])
+                    canvas.create_oval(x0 - 3, y0 - 3, x0 + 3, y0 + 3,
+                                      fill=segment_color, outline="")
+
+        if show_legend:
+            ly = y_offset + mt + 8
+            for vals, color, label in valid_series:
+                lx = ml + pw - 4
+                canvas.create_line(lx - 18, ly + 4, lx - 4, ly + 4, fill=color, width=3)
+                canvas.create_text(
+                    lx - 22, ly + 4, text=label, fill=color,
+                    font=_VISUAL_PROGRESS_FONT, anchor="e",
+                )
+                ly += 18
 
     def _render_dual_chart(self, data: dict) -> None:
         """Two stacked charts: embedding loss (top) + silhouette score (bottom)."""
@@ -2386,6 +2393,8 @@ class EasyTrackingGUI(ctk.CTk):
                 subtitle="A decreasing loss that levels off is generally a good sign.",
                 tick_decimals=3,
                 x_values=data.get("loss_x_values"),
+                history_count=data.get("loss_history_count", 0),
+                show_legend=False,
             )
         else:
             self._render_empty_chart_panel(
@@ -2433,7 +2442,7 @@ class EasyTrackingGUI(ctk.CTk):
     # Data readers
 
     def _read_yolo_results_csv(self, path: str) -> dict:
-        train_losses, val_losses, map50_vals, map5095_vals, fitness_vals = [], [], [], [], []
+        train_losses, train_epochs, map50_vals, map5095_vals, fitness_vals = [], [], [], [], []
 
         def metric_key(text: object) -> str:
             key = str(text).strip().lower()
@@ -2467,23 +2476,18 @@ class EasyTrackingGUI(ctk.CTk):
                     (c for c in fields if "train" in metric_key(c) and "box_loss" in metric_key(c)),
                     None,
                 )
-                val_col = next(
-                    (c for c in fields if "val" in metric_key(c) and "box_loss" in metric_key(c)),
-                    None,
-                )
                 map50_col = next((c for c in fields if has_map50(c)), None)
                 map5095_col = next((c for c in fields if has_map5095(c)), None)
 
                 for row in reader:
                     train_loss = as_float(row.get(train_col)) if train_col else None
-                    val_loss = as_float(row.get(val_col)) if val_col else None
+                    epoch = as_float(row.get("epoch"))
                     map50 = as_float(row.get(map50_col)) if map50_col else None
                     map5095 = as_float(row.get(map5095_col)) if map5095_col else None
 
-                    if train_loss is not None:
+                    if train_loss is not None and epoch is not None and epoch >= 1 and epoch.is_integer():
                         train_losses.append(train_loss)
-                    if val_loss is not None:
-                        val_losses.append(val_loss)
+                        train_epochs.append(int(epoch))
                     if map50 is not None:
                         map50_vals.append(map50)
                     if map5095 is not None:
@@ -2494,7 +2498,7 @@ class EasyTrackingGUI(ctk.CTk):
             pass
         return {
             "train": train_losses,
-            "val": val_losses,
+            "train_epochs": train_epochs,
             "mAP50": map50_vals,
             "mAP5095": map5095_vals,
             "fitness": fitness_vals,
@@ -2890,6 +2894,11 @@ class EasyTrackingGUI(ctk.CTk):
     ) -> None:
         """Use the running trainer's actual dataset size and batch size."""
         self._train_epoch_started_at = time.monotonic()
+        if self._active_step == 7:
+            # Keep fine-grained Loss data for the active epoch only. On OOM
+            # recovery the callback fires again for the restarted epoch.
+            self._batch_losses = []
+            self._batch_loss_images = []
         self._train_epoch = epoch
         self._train_total_epochs = total_epochs
         self._train_epoch_images = images
