@@ -36,7 +36,6 @@ from batch_utils import (
     resolve_device,
     resolve_num_workers as _resolve_num_workers,
     auto_batch_size,
-    next_batch_candidate,
     next_batch_candidate_soft_down,
     next_worker_candidate,
     _is_oom_error,
@@ -49,6 +48,7 @@ from batch_utils import (
     TRAIN_COLLAPSE_WINDOW_SECONDS,
     TRAIN_INITIAL_RAM_TARGET,
     TRAIN_COLLAPSE_RATIO,
+    TRAIN_INITIAL_VRAM_HEADROOM_DOUBLE_TRIGGER,
     TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER,
 )
 from create_dataset import resolve_yolo_dataset_dir
@@ -1595,7 +1595,8 @@ class _BatchTooLargeError(RuntimeError):
     _InitialLoadCheck / _PerformanceMonitor).
 
     .action tells main()'s retry loop what to adjust: "lower_batch",
-    "lower_workers", or "raise_batch". Batch reductions use the existing
+    "lower_workers", "raise_batch_2x", or "raise_batch_1p5x".
+    Batch reductions use the existing
     ~2/3 step from next_batch_candidate_soft_down. An explicit BATCH_SIZE or
     NUM_WORKERS is never silently changed; the relevant path raises a plain
     RuntimeError instead."""
@@ -1822,7 +1823,8 @@ class _InitialLoadCheck:
       but only *decided* once, the moment the starting epoch ends without
       RAM pressure -- if the peak never reached
       TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER for the *entire* epoch, verdict
-      becomes "raise_batch".
+      requests 2x growth below TRAIN_INITIAL_VRAM_HEADROOM_DOUBLE_TRIGGER,
+      or 1.5x growth otherwise.
 
     Every device figure used here comes from _DeviceSampler.snapshot(), a
     lock-protected read of values a background thread has already collected.
@@ -1848,7 +1850,7 @@ class _InitialLoadCheck:
     only when a measured throughput collapse, confirmed WDDM growth, and VRAM
     pressure are all present in _PerformanceMonitor.
 
-    allow_headroom_raise gates the "raise_batch" verdict: VRAM-headroom
+    allow_headroom_raise gates the batch-increase verdicts: VRAM-headroom
     scale-up is a one-time opportunity for the whole run, not something to
     re-check after every restart, so main() passes False once it has
     already been applied once.
@@ -1950,10 +1952,14 @@ class _InitialLoadCheck:
             and self._max_vram_frac is not None
             and self._max_vram_frac < TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER
         ):
+            double_batch = self._max_vram_frac < TRAIN_INITIAL_VRAM_HEADROOM_DOUBLE_TRIGGER
+            action = "raise_batch_2x" if double_batch else "raise_batch_1p5x"
+            multiplier = 2.0 if double_batch else 1.5
             self._verdict = (
-                "raise_batch",
+                action,
                 f"VRAM usage stayed at {self._max_vram_frac:.0%} throughout epoch "
-                f"{self._start_epoch + 1} (below {TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER:.0%})",
+                f"{self._start_epoch + 1} (below {TRAIN_INITIAL_VRAM_HEADROOM_TRIGGER:.0%}); "
+                f"requesting {multiplier:g}x batch",
             )
         self._epoch_done = True
 
@@ -2020,7 +2026,7 @@ class _InitialLoadCheck:
 
     def verdict(self) -> tuple[str, str] | None:
         """Returns (action, reason) the moment one is decided (action is
-        "lower_workers" or "raise_batch" -- see the class docstring); None as
+        "lower_workers", "raise_batch_2x", or "raise_batch_1p5x"); None as
         long as the starting epoch is still running cleanly. WDDM growth does
         not produce a verdict. There is no "ok" verdict: reaching the end of the starting
         epoch without one of these firing is signaled separately, by
@@ -2604,19 +2610,20 @@ def main(
                     f"effective workers will be {effective_dataloader_workers(device, override_workers)}; "
                     f"keeping batch={batch_size} (attempt {attempt})."
                 )
-            elif action == "raise_batch":
+            elif action in {"raise_batch_2x", "raise_batch_1p5x"}:
                 if explicit_batch:
                     raise RuntimeError(f"{exc} Training cannot change a fixed BATCH_SIZE.") from exc
-                # A single conservative ~1.25x step, not a closed-form
-                # estimate toward some target utilization -- VRAM use isn't
-                # reliably linear in batch size, so extrapolating from one
-                # data point risks overshooting straight into the next OOM.
+                # One increase only. Round down for 1.5x to respect the
+                # estimated 60% VRAM target; still advance batch=1 to 2.
+                # Actual later-epoch memory demand is handled by OOM recovery.
+                multiplier = 2.0 if action == "raise_batch_2x" else 1.5
                 vram_headroom_locked = True
-                override_batch = next_batch_candidate(batch_size, "up")
+                override_batch = max(batch_size + 1, int(batch_size * multiplier))
                 override_workers = dl_workers
                 print(
                     f"[INFO] {exc} Increasing batch={batch_size} -> {override_batch} "
-                    f"to use the available VRAM headroom (attempt {attempt})."
+                    f"({multiplier:g}x tier) to use the available VRAM headroom "
+                    f"(attempt {attempt})."
                 )
             elif action == "lower_batch":
                 if batch_size < 1:
