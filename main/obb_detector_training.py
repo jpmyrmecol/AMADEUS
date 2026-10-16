@@ -2085,9 +2085,9 @@ def main(
 
     explicit_batch = not (BATCH_SIZE is None or str(BATCH_SIZE).strip().lower() in {"", "auto"})
     explicit_workers = not (NUM_WORKERS is None or str(NUM_WORKERS).strip().lower() in {"", "auto"})
-    # There is no preflight calibration: auto batch uses the memory estimator
-    # or the MPS upstream-compatible default; workers start at TRAIN_DEFAULT_WORKERS, and real
-    # training begins immediately. Retries adjust only an automatic knob and
+    # NVIDIA uses the memory estimate, MPS uses its upstream-compatible
+    # default, and ROCm uses Ultralytics AutoBatch at training setup.
+    # Workers start at TRAIN_DEFAULT_WORKERS. Retries adjust only an automatic knob and
     # are triggered by clear evidence: OOM/GPU fallback, RAM or DataLoader
     # pressure, VRAM headroom, or a sustained throughput collapse with
     # confirmed WDDM spill and VRAM pressure. Explicit BATCH_SIZE and
