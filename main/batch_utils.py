@@ -20,6 +20,7 @@ workers = resolve_num_workers(cfg_value, task="process")
 """
 from __future__ import annotations
 
+import math
 import os
 
 def evenly_sample_sequence(items, max_count: int):
@@ -474,6 +475,27 @@ def auto_batch_size(image_size, device, mode="train", labels_dir=None, task="det
     )
 
 
+def parse_training_batch_size(value) -> int | float | str:
+    """Parse YOLO train batch: 'auto', -1, memory fraction (0, 1), or positive integer."""
+    if value is None or (isinstance(value, str) and value.strip().lower() in {"", "auto"}):
+        return "auto"
+    if isinstance(value, bool):
+        raise ValueError("Training BATCH_SIZE must be auto, -1, a fraction between 0 and 1, or a positive integer.")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Training BATCH_SIZE must be auto, -1, a fraction between 0 and 1, or a positive integer.") from exc
+    if not math.isfinite(numeric):
+        raise ValueError("Training BATCH_SIZE must be finite.")
+    if numeric == -1:
+        return -1
+    if 0.0 < numeric < 1.0:
+        return numeric
+    if numeric >= 1.0 and numeric.is_integer():
+        return int(numeric)
+    raise ValueError("Training BATCH_SIZE must be auto, -1, a fraction between 0 and 1, or a positive integer.")
+
+
 def resolve_batch_size(
     value,
     image_size: int,
@@ -481,10 +503,12 @@ def resolve_batch_size(
     mode: str = "train",
     labels_dir: str | None = None,
     task: str = "detect",
-) -> int:
-    """Resolve a batch size; preserve training -1 for Ultralytics AutoBatch."""
-    if str(value).strip() == "-1" and str(mode).strip().lower() == "train":
-        return -1
+) -> int | float:
+    """Resolve batch size; send -1 or a memory fraction through for YOLO training."""
+    if str(mode).strip().lower() == "train":
+        value = parse_training_batch_size(value)
+        if value != "auto":
+            return value
     if value is None or str(value).strip().lower() in {"", "auto"}:
         bs = auto_batch_size(
             image_size=image_size,
