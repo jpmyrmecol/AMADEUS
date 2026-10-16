@@ -40,6 +40,7 @@ try:
     from .config_path_recovery import prepare_config_for_gui
     from .canvas_file_drop import install_canvas_file_drop
     from .attention_border import RotatingBorderHighlight
+    from .save_shortcut import bind_save_shortcut
     from .video_input import (
         VIDEO_DROP_SUFFIXES,
         ask_open_analysis_video,
@@ -61,6 +62,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_easy_track
     from config_path_recovery import prepare_config_for_gui
     from canvas_file_drop import install_canvas_file_drop
     from attention_border import RotatingBorderHighlight
+    from save_shortcut import bind_save_shortcut
     from video_input import (
         VIDEO_DROP_SUFFIXES,
         ask_open_analysis_video,
@@ -314,6 +316,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._preview_folder_poll_id: str | None = None
 
         self._build_ui()
+        bind_save_shortcut(self, self._save_config)
         self._ui_event_poll_id = self.after(50, self._drain_ui_events)
         self._refresh_preview_folder_buttons()
         self._set_skip_flags(self._default_skip_flags(), render=True)
