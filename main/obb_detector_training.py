@@ -8,6 +8,7 @@ import gc
 import itertools
 import json
 import logging
+import math
 import mmap
 import shutil
 import signal
@@ -1055,10 +1056,89 @@ class _PerformanceMonitor:
         self._val_batch_size = 0
         self._val_accum_batches = 0
         self._val_accum_start: float | None = None
+        self._resource_lock = threading.Lock()
+        self._resource_epoch: int | None = None
+        self._resource_sample_count = 0
+        self._resource_metrics: dict[str, list[float]] = {}
+        self._memory_model = runtime_for(device).capabilities.memory_model
         # The sampler is synchronously primed before this monitor is built,
         # so this is this process's own pre-training WDDM baseline. None is
         # deliberately retained as unknown: it must never be treated as zero.
         _u, _used, _total, _frac, self._wddm_non_local_baseline = sampler.snapshot()
+
+    def begin_epoch_resources(self, epoch: int) -> None:
+        """Start an in-memory resource summary for one training epoch."""
+        with self._resource_lock:
+            self._resource_epoch = int(epoch)
+            self._resource_sample_count = 0
+            self._resource_metrics = {}
+
+    def _record_resource_snapshot(self, values: dict[str, float | None]) -> None:
+        with self._resource_lock:
+            if self._resource_epoch is None:
+                return
+            self._resource_sample_count += 1
+            for key, value in values.items():
+                if value is None or not math.isfinite(value):
+                    continue
+                entry = self._resource_metrics.get(key)
+                if entry is None:
+                    # [sum, count, maximum, first, last]
+                    self._resource_metrics[key] = [value, 1.0, value, value, value]
+                else:
+                    entry[0] += value
+                    entry[1] += 1.0
+                    entry[2] = max(entry[2], value)
+                    entry[4] = value
+
+    def finish_epoch_resources(self, epoch: int) -> str:
+        """Format a single summary; never persist the periodic measurements."""
+        with self._resource_lock:
+            if self._resource_epoch != int(epoch):
+                return "resource_samples=0"
+            samples = self._resource_sample_count
+            values = self._resource_metrics
+            self._resource_epoch = None
+            self._resource_metrics = {}
+
+        def average(key: str) -> float | None:
+            item = values.get(key)
+            return item[0] / item[1] if item else None
+
+        def maximum(key: str) -> float | None:
+            item = values.get(key)
+            return item[2] if item else None
+
+        def change(key: str) -> str:
+            item = values.get(key)
+            return "n/a" if item is None else f"{item[4] - item[3]:+.2f}GiB"
+
+        fields = [
+            f"resource_samples={samples}",
+            f"cpu_avg={_fmt_pct(average('cpu'))}",
+            f"ram_avg={_fmt_gib(average('ram'))}",
+            f"ram_peak={_fmt_gib(maximum('ram'))}",
+            f"swap_peak={_fmt_gib(maximum('swap'))}",
+            f"swap_change={change('swap')}",
+            f"proc_ram_peak={_fmt_gib(maximum('proc_ram'))}",
+        ]
+        if self._memory_model == "unified":
+            fields.extend([
+                f"mps_alloc_peak={_fmt_gib(maximum('torch_alloc'))}",
+                f"mps_driver_avg={_fmt_gib(average('device_used'))}",
+                f"mps_driver_peak={_fmt_gib(maximum('device_used'))}",
+                f"mps_recommended={_fmt_gib(maximum('device_capacity'))}",
+            ])
+        elif self._memory_model == "dedicated":
+            fields.extend([
+                f"gpu_avg={_fmt_pct(average('gpu'))}",
+                f"vram_peak={_fmt_gib(maximum('device_used'))}",
+                f"vram_total={_fmt_gib(maximum('device_capacity'))}",
+                f"torch_alloc_peak={_fmt_gib(maximum('torch_alloc'))}",
+            ])
+            if "wddm_non_local" in values:
+                fields.append(f"wddm_non_local_peak={_fmt_gib(maximum('wddm_non_local'))}")
+        return " ".join(fields)
 
     def _remember_vram_peak(self, vram_frac: float | None) -> float | None:
         if vram_frac is not None:
@@ -1485,49 +1565,20 @@ class _PerformanceMonitor:
                 continue
             next_perf_log = now + self.interval
             gpu_util, vram_used, vram_total, _vram_frac, wddm_non_local = self.sampler.snapshot()
-            torch_alloc, torch_reserved = _query_torch_vram(self.device)
-            cpu_percent, ram_used, ram_total, proc_rss, child_rss, swap_used = _query_cpu_memory()
-            bottleneck = _infer_bottleneck(
-                gpu_util,
-                vram_used,
-                vram_total,
-                cpu_percent,
-                ram_used,
-                ram_total,
-                child_rss,
-                self.effective_workers,
-            )
-            ratio = (
-                self._last_rolling_throughput / self.baseline_throughput
-                if self._last_rolling_throughput is not None and self.baseline_throughput
-                else None
-            )
-            device_memory = (
-                f"mps_alloc={_fmt_gib(torch_alloc)} "
-                f"mps_driver={_fmt_gib(vram_used)} "
-                f"mps_recommended={_fmt_gib(vram_total)}"
-                if runtime_for(self.device).capabilities.memory_model == "unified"
-                else (
-                    f"gpu={_fmt_pct(gpu_util)} "
-                    f"vram={_fmt_gib(vram_used)}/{_fmt_gib(vram_total)} "
-                    f"torch_alloc={_fmt_gib(torch_alloc)} torch_reserved={_fmt_gib(torch_reserved)} "
-                    f"wddm_non_local={_fmt_gib(wddm_non_local)}"
-                )
-            )
-            print(
-                "[PERF] "
-                f"{device_memory} "
-                f"cpu={_fmt_pct(cpu_percent)} "
-                f"ram={_fmt_gib(ram_used)}/{_fmt_gib(ram_total)} "
-                f"swap_used={_fmt_gib(swap_used)} "
-                f"proc_ram={_fmt_gib(proc_rss)} child_ram={_fmt_gib(child_rss)} "
-                f"throughput={_fmt_rate(self._last_rolling_throughput)} "
-                f"baseline={_fmt_rate(self.baseline_throughput)} "
-                f"ratio={_fmt_pct(ratio * 100 if ratio is not None else None)} "
-                f"batch={self.batch_size} workers={self.workers} imgsz={self.image_size} "
-                f"bottleneck={bottleneck}",
-                flush=True,
-            )
+            torch_alloc, _torch_reserved = _query_torch_vram(self.device)
+            cpu_percent, ram_used, _ram_total, proc_rss, child_rss, swap_used = _query_cpu_memory()
+            self._record_resource_snapshot({
+                "gpu": gpu_util,
+                "device_used": vram_used,
+                "device_capacity": vram_total,
+                "torch_alloc": torch_alloc,
+                "wddm_non_local": wddm_non_local,
+                "cpu": cpu_percent,
+                "ram": ram_used,
+                "swap": swap_used,
+                "proc_ram": proc_rss,
+                "child_ram": child_rss,
+            })
 
 
 class _BatchTooLargeError(RuntimeError):
@@ -2372,6 +2423,7 @@ def main(
             def _on_train_epoch_start(trainer):
                 nonlocal epoch_started
                 epoch_started = time.monotonic()
+                monitor.begin_epoch_resources(trainer.epoch)
 
             def _on_train_epoch_end(trainer):
                 if epoch_started is None:
@@ -2382,7 +2434,8 @@ def main(
                 print(
                     f"[TRAIN EPOCH] epoch={trainer.epoch + 1}/{trainer.epochs} "
                     f"images={images} train_time={seconds:.1f}s "
-                    f"throughput={_fmt_rate(rate)}",
+                    f"throughput={_fmt_rate(rate)} "
+                    f"{monitor.finish_epoch_resources(trainer.epoch)}",
                     flush=True,
                 )
 
