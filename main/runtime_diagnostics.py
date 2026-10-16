@@ -91,12 +91,14 @@ def system_details() -> dict[str, str]:
     import psutil
 
     gib = 1024 ** 3
+    memory = psutil.virtual_memory()
     battery = psutil.sensors_battery()
     return {
         "cpu_model": cpu_model,
         "cpu_cores": f"{psutil.cpu_count(logical=False) or 'n/a'} physical/"
                      f"{psutil.cpu_count(logical=True) or 'n/a'} logical",
-        "ram_total_gib": f"{psutil.virtual_memory().total / gib:.1f}",
+        "ram_total_gib": f"{memory.total / gib:.1f}",
+        "ram_used_gib": f"{(memory.total - memory.available) / gib:.2f}",
         "swap_used_gib": f"{psutil.swap_memory().used / gib:.2f}",
         "power_source": (
             "unknown" if battery is None
