@@ -3830,7 +3830,7 @@ class EasyTrackingGUI(ctk.CTk):
         return len(text)
 
     def _handle_batch_output_record(self, line: str, state: dict) -> None:
-        line = line.rstrip("\r\n")
+        line = _ANSI_ESCAPE_RE.sub("", line.rstrip("\r\n"))
         backend_match = re.match(r"\[INFO\] training device: .* \(([^)]+)\)$", line)
         if backend_match:
             self._training_backend_label = backend_match.group(1)
