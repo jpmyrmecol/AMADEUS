@@ -50,7 +50,7 @@ class AddonController:
         self.storage_error = None
         try:
             self.store = store if store is not None else Store()
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             self.store = None
             self.storage_error = str(exc)
         self.busy = False
