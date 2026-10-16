@@ -2082,7 +2082,12 @@ def main(
 
     trainer_cls = _get_epochs_obb_trainer()
 
-    explicit_batch = not (BATCH_SIZE is None or str(BATCH_SIZE).strip().lower() in {"", "auto"})
+    ultralytics_auto_batch = str(BATCH_SIZE).strip() == "-1"
+    explicit_batch = not (
+        BATCH_SIZE is None
+        or str(BATCH_SIZE).strip().lower() in {"", "auto"}
+        or ultralytics_auto_batch
+    )
     explicit_workers = not (NUM_WORKERS is None or str(NUM_WORKERS).strip().lower() in {"", "auto"})
     # NVIDIA uses the memory estimate, MPS uses its upstream-compatible
     # default, and ROCm uses Ultralytics AutoBatch at training setup.
@@ -2164,6 +2169,9 @@ def main(
             ckpt_workers = ckpt_train_args.get("workers")
             if override_batch is not None:
                 batch_size = override_batch
+            elif ultralytics_auto_batch:
+                # An explicit -1 requests a fresh Ultralytics AutoBatch, even on resume.
+                batch_size = -1
             else:
                 batch_size = int(ckpt_batch) if ckpt_batch else resolve_batch_size(
                     BATCH_SIZE, int(TRAIN_IMG_SIZE), device, mode="train",
@@ -2182,7 +2190,11 @@ def main(
                     NUM_WORKERS, "dataloader", image_size=int(TRAIN_IMG_SIZE), device=device,
                 )
             recovery_override = override_batch is not None or override_workers is not None
-            source = "recovery overrides" if recovery_override else "checkpoint train_args"
+            source = (
+                "recovery overrides" if recovery_override
+                else "Ultralytics AutoBatch" if ultralytics_auto_batch
+                else "checkpoint train_args"
+            )
             print(
                 f"[INFO] Resuming with batch={batch_size} workers={dl_workers} "
                 f"(effective={effective_dataloader_workers(device, dl_workers)}, {source})."
@@ -2211,6 +2223,7 @@ def main(
         else:
             batch_size = (
                 override_batch if override_batch is not None
+                else -1 if ultralytics_auto_batch
                 else max(1, int(BATCH_SIZE)) if explicit_batch
                 else auto_batch_size(
                     int(TRAIN_IMG_SIZE), device, mode="train",
@@ -2325,6 +2338,7 @@ def main(
                 workers=dl_workers,
                 allow_headroom_raise=(
                     not explicit_batch
+                    and not ultralytics_auto_batch
                     and not vram_headroom_locked
                     and runtime_for(device).backend != Backend.AMD_ROCM
                 ),
@@ -2507,7 +2521,7 @@ def main(
                     batch_size = selected_batch
                     monitor.batch_size = selected_batch
                     initial_check.batch_size = selected_batch
-                    print(f"[INFO] ROCm Ultralytics AutoBatch selected batch={selected_batch}", flush=True)
+                    print(f"[INFO] Ultralytics AutoBatch selected batch={selected_batch}", flush=True)
                 _enable_cudnn_autotuner(device)
 
             monitor.start()
