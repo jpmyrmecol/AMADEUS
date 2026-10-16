@@ -7457,8 +7457,8 @@ class CrossingReviewApp(ctk.CTk):
             self._tooltip_label = tk.Label(
                 self._tooltip_window,
                 justify="left",
-                bg="#ffffcc",
-                fg="#000000",
+                bg="#242424",
+                fg="#DCE4EE",
                 relief="solid",
                 borderwidth=1,
                 font=("Consolas", 9),
