@@ -25,7 +25,7 @@ Download and run the [installer for your operating system](https://amadeus.jpmyr
 
 AMADEUS supports NVIDIA GPUs on Windows and Linux, Apple Silicon on macOS, and some AMD GPUs via ROCm. For NVIDIA and AMD GPUs, 8 GB or more of VRAM is recommended; memory requirements depend on the video and animal count. Operation has also been confirmed on an NVIDIA laptop GPU with 4 GB of VRAM.
 
-You can also install using Git or download the repository as a ZIP. Follow the [Git and ZIP installation instructions](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-1), then run the launcher from the repository’s root directory. For a ZIP download, select **Code → Download ZIP** on [GitHub](https://github.com/jpmyrmecol/AMADEUS) and extract the archive first.
+You can also install using Git or download the repository as a ZIP. Follow the [Git and ZIP installation instructions](https://amadeus.jpmyrmecol.com/Manual_EN.html#section-1). The Git setup command handles existing `AMADEUS` directories safely: missing launchers trigger replacement, incomplete installations with launchers require confirmation, and v1.0.4 or earlier prompts for an update. Replaced folders are retained as backups. An intact installation of v1.0.5 or later launches without prompting for an update. A plain `git clone` cannot use an existing destination directory. For a ZIP download, select **Code → Download ZIP** on [GitHub](https://github.com/jpmyrmecol/AMADEUS) and extract the archive first.
 
 | Operating system | Launcher |
 | --- | --- |
