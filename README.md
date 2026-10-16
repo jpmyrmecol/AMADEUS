@@ -30,7 +30,7 @@ You can also install using Git or a ZIP download. See the [Git and ZIP instructi
 | Operating system | Launcher |
 | --- | --- |
 | Windows 10 / 11 | Double-click `AMADEUS.bat` |
-| macOS on Apple Silicon | Open `AMADEUS.command` |
+| macOS on Apple Silicon | Double-click `AMADEUS.command` |
 | Linux / WSL2 | Run `bash AMADEUS.sh` |
 
 After setup, use the desktop shortcut on Windows or run `amadeus` or `amade` in a terminal.
