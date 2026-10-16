@@ -2631,7 +2631,7 @@ class EasyTrackingGUI(ctk.CTk):
     # Canvas content updaters
 
     def _show_training_loss(self, session: str) -> None:
-        # YOLO writes mAP metrics to results.csv after each validation epoch.
+        """Plot completed training epochs from CSV plus the active epoch's live Loss."""
         paths = []
         for stage in TRAINING_STAGE_DIRS:
             paths.extend(glob.glob(
@@ -2645,70 +2645,64 @@ class EasyTrackingGUI(ctk.CTk):
         data = self._read_yolo_results_csv(paths[0]) if paths else {}
         fitness = data.get("fitness", [])
 
-        # Use cumulative processed images, including partial batches and
-        # changes to the batch size after automatic recovery.
-        if self._batch_losses:
-            count = self._batch_loss_images[-1]
-            self._draw_training_monitor(
-                {
-                    "loss_series": [(self._batch_losses, "#1f8040", "train")],
-                    "loss_title": "Loss",
-                    "loss_x_label": "Images",
-                    "loss_x_values": self._batch_loss_images,
-                    "fitness": fitness,
-                }
-            )
-            status = (
-                f"Batch {len(self._batch_losses)}  |  Batch size {self._train_batch_size}  |  "
-                f"Images {count}  |  train/box_loss = {self._batch_losses[-1]:.3f}"
-            )
-            if fitness:
-                status += f"  |  fitness(0.1*mAP50+0.9*mAP50-95) = {fitness[-1]:.3f}"
-            self._canvas_status.configure(text=status)
-            return
+        # The checkpoint defines which epochs are complete. During a recovery,
+        # any old CSV row for the epoch now being replayed must not be plotted.
+        active_epoch = self._train_epoch
+        saved = [
+            (epoch, loss)
+            for epoch, loss in zip(data.get("train_epochs", []), data.get("train", []))
+            if active_epoch == 0 or epoch < active_epoch
+        ]
+        epoch_size = self._train_epoch_images
+        live = list(zip(self._batch_loss_images, self._batch_losses))
+        # Rendering at most about 1200 current-epoch points prevents the Tk
+        # Canvas from slowing down on exceptionally large training datasets.
+        if len(live) > 1200:
+            stride = math.ceil((len(live) - 1) / 1199)
+            sampled = live[::stride]
+            if sampled[-1] != live[-1]:
+                sampled.append(live[-1])
+            live = sampled
 
-        # Fallback: epoch-level CSV written by YOLO after each epoch
-        if not paths:
+        loss_values = [loss for _, loss in saved] + [loss for _, loss in live]
+        if not loss_values:
             self._draw_placeholder("Training in progress...\nLoss chart will appear here.")
             self._canvas_status.configure(text="Waiting for training results...")
             return
-        train_losses = data.get("train", [])
-        val_losses = data.get("val", [])
-        if train_losses:
-            series = [
-                (train_losses, "#1f8040", "train"),
-                (val_losses,   "#f0a000", "val"),
+
+        if epoch_size > 0:
+            x_values = [epoch * epoch_size for epoch, _ in saved] + [
+                images for images, _ in live
             ]
-            # An epoch-level CSV is used only if no live batch data arrived.
-            # Image coordinates require a known per-epoch dataset size.
-            epoch_size = self._train_epoch_images
-            self._draw_training_monitor(
-                {
-                    "loss_series": series,
-                    "loss_title": "Loss",
-                    "loss_x_label": "Images" if epoch_size else "epoch",
-                    "loss_x_values": (
-                        [epoch_size * (i + 1) for i in range(len(train_losses))]
-                        if epoch_size else None
-                    ),
-                    "fitness": fitness,
-                }
-            )
-            n = len(train_losses)
-            status = (
-                f"Images {epoch_size * n}" if epoch_size else f"Epoch {n}"
-            ) + (
-                f"  |  Batch size {self._train_batch_size}"
-                if self._train_batch_size else ""
-            ) + f"  |  train/box_loss = {train_losses[-1]:.3f}"
-            if val_losses:
-                status += f"  |  val/box_loss = {val_losses[-1]:.3f}"
-            if fitness:
-                status += f"  |  fitness(0.1*mAP50+0.9*mAP50-95) = {fitness[-1]:.3f}"
-            self._canvas_status.configure(text=status)
         else:
-            self._draw_placeholder("Training in progress...")
-            self._canvas_status.configure(text="Waiting for first epoch...")
+            # The actual image count arrives from the trainer on epoch start.
+            # Before that, stored CSV epochs still have meaningful coordinates.
+            x_values = [epoch for epoch, _ in saved]
+        self._draw_training_monitor(
+            {
+                "loss_series": [(loss_values, "#1f8040", "train")],
+                "loss_x_label": "Images" if epoch_size > 0 else "epoch",
+                "loss_x_values": x_values if len(x_values) == len(loss_values) else None,
+                "loss_history_count": len(saved),
+                "fitness": fitness,
+            }
+        )
+        if self._batch_losses:
+            status = (
+                f"Batch {len(self._batch_losses)}  |  Batch size {self._train_batch_size}"
+                f"  |  Images {self._batch_loss_images[-1]}"
+                f"  |  train/box_loss = {self._batch_losses[-1]:.3f}"
+            )
+        else:
+            latest_epoch, latest_loss = saved[-1]
+            status = f"Epoch {latest_epoch}  |  train/box_loss = {latest_loss:.3f}"
+            if self._train_batch_size:
+                status += f"  |  Batch size {self._train_batch_size}"
+            if epoch_size:
+                status += f"  |  Images {latest_epoch * epoch_size}"
+        if fitness:
+            status += f"  |  fitness(0.1*mAP50+0.9*mAP50-95) = {fitness[-1]:.3f}"
+        self._canvas_status.configure(text=status)
 
     def _show_refine_training_loss(self) -> None:
         images = self._refine_loss_images[-1]
