@@ -482,7 +482,9 @@ def resolve_batch_size(
     labels_dir: str | None = None,
     task: str = "detect",
 ) -> int:
-    """Return batch size as int; compute automatically when value is 'auto'/None/''."""
+    """Resolve a batch size; preserve training -1 for Ultralytics AutoBatch."""
+    if str(value).strip() == "-1" and str(mode).strip().lower() == "train":
+        return -1
     if value is None or str(value).strip().lower() in {"", "auto"}:
         bs = auto_batch_size(
             image_size=image_size,
