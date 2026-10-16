@@ -1871,7 +1871,7 @@ class PreprocessApp(ctk.CTk):
             turns = int(round(float(output.get("view_rotation_degrees_clockwise", 0)) / 90.0)) % 4
             in_frame = int(trim.get("in_frame", 0))
             out_frame = int(trim.get("out_frame", 0))
-        except (OSError, ValueError, TypeError, OverflowError) as exc:
+        except (OSError, ValueError, TypeError, OverflowError, yaml.YAMLError) as exc:
             messagebox.showerror("Cropping config", str(exc), parent=self)
             return False
 
