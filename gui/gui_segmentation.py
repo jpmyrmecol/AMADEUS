@@ -203,6 +203,26 @@ _SPIN_CFG = dict(
     selectbackground="#1f6aa5", selectforeground="white",
 )
 
+# macOS Dark Mode can render classic Tk text white on explicit light backgrounds.
+_POPUP_BG = "#f3f4f6"
+_POPUP_FG = "#202124"
+_POPUP_SPIN_CFG = {
+    **_SPIN_CFG, "bg": "#ffffff", "fg": _POPUP_FG,
+    "disabledbackground": "#e5e7eb", "disabledforeground": "#636363",
+    "insertbackground": _POPUP_FG, "buttonbackground": "#e5e7eb",
+    "highlightbackground": "#a0a0a0",
+    "selectbackground": "#225e3b", "selectforeground": "#ffffff",
+}
+
+
+def _popup_button(master, *, text: str, command) -> ctk.CTkButton:
+    """Give modal actions an OS-independent dark fill with legible text."""
+    return ctk.CTkButton(
+        master, text=text, command=command, width=100, height=30,
+        fg_color="#225e3b", hover_color="#30764e",
+        text_color="#ffffff", corner_radius=5,
+    )
+
 
 def _maximize_window_once(window: tk.Tk) -> None:
     try:
@@ -3272,8 +3292,7 @@ class CrossingReviewApp(ctk.CTk):
             outer,
             text=f"Total frames: {total:,}\nValid frame indices: 0-{last:,}\nEnd frame = -1 uses the last frame.",
             justify="left",
-            anchor="w",
-            bg="#f3f4f6",
+            anchor="w", bg=_POPUP_BG, fg=_POPUP_FG,
         ).pack(fill="x", pady=(0, 10))
 
         tk.Label(
@@ -3283,22 +3302,21 @@ class CrossingReviewApp(ctk.CTk):
                 "They do not restrict the frame range of the final tracking analysis."
             ),
             justify="left",
-            anchor="w",
-            bg="#f3f4f6",
+            anchor="w", bg=_POPUP_BG, fg=_POPUP_FG,
         ).pack(fill="x", pady=(0, 12))
 
         entries: dict[str, tk.Spinbox] = {}
 
         def _section(title: str) -> tk.Frame:
-            frame = tk.LabelFrame(outer, text=title, padx=10, pady=8, bg="#f3f4f6")
+            frame = tk.LabelFrame(outer, text=title, padx=10, pady=8, bg=_POPUP_BG, fg=_POPUP_FG)
             frame.pack(fill="x", pady=(0, 10))
             return frame
 
         def _row(parent: tk.Frame, label: str, key: str, initial: int, from_: int = 0, to_: Optional[int] = None) -> None:
             row = tk.Frame(parent, bg="#f3f4f6")
             row.pack(fill="x", pady=2)
-            tk.Label(row, text=label, width=16, anchor="w", bg="#f3f4f6").pack(side="left")
-            sp = tk.Spinbox(row, from_=from_, to=max(int(to_ if to_ is not None else last), 1), increment=1, width=12, **_SPIN_CFG)
+            tk.Label(row, text=label, width=16, anchor="w", bg=_POPUP_BG, fg=_POPUP_FG).pack(side="left")
+            sp = tk.Spinbox(row, from_=from_, to=max(int(to_ if to_ is not None else last), 1), increment=1, width=12, **_POPUP_SPIN_CFG)
             sp.delete(0, tk.END)
             sp.insert(0, str(int(initial)))
             sp.pack(side="left")
@@ -3342,8 +3360,8 @@ class CrossingReviewApp(ctk.CTk):
         def _cancel():
             popup.destroy()
 
-        tk.Button(buttons, text="Apply", width=10, command=_apply).pack(side="right", padx=(8, 0))
-        tk.Button(buttons, text="Cancel", width=10, command=_cancel).pack(side="right")
+        _popup_button(buttons, text="Apply", command=_apply).pack(side="right", padx=(8, 0))
+        _popup_button(buttons, text="Cancel", command=_cancel).pack(side="right")
         popup.protocol("WM_DELETE_WINDOW", _cancel)
 
         popup.update_idletasks()
@@ -7604,7 +7622,7 @@ class CrossingReviewApp(ctk.CTk):
 
         frame = tk.Frame(popup, padx=18, pady=16, bg="#f3f4f6")
         frame.pack(fill="both", expand=True)
-        tk.Label(frame, textvariable=self.progress_label_var, anchor="w", justify="left", bg="#f3f4f6").pack(fill="x")
+        tk.Label(frame, textvariable=self.progress_label_var, anchor="w", justify="left", bg=_POPUP_BG, fg=_POPUP_FG).pack(fill="x")
         progress_bar = ttk.Progressbar(
             frame,
             variable=self.progress_value_var,
@@ -8711,15 +8729,18 @@ class CrossingReviewApp(ctk.CTk):
             outer,
             text=f"Total frames: {total:,}\nValid frame indices: 0-{last:,}",
             justify="left",
-            anchor="w",
-            bg="#f3f4f6",
+            anchor="w", bg=_POPUP_BG, fg=_POPUP_FG,
         ).pack(fill="x", pady=(0, 12))
 
-        path_frame = tk.LabelFrame(outer, text="Output", padx=10, pady=8, bg="#f3f4f6")
+        path_frame = tk.LabelFrame(outer, text="Output", padx=10, pady=8, bg=_POPUP_BG, fg=_POPUP_FG)
         path_frame.pack(fill="x", pady=(0, 10))
         path_row = tk.Frame(path_frame, bg="#f3f4f6")
         path_row.pack(fill="x")
-        path_entry = tk.Entry(path_row, textvariable=output_path_var, width=54)
+        path_entry = tk.Entry(
+            path_row, textvariable=output_path_var, width=54,
+            bg="#ffffff", fg=_POPUP_FG, insertbackground=_POPUP_FG,
+            selectbackground="#225e3b", selectforeground="#ffffff",
+        )
         path_entry.pack(side="left", fill="x", expand=True)
 
         def _browse_output_path() -> None:
@@ -8735,17 +8756,17 @@ class CrossingReviewApp(ctk.CTk):
             if selected:
                 output_path_var.set(selected)
 
-        tk.Button(path_row, text="Browse...", width=10, command=_browse_output_path).pack(side="left", padx=(8, 0))
+        _popup_button(path_row, text="Browse...", command=_browse_output_path).pack(side="left", padx=(8, 0))
 
-        range_frame = tk.LabelFrame(outer, text="Frame range", padx=10, pady=8, bg="#f3f4f6")
+        range_frame = tk.LabelFrame(outer, text="Frame range", padx=10, pady=8, bg=_POPUP_BG, fg=_POPUP_FG)
         range_frame.pack(fill="x", pady=(0, 10))
         entries: dict[str, tk.Spinbox] = {}
 
         def _range_row(label: str, key: str, initial: int) -> None:
             row = tk.Frame(range_frame, bg="#f3f4f6")
             row.pack(fill="x", pady=2)
-            tk.Label(row, text=label, width=12, anchor="w", bg="#f3f4f6").pack(side="left")
-            sp = tk.Spinbox(row, from_=0, to=last, increment=1, width=12, **_SPIN_CFG)
+            tk.Label(row, text=label, width=12, anchor="w", bg=_POPUP_BG, fg=_POPUP_FG).pack(side="left")
+            sp = tk.Spinbox(row, from_=0, to=last, increment=1, width=12, **_POPUP_SPIN_CFG)
             sp.delete(0, tk.END)
             sp.insert(0, str(int(initial)))
             sp.pack(side="left")
@@ -8798,8 +8819,8 @@ class CrossingReviewApp(ctk.CTk):
         def _cancel() -> None:
             popup.destroy()
 
-        tk.Button(buttons, text="Export", width=10, command=_apply).pack(side="right", padx=(8, 0))
-        tk.Button(buttons, text="Cancel", width=10, command=_cancel).pack(side="right")
+        _popup_button(buttons, text="Export", command=_apply).pack(side="right", padx=(8, 0))
+        _popup_button(buttons, text="Cancel", command=_cancel).pack(side="right")
         popup.protocol("WM_DELETE_WINDOW", _cancel)
 
         popup.update_idletasks()
