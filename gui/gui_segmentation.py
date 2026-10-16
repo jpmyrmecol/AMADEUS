@@ -206,10 +206,9 @@ _SPIN_CFG = dict(
     selectbackground="#1f6aa5", selectforeground="white",
 )
 
-# macOS Dark Mode can render classic Tk text white on explicit light backgrounds.
+# Use the same dark palette for dialogs and primary controls on every OS.
 _POPUP_BG = "#242424"
 _POPUP_FG = "#DCE4EE"
-_POPUP_SPIN_CFG = dict(_SPIN_CFG)
 
 
 def _popup_button(master, *, text: str, command) -> ctk.CTkButton:
@@ -3321,7 +3320,7 @@ class CrossingReviewApp(ctk.CTk):
             row = tk.Frame(parent, bg=_POPUP_BG)
             row.pack(fill="x", pady=2)
             tk.Label(row, text=label, width=16, anchor="w", bg=_POPUP_BG, fg=_POPUP_FG).pack(side="left")
-            sp = dark_spinbox(row, from_=from_, to=max(int(to_ if to_ is not None else last), 1), increment=1, width=12, **_POPUP_SPIN_CFG)
+            sp = dark_spinbox(row, from_=from_, to=max(int(to_ if to_ is not None else last), 1), increment=1, width=12, **_SPIN_CFG)
             sp.delete(0, tk.END)
             sp.insert(0, str(int(initial)))
             sp.pack(side="left")
@@ -8834,7 +8833,7 @@ class CrossingReviewApp(ctk.CTk):
             row = tk.Frame(range_frame, bg=_POPUP_BG)
             row.pack(fill="x", pady=2)
             tk.Label(row, text=label, width=12, anchor="w", bg=_POPUP_BG, fg=_POPUP_FG).pack(side="left")
-            sp = dark_spinbox(row, from_=0, to=last, increment=1, width=12, **_POPUP_SPIN_CFG)
+            sp = dark_spinbox(row, from_=0, to=last, increment=1, width=12, **_SPIN_CFG)
             sp.delete(0, tk.END)
             sp.insert(0, str(int(initial)))
             sp.pack(side="left")
