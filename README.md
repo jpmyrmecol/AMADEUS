@@ -46,6 +46,8 @@ To update, select **Update** on the Home screen.
 
 Use **Advanced Tracking** to configure individual stages and parameters, or **Multi Config Batch** to run several saved configurations.
 
+Home panels also accept drag-and-drop inputs: drop an AMADEUS tracking `config.yaml` on **Easy Tracking**, **Advanced Tracking**, **Refinement**, **Multi Config Batch**, or **Colab**; drop `segmentation_gui_config.json` on **Segmentation**; or drop a `*_cropping_trimming_config.yaml` file on **Cropping & Trimming**. **Multi Config Batch** accepts several YAML files at once and adds them to the queue without running them. Video drops remain supported on the original video-enabled panels.
+
 ## Add-ons
 
 Select **Add-ons** above **Update** on Home to install an independent application from a ZIP using drag and drop or **Browse**. Installed add-ons appear on the right with their version, declared OS support, and **Update** / **Uninstall** menus. Drag the panels to reorder them; order is saved. Developers can optionally enable Home file/video drops using `drop_extensions` in `addon.json`. Their environments and settings remain separate from AMADEUS's Python environment and are retained across AMADEUS updates. On Linux, they reside under the same AMADEUS data directory as a standard installation. Uninstalling an individual add-on deletes its complete folder, including settings, data and logs; updating an add-on preserves these files. Uninstalling AMADEUS also removes all installed add-ons, including their saved settings, data and logs.
