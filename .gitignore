@@ -1,6 +1,8 @@
 # Created by the launchers and by running AMADEUS; not part of the project.
 .venv/
 .uv/
+addons/
+.addon-storage-migration.lock
 __pycache__/
 .ffmpeg-hardware/
 .amadeus-managed-files.json
