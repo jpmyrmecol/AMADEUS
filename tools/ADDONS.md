@@ -77,7 +77,7 @@ Recognized platform values are `windows-x86_64`, `windows-arm64`, `macos-arm64`,
 
 `python` is `3.12`, `3.13` or `3.14`. `entry_point` is a relative `.py` file inside the package. Version 1 supports Python applications, not arbitrary executable installers. `dependencies` contains exact package pins such as `numpy==1.26.4`. Extras are accepted, for example `package[extra]==1.2.3`. Package source URLs, custom indexes, platform markers and source builds are not part of format 1. Dependencies must have compatible wheels on PyPI. Their transitive dependencies are resolved by uv; exact direct pins alone are not a complete dependency lock.
 
-The installer uses the uv executable prepared by the existing AMADEUS launcher. It creates a separate runtime outside the AMADEUS checkout. It never installs add-on packages into AMADEUS's `.venv`.
+The installer uses the uv executable prepared by the existing AMADEUS launcher. It creates a separate Python environment for each add-on and never installs add-on packages into AMADEUS's `.venv`. On Linux, the add-on storage directory is inside the standard AMADEUS installation directory, and `addons/` is excluded from Git. On Windows and macOS, add-on storage remains outside the AMADEUS checkout.
 
 ## File interface
 
