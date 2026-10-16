@@ -433,13 +433,16 @@ def _estimate_batch_size(
     return batch
 
 
-# Separate dispatch points deliberately retain the established formulas. ROCm
-# initially uses the memory estimate; this is not a claim of optimal throughput.
+# NVIDIA retains its AMADEUS memory estimate. ROCm training delegates
+# automatic batch selection to Ultralytics' built-in AutoBatch (batch=-1).
 def _cuda_batch_policy(**kwargs):
     return _estimate_batch_size(**kwargs)
 
 
 def _rocm_batch_policy(**kwargs):
+    if str(kwargs.get("mode", "train")).strip().lower() == "train":
+        print("[INFO] ROCm training: Ultralytics AutoBatch (batch=-1)")
+        return -1
     return _estimate_batch_size(**kwargs)
 
 
