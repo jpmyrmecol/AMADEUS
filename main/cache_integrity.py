@@ -250,7 +250,11 @@ class TrackingCache:
             return False
         expected = self.outputs(stage, family)
         signatures = [file_signature(path) for path in expected]
-        return (all(not item.get('missing', False) for item in signatures)
+        if stage == 'refinement' and self.embedding_enabled():
+            dependencies = self.outputs('embedding') + [self.record_path('embedding')]
+            if record.get('embedding_dependencies') != [file_signature(p) for p in dependencies]:
+                return False
+        return (all(item.get('size', 0) > 0 for item in signatures)
                 and signatures == record.get('outputs'))
 
     def require(self, stage: str) -> None:
@@ -309,9 +313,12 @@ class TrackingCache:
         if request != self.request(stage):
             raise RuntimeError(f'{stage} inputs changed during processing; cache was not committed.')
         signatures = [file_signature(path) for path in self.outputs(stage, family)]
-        if any(item.get('missing', False) for item in signatures):
+        if any(item.get('size', 0) <= 0 for item in signatures):
             raise RuntimeError(f'{stage} outputs are incomplete; cache was not committed.')
         record = {'request': request, 'family': family, 'outputs': signatures}
+        if stage == 'refinement' and self.embedding_enabled():
+            dependencies = self.outputs('embedding') + [self.record_path('embedding')]
+            record['embedding_dependencies'] = [file_signature(p) for p in dependencies]
         path = self.record_path(stage)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_path = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=path.parent)
@@ -334,20 +341,16 @@ def cache_for_spec(spec: dict, out_dir: str) -> TrackingCache:
 
 def validate_skipped_analysis(cfg: dict) -> None:
     """A skip never authorizes consuming stale outputs in a later stage."""
+    # Video export validates its actual create_video.WEIGHT jobs separately.
     consumers = [stage for stage, flag in _SKIP_KEYS.items() if not cfg.get(flag, False)]
-    if not cfg.get('skip_creating_video', False):
-        consumers.append('video')
     if not consumers or consumers == ['detection']:
         return
     needed = set()
-    if any(stage in consumers for stage in ('tracking', 'refinement', 'video')):
+    if any(stage in consumers for stage in ('tracking', 'refinement')):
         if cfg.get('skip_detection', False):
             needed.add('detection')
-    if any(stage in consumers for stage in ('refinement', 'video')):
-        if cfg.get('skip_id_tracking', False):
-            needed.add('tracking')
-    if 'video' in consumers and cfg.get('skip_refinement', False):
-        needed.add('refinement')
+    if 'refinement' in consumers and cfg.get('skip_id_tracking', False):
+        needed.add('tracking')
     if not needed:
         return
     detection = importlib.import_module(

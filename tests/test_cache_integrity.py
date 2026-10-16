@@ -302,7 +302,7 @@ class CacheIntegrityTests(CacheFixture):
         self.cache.begin('detection')
         path = self.cache.outputs('detection')[0]
         path.parent.mkdir(parents=True)
-        path.write_bytes(b'')
+        path.write_bytes(__import__('pickle').dumps([]))
         self.cache.complete('detection')
         self.assertTrue(self.cache.current('detection'))
 
