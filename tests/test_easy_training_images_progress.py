@@ -43,7 +43,12 @@ def progress_harness():
         "sys": sys,
         "re": re,
     }
-    mod = ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[]))
+    # Reuse the production ANSI matcher needed by the extracted output parser.
+    ansi_pattern = next(
+        n for n in tree.body if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "_ANSI_ESCAPE_RE" for t in n.targets)
+    )
+    mod = ast.fix_missing_locations(ast.Module(body=[ansi_pattern, cls], type_ignores=[]))
     exec(compile(mod, str(SOURCE), "exec"), ns)
     return ns["ProgressHarness"]()
 
@@ -108,7 +113,7 @@ class EasyTrainingImagesProgressTests(unittest.TestCase):
         h = self.h
         state = {"last_was_tqdm": False, "last_tqdm_len": 0}
         h._handle_batch_output_record(
-            "[AMADEUS TRAIN EPOCH] epoch=1/50 images=34 batch=16", state,
+            "\x1b[32m[AMADEUS TRAIN EPOCH] epoch=1/50 images=34 batch=16\x1b[0m", state,
         )
         h._handle_batch_output_record(
             "1/50 0G 0.123 0.456 0.789 11 640:  33%|####| 1/3 [00:01<00:02]", state,
@@ -131,3 +136,4 @@ class EasyTrainingImagesProgressTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
