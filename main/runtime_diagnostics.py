@@ -20,6 +20,35 @@ from main.compute_backend import Backend, detect_backend
 from main.version_info import installed_version, version_label
 
 
+def accelerator_memory_details(backend: Backend) -> dict[str, str]:
+    """Report accelerator capacity before training; never confuse MPS RAM with VRAM."""
+    gib = 1024 ** 3
+    if backend in (Backend.NVIDIA_CUDA, Backend.AMD_ROCM):
+        capacities = []
+        for index in range(torch.cuda.device_count()):
+            try:
+                total = torch.cuda.get_device_properties(index).total_memory
+                value = f"{total / gib:.2f}"
+            except Exception:
+                value = "unavailable"
+            capacities.append((index, value))
+        return {
+            # The automatic PyTorch device is cuda:0; other GPUs are listed separately.
+            "vram_total_device": "cuda:0" if capacities else "unavailable",
+            "vram_total_gib": capacities[0][1] if capacities else "unavailable",
+            "vram_by_device_gib": ", ".join(f"cuda:{idx}:{size}" for idx, size in capacities)
+            if capacities else "unavailable",
+        }
+    if backend == Backend.APPLE_MPS:
+        try:
+            value = f"{torch.mps.recommended_max_memory() / gib:.2f}"
+        except Exception:
+            value = "unavailable"
+        # Apple GPUs use unified memory; this is a recommended budget, not VRAM.
+        return {"mps_recommended_gib": value}
+    return {}
+
+
 def runtime_details() -> dict[str, str]:
     """Collect the versions and accelerator state of the running interpreter."""
     backend = detect_backend()
@@ -47,6 +76,7 @@ def runtime_details() -> dict[str, str]:
         "gpu_available": "true" if backend != Backend.CPU else "false",
         "gpu_devices": devices,
         "automatic_torch_device": automatic_device,
+        **accelerator_memory_details(backend),
     }
 
 
