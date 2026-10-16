@@ -1905,6 +1905,7 @@ class EasyTrackingGUI(ctk.CTk):
             self._render_line_chart(
                 self._display_canvas,
                 cc["values"], cc["title"], cc.get("x_label", ""), cc.get("color", "#1f8040"),
+                x_values=cc.get("x_values"),
             )
         elif cc.get("type") == "multi_chart":
             self._render_multi_line_chart(
@@ -1956,13 +1957,16 @@ class EasyTrackingGUI(ctk.CTk):
     # Line chart (drawn directly on a tk.Canvas, no matplotlib)
 
     def _draw_loss_chart(self, values: list, title: str,
-                         x_label: str = "", color: str = "#1f8040") -> None:
+                         x_label: str = "", color: str = "#1f8040",
+                         x_values: list[int] | None = None) -> None:
         self._canvas_content = {
             "type": "chart", "values": values, "title": title,
-            "x_label": x_label, "color": color,
+            "x_label": x_label, "color": color, "x_values": x_values,
         }
         self._display_canvas.delete("all")
-        self._render_line_chart(self._display_canvas, values, title, x_label, color)
+        self._render_line_chart(
+            self._display_canvas, values, title, x_label, color, x_values=x_values,
+        )
 
     def _render_line_chart(
         self, canvas: tk.Canvas, values: list, title: str,
@@ -1970,6 +1974,7 @@ class EasyTrackingGUI(ctk.CTk):
         y_offset: int = 0, panel_height: int = 0,
         x_offset: int = 0, panel_width: int = 0,
         tick_decimals: int | None = None,
+        x_values: list[int] | None = None,
     ) -> None:
         full_width = max(canvas.winfo_width(), 100)
         cw = panel_width or full_width
@@ -1987,9 +1992,12 @@ class EasyTrackingGUI(ctk.CTk):
         max_v = max(values)
         rng = (max_v - min_v) or 1e-8
         n = len(values)
+        sample_axis = x_values if x_values is not None and len(x_values) == n else None
+        x_max = max(sample_axis) if sample_axis else 0
 
         def px(i: int) -> int:
-            return plot_left + int(i / max(n - 1, 1) * pw)
+            position = sample_axis[i] / max(1, x_max) if sample_axis else i / max(n - 1, 1)
+            return plot_left + int(position * pw)
 
         def py(v: float) -> int:
             return y_offset + mt + int((1 - (v - min_v) / rng) * ph_inner)
@@ -2024,7 +2032,7 @@ class EasyTrackingGUI(ctk.CTk):
             fill="#888888", font=_VISUAL_PROGRESS_FONT, anchor="n",
         )
         canvas.create_text(
-            plot_left + pw, axis_y + 4, text=str(n - 1),
+            plot_left + pw, axis_y + 4, text=str(x_max if sample_axis else n - 1),
             fill="#888888", font=_VISUAL_PROGRESS_FONT, anchor="n",
         )
         if x_label:
@@ -2049,6 +2057,7 @@ class EasyTrackingGUI(ctk.CTk):
         y_offset: int = 0, panel_height: int = 0,
         subtitle: str = "",
         tick_decimals: int | None = None,
+        x_values: list[int] | None = None,
     ) -> None:
         """Draw multiple series on the same axes. series: [(values, color, label), ...]"""
         cw = max(canvas.winfo_width(), 100)
@@ -2069,9 +2078,12 @@ class EasyTrackingGUI(ctk.CTk):
         max_v = max(all_vals)
         rng = (max_v - min_v) or 1e-8
         n_max = max(len(vals) for vals, _, _ in valid_series)
+        sample_axis = x_values if x_values and len(x_values) == n_max else None
+        x_max = max(sample_axis) if sample_axis else 0
 
         def px(i: int, n: int) -> int:
-            return ml + int(i / max(n - 1, 1) * pw)
+            position = sample_axis[i] / max(1, x_max) if sample_axis else i / max(n - 1, 1)
+            return ml + int(position * pw)
 
         def py(v: float) -> int:
             return y_offset + mt + int((1 - (v - min_v) / rng) * ph_inner)
@@ -2108,7 +2120,7 @@ class EasyTrackingGUI(ctk.CTk):
             font=_VISUAL_PROGRESS_FONT, anchor="n",
         )
         canvas.create_text(
-            ml + pw, axis_y + 4, text=str(n_max - 1),
+            ml + pw, axis_y + 4, text=str(x_max if sample_axis else n_max - 1),
             fill="#888888", font=_VISUAL_PROGRESS_FONT, anchor="n",
         )
         if x_label:
@@ -2423,6 +2435,7 @@ class EasyTrackingGUI(ctk.CTk):
                 panel_height=half,
                 subtitle="A decreasing loss that levels off is generally a good sign.",
                 tick_decimals=3,
+                x_values=data.get("loss_x_values"),
             )
         else:
             self._render_empty_chart_panel(
