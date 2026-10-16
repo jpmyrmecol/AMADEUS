@@ -17,11 +17,19 @@ from tkinter import messagebox
 from typing import Callable
 
 try:
-    from .addon_manager import Store as AddonStore, storage_root as addon_storage_root
+    from .addon_manager import (
+        Store as AddonStore,
+        legacy_linux_storage_root,
+        storage_root as addon_storage_root,
+    )
     from .project_paths import PROJECT_ROOT
     from .update_support import terminate_other_amadeus_processes
 except ImportError:
-    from addon_manager import Store as AddonStore, storage_root as addon_storage_root
+    from addon_manager import (
+        Store as AddonStore,
+        legacy_linux_storage_root,
+        storage_root as addon_storage_root,
+    )
     from project_paths import PROJECT_ROOT
     from update_support import terminate_other_amadeus_processes
 
@@ -186,13 +194,16 @@ try {
 def _write_posix_uninstaller(project_root: Path) -> Path:
     script = Path(tempfile.gettempdir()) / f"AMADEUS-uninstall-{uuid.uuid4().hex}.sh"
     root_literal = shlex.quote(str(project_root))
-    addons_literal = shlex.quote(str(addon_storage_root()))
+    addons_literal = shlex.quote(str(addon_storage_root().resolve()))
+    legacy_root = legacy_linux_storage_root()
+    legacy_literal = shlex.quote(str(legacy_root) if legacy_root is not None else "")
     script.write_text(
         """#!/usr/bin/env bash
 set -u
 
 PROJECT_ROOT=__AMADEUS_PROJECT_ROOT__
 ADDONS_ROOT=__AMADEUS_ADDONS_ROOT__
+LEGACY_ADDONS_LINK=__AMADEUS_LEGACY_ADDONS_LINK__
 PARENT_PID="$1"
 
 is_wsl() {
@@ -256,6 +267,10 @@ case "$ADDONS_ROOT" in
         ;;
 esac
 [ ! -L "$ADDONS_ROOT" ] || fail "Refusing to remove a symbolic link as add-on storage: $ADDONS_ROOT"
+if [ -n "$LEGACY_ADDONS_LINK" ] && [ -L "$LEGACY_ADDONS_LINK" ]; then
+    [ "$(readlink "$LEGACY_ADDONS_LINK")" = "$ADDONS_ROOT" ] \
+        || fail "Unexpected legacy add-on storage link: $LEGACY_ADDONS_LINK"
+fi
 
 [ -f "$PROJECT_ROOT/VERSION" ] || fail "AMADEUS VERSION marker is missing."
 [ -f "$PROJECT_ROOT/pyproject.toml" ] || fail "AMADEUS pyproject.toml is missing."
@@ -279,6 +294,10 @@ if [ -d "$ADDONS_ROOT" ]; then
     rm -rf -- "$ADDONS_ROOT"
 fi
 [ ! -e "$ADDONS_ROOT" ] || fail "Could not completely remove add-on storage: $ADDONS_ROOT."
+if [ -n "$LEGACY_ADDONS_LINK" ] && [ -L "$LEGACY_ADDONS_LINK" ]; then
+    rm -f -- "$LEGACY_ADDONS_LINK" || fail "Could not remove legacy add-on storage link."
+    rmdir -- "${LEGACY_ADDONS_LINK%/*}" 2>/dev/null || true
+fi
 
 echo
 echo "[AMADEUS] Uninstall complete."
@@ -288,7 +307,7 @@ SELF="$0"
 rm -f -- "$SELF" 2>/dev/null || true
 sleep 3
 exit 0
-""".replace("__AMADEUS_PROJECT_ROOT__", root_literal).replace("__AMADEUS_ADDONS_ROOT__", addons_literal),
+""".replace("__AMADEUS_PROJECT_ROOT__", root_literal).replace("__AMADEUS_ADDONS_ROOT__", addons_literal).replace("__AMADEUS_LEGACY_ADDONS_LINK__", legacy_literal),
         encoding="utf-8",
     )
     script.chmod(0o700)
@@ -401,7 +420,7 @@ def start_uninstall(root, *, on_uninstall_start: Callable[[], None]) -> None:
             for item in installed
             if addon_store.running(item.manifest["id"])
         ]
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         messagebox.showerror("Uninstall AMADEUS", f"Could not check running add-ons:\n\n{exc}", parent=root)
         return
     if running_addons:
