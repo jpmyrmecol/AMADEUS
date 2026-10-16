@@ -30,6 +30,7 @@ try:
     )
     from .canvas_file_drop import install_canvas_file_drop
     from .window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from .dark_widgets import dark_spinbox
 except ImportError:  # Preserve direct execution with: python gui/gui_refinement.py
     from project_paths import (
         PROJECT_ROOT,
@@ -39,6 +40,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_refinement
     )
     from canvas_file_drop import install_canvas_file_drop
     from window_icon import configure_dpi_scaling, configure_taskbar_identity, install_window_icon
+    from dark_widgets import dark_spinbox
 
 CTK_THEME = str(gui_asset("deep_green.json"))
 
@@ -902,9 +904,9 @@ class UmaDirectionRefinementApp(ctk.CTk):
         ctk.CTkCheckBox(ctrl, text="swap front/rear", variable=self.reverse_direction_var, command=self.redraw_current_frame, **_cbkw).pack(side="left", padx=(8, 0), pady=4)
         ctk.CTkFrame(ctrl, width=2, fg_color=("gray60", "gray40"), corner_radius=0).pack(side="left", fill="y", padx=7, pady=4)
         ctk.CTkLabel(ctrl, text="Arrow width").pack(side="left")
-        tk.Spinbox(ctrl, from_=1, to=30, width=4, textvariable=self.arrow_width_var, **self._spin_cfg).pack(side="left", padx=(3, 8))
+        dark_spinbox(ctrl, from_=1, to=30, width=4, textvariable=self.arrow_width_var, **self._spin_cfg).pack(side="left", padx=(3, 8))
         ctk.CTkLabel(ctrl, text="Label size").pack(side="left")
-        tk.Spinbox(ctrl, from_=6, to=72, width=4, textvariable=self.label_size_var, **self._spin_cfg).pack(side="left", padx=(3, 8))
+        dark_spinbox(ctrl, from_=6, to=72, width=4, textvariable=self.label_size_var, **self._spin_cfg).pack(side="left", padx=(3, 8))
         ctk.CTkFrame(ctrl, width=2, fg_color=("gray60", "gray40"), corner_radius=0).pack(side="left", fill="y", padx=7, pady=4)
         self._assign_history_var = tk.StringVar()
         ctk.CTkLabel(ctrl, textvariable=self._assign_history_var, anchor="w", text_color=("gray20", "gray80")).pack(side="left", padx=(2, 0))
@@ -976,14 +978,14 @@ class UmaDirectionRefinementApp(ctk.CTk):
         ctk.CTkButton(nav, text=">|", width=50, command=self.go_last_frame).pack(side="left", padx=(0, 12))
 
         ctk.CTkLabel(nav, text="frame").pack(side="left")
-        self.frame_spin = tk.Spinbox(nav, width=10, textvariable=self.frame_var, command=self.on_frame_spin, **self._spin_cfg)
+        self.frame_spin = dark_spinbox(nav, width=10, textvariable=self.frame_var, command=self.on_frame_spin, **self._spin_cfg)
         self.frame_spin.pack(side="left", padx=(6, 12))
         self.frame_spin.bind("<Return>", self.on_frame_entry_commit, add="+")
         self.frame_spin.bind("<KP_Enter>", self.on_frame_entry_commit, add="+")
         self.frame_spin.bind("<FocusOut>", self.on_frame_entry_commit, add="+")
 
         ctk.CTkLabel(nav, text="ID").pack(side="left")
-        self.id_spin = tk.Spinbox(nav, width=8, textvariable=self.id_var, command=self.on_id_spin, wrap=True, **self._spin_cfg)
+        self.id_spin = dark_spinbox(nav, width=8, textvariable=self.id_var, command=self.on_id_spin, wrap=True, **self._spin_cfg)
         self.id_spin.pack(side="left", padx=(6, 12))
         self.id_spin.bind("<Return>", self.on_id_entry_commit, add="+")
         self.id_spin.bind("<KP_Enter>", self.on_id_entry_commit, add="+")
@@ -4294,23 +4296,23 @@ class ExportVideoDialog(ctk.CTkToplevel):
         ctk.CTkLabel(root, text="Frame range:").grid(row=0, column=0, sticky="w", **pad)
         fr_row = ctk.CTkFrame(root, corner_radius=0)
         fr_row.grid(row=0, column=1, columnspan=2, sticky="w", **pad)
-        tk.Spinbox(fr_row, from_=0, to=max(0, frame_count - 1), width=8,
+        dark_spinbox(fr_row, from_=0, to=max(0, frame_count - 1), width=8,
                    textvariable=self.start_var, **self._spin_cfg).pack(side="left")
         ctk.CTkLabel(fr_row, text=" - ").pack(side="left")
-        tk.Spinbox(fr_row, from_=0, to=max(0, frame_count - 1), width=8,
+        dark_spinbox(fr_row, from_=0, to=max(0, frame_count - 1), width=8,
                    textvariable=self.end_var, **self._spin_cfg).pack(side="left")
 
         ctk.CTkLabel(root, text="Speed multiplier:").grid(row=1, column=0, sticky="w", **pad)
         sp_row = ctk.CTkFrame(root, corner_radius=0)
         sp_row.grid(row=1, column=1, columnspan=2, sticky="w", **pad)
-        tk.Spinbox(sp_row, from_=0.1, to=100.0, increment=0.5, width=8,
+        dark_spinbox(sp_row, from_=0.1, to=100.0, increment=0.5, width=8,
                    textvariable=self.speed_var, format="%.1f", **self._spin_cfg).pack(side="left")
         ctk.CTkLabel(sp_row, text="x  (2.0 = 2x faster)").pack(side="left", padx=(6, 0))
 
         ctk.CTkLabel(root, text="Output FPS:").grid(row=2, column=0, sticky="w", **pad)
         fps_row = ctk.CTkFrame(root, corner_radius=0)
         fps_row.grid(row=2, column=1, columnspan=2, sticky="w", **pad)
-        tk.Spinbox(fps_row, from_=1.0, to=240.0, increment=1.0, width=8,
+        dark_spinbox(fps_row, from_=1.0, to=240.0, increment=1.0, width=8,
                    textvariable=self.fps_var, format="%.2f", **self._spin_cfg).pack(side="left")
         ctk.CTkLabel(fps_row, text=f"fps  (source: {self._src_fps:.2f} fps)").pack(side="left", padx=(6, 0))
 
@@ -4474,7 +4476,7 @@ class PoseConvertDialog(ctk.CTkToplevel):
 
         # n_individuals
         ctk.CTkLabel(root, text="Number of individuals:").grid(row=4, column=0, sticky="w", **pad)
-        tk.Spinbox(root, from_=1, to=999, width=8, textvariable=self.n_ind_var,
+        dark_spinbox(root, from_=1, to=999, width=8, textvariable=self.n_ind_var,
                    bg="#343638", fg="#dce4ee", insertbackground="#dce4ee",
                    disabledbackground="#343638", disabledforeground="#929292",
                    buttonbackground="#565b5e", relief="flat",
