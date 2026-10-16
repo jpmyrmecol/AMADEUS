@@ -728,7 +728,6 @@ def main() -> int:
     splash_shown_at = time.monotonic()
     has_external_splash, splash_process = ensure_external_splash()
     root = ctk.CTk()
-    print("[AMADEUS] Tk root created.", flush=True)
     root._amadeus_update_requested = False
     root._amadeus_uninstall_requested = False
     configure_dpi_scaling(root)
@@ -749,7 +748,6 @@ def main() -> int:
     install_window_icon(root)
 
     home_drop_targets = build_home(root)
-    print("[AMADEUS] Home panels built.", flush=True)
 
     external_start = external_started_at() if has_external_splash else None
     if external_start is None:
@@ -772,7 +770,6 @@ def main() -> int:
         dismiss_poll_job = None
         close_poll_job = None
         root.deiconify()
-        print("[AMADEUS] Home window displayed.", flush=True)
         install_window_icon(root)
         # Initialize tkdnd after the Home window is visible, without delaying
         # the splash reveal or altering the existing panel click actions.

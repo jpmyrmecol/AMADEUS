@@ -16,7 +16,6 @@ def main() -> int:
         check=True,
     )
     from .gui_home import main as gui_home_main
-    print("[AMADEUS] Home GUI module loaded.", flush=True)
     return gui_home_main()
 
 

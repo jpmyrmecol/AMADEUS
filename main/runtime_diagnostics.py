@@ -96,6 +96,19 @@ def runtime_summary_lines(details: dict[str, str]) -> list[str]:
     ]
 
 
+def startup_summary_lines(details: dict[str, str]) -> list[str]:
+    """Show concise startup facts without reducing per-run diagnostic detail."""
+    gpu_suffix = (
+        "" if details["gpu_available"] == "true"
+        else f" ({details['gpu_backend']}, unavailable)"
+    )
+    return [
+        f"[AMADEUS] Version: {version_label(details['amadeus_version'])}",
+        f"[AMADEUS] Python: {details['python_version']} ({details['python_executable']})",
+        f"[AMADEUS] PyTorch: {details['torch_version']}",
+        f"[AMADEUS] GPU: {details['gpu_devices']}{gpu_suffix}",
+    ]
+
 def system_details() -> dict[str, str]:
     """Collect small, non-identifying hardware facts for reproducible run logs."""
     cpu_model = platform.processor() or "unknown"
