@@ -207,15 +207,9 @@ _SPIN_CFG = dict(
 )
 
 # macOS Dark Mode can render classic Tk text white on explicit light backgrounds.
-_POPUP_BG = "#f3f4f6"
-_POPUP_FG = "#202124"
-_POPUP_SPIN_CFG = {
-    **_SPIN_CFG, "bg": "#ffffff", "fg": _POPUP_FG,
-    "disabledbackground": "#e5e7eb", "disabledforeground": "#636363",
-    "insertbackground": _POPUP_FG, "buttonbackground": "#e5e7eb",
-    "highlightbackground": "#a0a0a0",
-    "selectbackground": "#225e3b", "selectforeground": "#ffffff",
-}
+_POPUP_BG = "#242424"
+_POPUP_FG = "#DCE4EE"
+_POPUP_SPIN_CFG = dict(_SPIN_CFG)
 
 
 def _popup_button(master, *, text: str, command) -> ctk.CTkButton:
@@ -1691,7 +1685,6 @@ class CrossingReviewApp(ctk.CTk):
         self._progress_poll_job: Optional[str] = None
         self._progress_close_requested = False
         self.progress_label_var = tk.StringVar(value="")
-        self.progress_value_var = tk.DoubleVar(value=0.0)
         self._progress_cancel = False
         self._progress_queue: queue.Queue = queue.Queue()
         self.bg_preview_popup = None
@@ -3287,17 +3280,17 @@ class CrossingReviewApp(ctk.CTk):
             messagebox.showerror("Error", "Please load a video first.")
             return False
 
-        popup = tk.Toplevel(self)
+        popup = ctk.CTkToplevel(self)
         popup.title("Frame Range Settings")
         popup.transient(self)
         popup.resizable(False, False)
-        popup.configure(bg="#f3f4f6")
+        popup.configure(fg_color=_POPUP_BG)
 
         result = {"applied": False, "values": None}
         total = int(self.frame_count)
         last = total - 1
 
-        outer = tk.Frame(popup, padx=18, pady=16, bg="#f3f4f6")
+        outer = tk.Frame(popup, padx=18, pady=16, bg=_POPUP_BG)
         outer.pack(fill="both", expand=True)
 
         tk.Label(
@@ -3325,7 +3318,7 @@ class CrossingReviewApp(ctk.CTk):
             return frame
 
         def _row(parent: tk.Frame, label: str, key: str, initial: int, from_: int = 0, to_: Optional[int] = None) -> None:
-            row = tk.Frame(parent, bg="#f3f4f6")
+            row = tk.Frame(parent, bg=_POPUP_BG)
             row.pack(fill="x", pady=2)
             tk.Label(row, text=label, width=16, anchor="w", bg=_POPUP_BG, fg=_POPUP_FG).pack(side="left")
             sp = dark_spinbox(row, from_=from_, to=max(int(to_ if to_ is not None else last), 1), increment=1, width=12, **_POPUP_SPIN_CFG)
@@ -3345,9 +3338,9 @@ class CrossingReviewApp(ctk.CTk):
         _row(tr_frame, "Frame interval", "training_frame_interval", max(1, int(self.training_frame_interval_var.get())), from_=1, to_=1000000)
 
         error_var = tk.StringVar(value="")
-        tk.Label(outer, textvariable=error_var, anchor="w", justify="left", fg="#b00020", bg="#f3f4f6").pack(fill="x")
+        tk.Label(outer, textvariable=error_var, anchor="w", justify="left", fg="#FF8787", bg=_POPUP_BG).pack(fill="x")
 
-        buttons = tk.Frame(outer, bg="#f3f4f6")
+        buttons = tk.Frame(outer, bg=_POPUP_BG)
         buttons.pack(fill="x", pady=(12, 0))
 
         def _read_int(key: str) -> int:
@@ -7649,37 +7642,35 @@ class CrossingReviewApp(ctk.CTk):
 
     def _open_progress_popup(self, title: str):
         self._close_progress_popup()
-        popup = tk.Toplevel(self)
+        popup = ctk.CTkToplevel(self)
         popup.title(title)
         # Aqua can restack an independent Toplevel behind the maximized parent.
         # Keep the independent taskbar window behavior on Windows and Linux.
         if platform.system() == "Darwin":
             popup.transient(self)
         popup.resizable(False, False)
-        popup.configure(bg="#f3f4f6")
+        popup.configure(fg_color=_POPUP_BG)
         try:
             popup.attributes("-topmost", False)
         except Exception:
             pass
         popup.protocol("WM_DELETE_WINDOW", self._request_progress_cancel)
 
-        frame = tk.Frame(popup, padx=18, pady=16, bg="#f3f4f6")
+        frame = tk.Frame(popup, padx=18, pady=16, bg=_POPUP_BG)
         frame.pack(fill="both", expand=True)
         tk.Label(frame, textvariable=self.progress_label_var, anchor="w", justify="left", bg=_POPUP_BG, fg=_POPUP_FG).pack(fill="x")
-        progress_bar = ttk.Progressbar(
-            frame,
-            variable=self.progress_value_var,
-            maximum=100,
-            mode="determinate",
-            length=360,
+        progress_bar = ctk.CTkProgressBar(
+            frame, mode="determinate", width=360, height=12,
+            fg_color="#4A4D50", progress_color="#1A7C48",
         )
+        progress_bar.set(0.0)
         progress_bar.pack(fill="x", pady=(12, 0))
 
         self.progress_popup = popup
         self.progress_bar = progress_bar
         self._progress_indeterminate = False
         self.progress_label_var.set("Preparing...")
-        self.progress_value_var.set(0.0)
+        self.progress_bar.set(0.0)
         self._place_progress_popup()
         popup.deiconify()
         popup.lift()
@@ -7729,16 +7720,16 @@ class CrossingReviewApp(ctk.CTk):
         self.progress_label_var.set(text)
         if value is None:
             if self.progress_bar is not None and not self._progress_indeterminate:
-                self.progress_value_var.set(0.0)
+                self.progress_bar.set(0.0)
                 self.progress_bar.configure(mode="indeterminate")
-                self.progress_bar.start(12)
+                self.progress_bar.start()
                 self._progress_indeterminate = True
         else:
             if self.progress_bar is not None and self._progress_indeterminate:
                 self.progress_bar.stop()
                 self.progress_bar.configure(mode="determinate")
                 self._progress_indeterminate = False
-            self.progress_value_var.set(value)
+            self.progress_bar.set(value / 100.0)
 
     def _close_progress_popup(self):
         if self._progress_poll_job is not None:
@@ -7783,7 +7774,7 @@ class CrossingReviewApp(ctk.CTk):
         try:
             self._open_progress_popup(title)
             self.progress_label_var.set(start_text)
-            self.progress_value_var.set(0.0)
+            self.progress_bar.set(0.0)
             self._place_progress_popup()
         except Exception:
             self._progress_busy = False
@@ -8790,16 +8781,16 @@ class CrossingReviewApp(ctk.CTk):
         default_start = max(0, min(last, int(self.training_frame_start_var.get())))
         default_end = max(default_start, self._resolved_frame_end(int(self.training_frame_end_var.get())))
 
-        popup = tk.Toplevel(self)
+        popup = ctk.CTkToplevel(self)
         popup.title("Export Labeled Video")
         popup.transient(self)
         popup.resizable(False, False)
-        popup.configure(bg="#f3f4f6")
+        popup.configure(fg_color=_POPUP_BG)
 
         result: dict[str, object] = {"applied": False}
         output_path_var = tk.StringVar(value=self._default_labeled_video_path())
 
-        outer = tk.Frame(popup, padx=18, pady=16, bg="#f3f4f6")
+        outer = tk.Frame(popup, padx=18, pady=16, bg=_POPUP_BG)
         outer.pack(fill="both", expand=True)
 
         tk.Label(
@@ -8811,12 +8802,12 @@ class CrossingReviewApp(ctk.CTk):
 
         path_frame = tk.LabelFrame(outer, text="Output", padx=10, pady=8, bg=_POPUP_BG, fg=_POPUP_FG)
         path_frame.pack(fill="x", pady=(0, 10))
-        path_row = tk.Frame(path_frame, bg="#f3f4f6")
+        path_row = tk.Frame(path_frame, bg=_POPUP_BG)
         path_row.pack(fill="x")
         path_entry = tk.Entry(
             path_row, textvariable=output_path_var, width=54,
-            bg="#ffffff", fg=_POPUP_FG, insertbackground=_POPUP_FG,
-            selectbackground="#225e3b", selectforeground="#ffffff",
+            bg="#343638", fg=_POPUP_FG, insertbackground=_POPUP_FG,
+            selectbackground="#1F6AA5", selectforeground="#FFFFFF",
         )
         path_entry.pack(side="left", fill="x", expand=True)
 
@@ -8840,7 +8831,7 @@ class CrossingReviewApp(ctk.CTk):
         entries: dict[str, tk.Spinbox] = {}
 
         def _range_row(label: str, key: str, initial: int) -> None:
-            row = tk.Frame(range_frame, bg="#f3f4f6")
+            row = tk.Frame(range_frame, bg=_POPUP_BG)
             row.pack(fill="x", pady=2)
             tk.Label(row, text=label, width=12, anchor="w", bg=_POPUP_BG, fg=_POPUP_FG).pack(side="left")
             sp = dark_spinbox(row, from_=0, to=last, increment=1, width=12, **_POPUP_SPIN_CFG)
@@ -8854,9 +8845,9 @@ class CrossingReviewApp(ctk.CTk):
         _range_row("End frame", "end", default_end)
 
         error_var = tk.StringVar(value="")
-        tk.Label(outer, textvariable=error_var, anchor="w", justify="left", fg="#b00020", bg="#f3f4f6").pack(fill="x")
+        tk.Label(outer, textvariable=error_var, anchor="w", justify="left", fg="#FF8787", bg=_POPUP_BG).pack(fill="x")
 
-        buttons = tk.Frame(outer, bg="#f3f4f6")
+        buttons = tk.Frame(outer, bg=_POPUP_BG)
         buttons.pack(fill="x", pady=(12, 0))
 
         def _normalized_output_path() -> str:
