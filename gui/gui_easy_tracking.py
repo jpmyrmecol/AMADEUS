@@ -242,7 +242,6 @@ class EasyTrackingGUI(ctk.CTk):
         install_window_icon(self)
         self.title("AMADEUS Easy Tracking")
         self.geometry("1300x840")
-        self.minsize(900, 600)
 
         self._seg_proc: subprocess.Popen | None = None
         self._seg_poll_id: str | None = None
@@ -307,7 +306,7 @@ class EasyTrackingGUI(ctk.CTk):
         self._system_monitor_snapshot: dict[str, float | str | None] = {}
         self._system_monitor_canvas: tk.Canvas | None = None
         self._system_monitor_canvas_size: tuple[int, int] | None = None
-        self._system_monitor_meter_items: dict[str, dict[str, int | float]] = {}
+        self._system_monitor_meter_items: dict[str, dict[str, int | float | str]] = {}
         self._system_monitor_backend_item: int | None = None
         self._system_monitor_stop = threading.Event()
         self._system_monitor_thread: threading.Thread | None = None
@@ -352,6 +351,7 @@ class EasyTrackingGUI(ctk.CTk):
     # UI construction
     def _build_ui(self) -> None:
         # Resizable split layout: left controls | right preview canvas.
+        pane_padding = 8
         pane = tk.PanedWindow(
             self,
             orient=tk.HORIZONTAL,
@@ -363,7 +363,7 @@ class EasyTrackingGUI(ctk.CTk):
             handlesize=14,
             opaqueresize=True,
         )
-        pane.pack(fill="both", expand=True)
+        pane.pack(fill="both", expand=True, padx=pane_padding, pady=(0, 8))
 
         left_wrap = ctk.CTkFrame(pane, corner_radius=0, width=800)
         left_wrap.pack_propagate(False)
@@ -393,9 +393,14 @@ class EasyTrackingGUI(ctk.CTk):
         self._video_prompt_host = ctk.CTkFrame(left_wrap, corner_radius=0)
         self._video_prompt_host.pack(fill="both", expand=True)
         right = tk.Frame(pane, bg="#181818", width=480)
+        right.grid_propagate(False)
 
-        pane.add(left_wrap, minsize=540)
-        pane.add(right, minsize=360)
+        left_min_width, right_min_width = 540, 360
+        pane.add(left_wrap, minsize=left_min_width)
+        pane.add(right, minsize=right_min_width)
+        # The handle can occupy more space than the visible sash itself.
+        sash_width = max(int(pane.cget("sashwidth")), int(pane.cget("handlesize")))
+        self.minsize(left_min_width + right_min_width + sash_width + 2 * pane_padding, 600)
 
         self._build_video_prompt(self._video_prompt_host)
         video_area = ctk.CTkFrame(left, fg_color="transparent")
@@ -1807,6 +1812,7 @@ class EasyTrackingGUI(ctk.CTk):
             pady=8,
         )
         self._next_action_label.grid(row=1, column=0, sticky="ew", padx=4, pady=(4, 0))
+        self._next_action_label.bind("<Configure>", self._wrap_canvas_panel_label)
 
         self._canvas_status = tk.Label(
             parent, text="Waiting for processing to start...",
@@ -1814,7 +1820,15 @@ class EasyTrackingGUI(ctk.CTk):
             wraplength=600, justify="center",
         )
         self._canvas_status.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 6))
+        self._canvas_status.bind("<Configure>", self._wrap_canvas_panel_label)
         self.after_idle(self._update_next_action)
+
+    def _wrap_canvas_panel_label(self, event: tk.Event) -> None:
+        label = event.widget
+        inset = 2 * sum(int(label.cget(option)) for option in ("padx", "borderwidth", "highlightthickness"))
+        wraplength = max(1, event.width - inset)
+        if int(label.cget("wraplength")) != wraplength:
+            label.configure(wraplength=wraplength)
 
     def _update_next_action(self) -> None:
         if not hasattr(self, "_next_action_label"):
@@ -1989,7 +2003,7 @@ class EasyTrackingGUI(ctk.CTk):
         )
         canvas.create_text(
             plot_left + pw, axis_y + 4, text=str(x_max if sample_axis else n - 1),
-            fill="#888888", font=_VISUAL_PROGRESS_FONT, anchor="n",
+            fill="#888888", font=_VISUAL_PROGRESS_FONT, anchor="ne",
         )
         if x_label:
             canvas.create_text(
@@ -2025,10 +2039,25 @@ class EasyTrackingGUI(ctk.CTk):
         mt = 48 if subtitle else 28
         mb = 36
         pw = cw - ml - mr
-        ph_inner = ph - mt - mb
 
         valid_series = [(vals, col, lbl) for vals, col, lbl in series if vals]
-        if not valid_series or pw < 20 or ph_inner < 20:
+        if not valid_series or pw < 20:
+            return
+
+        canvas.create_rectangle(0, y_offset, cw, y_offset + ph, fill="#1a1a1a", outline="")
+        canvas.create_text(
+            cw // 2, y_offset + 11, text=title,
+            fill="#cccccc", font=_VISUAL_PROGRESS_TITLE_FONT, anchor="center",
+        )
+        if subtitle:
+            subtitle_item = canvas.create_text(
+                cw // 2, y_offset + 23, text=subtitle,
+                fill="#999999", font=_VISUAL_PROGRESS_FONT, anchor="n",
+                width=max(1, cw - 24), justify="center",
+            )
+            mt = max(mt, canvas.bbox(subtitle_item)[3] - y_offset + 10)
+        ph_inner = ph - mt - mb
+        if ph_inner < 20:
             return
 
         all_vals = [v for vals, _, _ in valid_series for v in vals]
@@ -2045,17 +2074,6 @@ class EasyTrackingGUI(ctk.CTk):
 
         def py(v: float) -> int:
             return y_offset + mt + int((1 - (v - min_v) / rng) * ph_inner)
-
-        canvas.create_rectangle(0, y_offset, cw, y_offset + ph, fill="#1a1a1a", outline="")
-        canvas.create_text(
-            cw // 2, y_offset + 11, text=title,
-            fill="#cccccc", font=_VISUAL_PROGRESS_TITLE_FONT, anchor="center",
-        )
-        if subtitle:
-            canvas.create_text(
-                cw // 2, y_offset + 29, text=subtitle,
-                fill="#999999", font=_VISUAL_PROGRESS_FONT, anchor="center",
-            )
 
         for frac in (0.0, 0.5, 1.0):
             v = min_v + frac * rng
@@ -2079,7 +2097,7 @@ class EasyTrackingGUI(ctk.CTk):
         )
         canvas.create_text(
             ml + pw, axis_y + 4, text=str(x_max if sample_axis else n_max - 1),
-            fill="#888888", font=_VISUAL_PROGRESS_FONT, anchor="n",
+            fill="#888888", font=_VISUAL_PROGRESS_FONT, anchor="ne",
         )
         if x_label:
             canvas.create_text(
@@ -2091,7 +2109,8 @@ class EasyTrackingGUI(ctk.CTk):
             n = len(vals)
             cutoff = min(max(0, history_count), n) if not show_legend else 0
             segments = (
-                [(0, cutoff, "#87a793"), (cutoff, n, color)]
+                [(0, cutoff, "#87a793"), (max(0, cutoff - 1), n, color)]
+                if 0 < cutoff < n else [(0, n, "#87a793")]
                 if cutoff else [(0, n, color)]
             )
             for start, stop, segment_color in segments:
@@ -2177,7 +2196,7 @@ class EasyTrackingGUI(ctk.CTk):
             canvas.create_text(
                 x_offset + cw // 2, y_offset + ph // 2, text=msg,
                 fill="#888888", font=_VISUAL_PROGRESS_FONT,
-                justify="center", width=max(80, cw - 24), anchor="center",
+                justify="center", width=max(1, cw - 24), anchor="center",
             )
 
     def _render_system_monitor(
@@ -2219,17 +2238,19 @@ class EasyTrackingGUI(ctk.CTk):
         # Keep the monitor title, backend label, and first meter row visually
         # distinct.  These use the same font size as the rest of Visual Progress,
         # so explicit vertical spacing is needed to avoid crowding.
-        canvas.create_text(
-            width // 2, 12, text="System Monitor", fill="#cccccc",
-            font=_VISUAL_PROGRESS_TITLE_FONT, anchor="center",
+        title_item = canvas.create_text(
+            width // 2, 5, text="System Monitor", fill="#cccccc",
+            font=_VISUAL_PROGRESS_TITLE_FONT, anchor="n",
+            width=max(1, width - 8), justify="center",
         )
+        backend_y = max(31, canvas.bbox(title_item)[3] + 8)
         self._system_monitor_backend_item = canvas.create_text(
-            width // 2, 38, text="Waiting for metrics...", fill="#999999",
-            font=_VISUAL_PROGRESS_FONT, anchor="center", width=max(1, width - 8),
+            width // 2, backend_y, text="Waiting for metrics...", fill="#999999",
+            font=_VISUAL_PROGRESS_FONT, anchor="n", width=max(1, width - 8),
             justify="center",
         )
 
-        gauge_top = 62
+        gauge_top = max(62, canvas.bbox(self._system_monitor_backend_item)[3] + 10)
         row_height = max(1.0, (height - gauge_top) / 2.0)
         cell_width = width / 3.0
         canvas.create_line(0, gauge_top + row_height, width, gauge_top + row_height,
@@ -2248,15 +2269,17 @@ class EasyTrackingGUI(ctk.CTk):
             center_x = x0 + cell_width / 2.0
             radius = max(2.0, min((cell_width - 8.0) / 2.0, row_height * 0.34))
             center_y = y0 + row_height * 0.60
+            meter_tag = f"meter_{index}"
 
             # Position the meter name relative to the actual arc instead of the
             # top of the cell.  Leave roughly one character of visible space
             # between the label and the meter arc.
             arc_top = center_y - radius
-            label_y = max(y0 + 9.0, arc_top - 20.0)
-            canvas.create_text(
+            label_y = max(y0 + 9.0, arc_top - 7.0)
+            name_item = canvas.create_text(
                 center_x, label_y, text=name, fill="#c7d0ca",
-                font=_VISUAL_PROGRESS_FONT, anchor="center",
+                font=_VISUAL_PROGRESS_FONT, anchor="s",
+                width=max(1, int(cell_width - 4)), justify="center",
             )
 
             arc_points = []
@@ -2267,7 +2290,7 @@ class EasyTrackingGUI(ctk.CTk):
                     center_y - radius * math.sin(theta),
                 ))
             canvas.create_line(
-                *arc_points, fill="#46534a", width=3, smooth=True,
+                *arc_points, fill="#46534a", width=3, smooth=True, tags=meter_tag,
             )
 
             for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
@@ -2279,18 +2302,18 @@ class EasyTrackingGUI(ctk.CTk):
                     center_y - inner * math.sin(theta),
                     center_x + outer * math.cos(theta),
                     center_y - outer * math.sin(theta),
-                    fill="#829087", width=1,
+                    fill="#829087", width=1, tags=meter_tag,
                 )
 
             needle = canvas.create_line(
                 center_x, center_y, center_x, center_y,
-                fill="#58a977", width=2.5, state="hidden",
+                fill="#58a977", width=2.5, state="hidden", tags=meter_tag,
             )
             hub_radius = 3.0
             hub = canvas.create_oval(
                 center_x - hub_radius, center_y - hub_radius,
                 center_x + hub_radius, center_y + hub_radius,
-                fill="#9ba99e", outline="",
+                fill="#9ba99e", outline="", tags=meter_tag,
             )
             # Keep the numeric readout close to the meter itself rather than
             # anchoring it to the bottom of the cell.  About two text-height
@@ -2302,11 +2325,20 @@ class EasyTrackingGUI(ctk.CTk):
                 width=max(1, int(cell_width - 4)), justify="center",
             )
             self._system_monitor_meter_items[name] = {
+                "name": name_item,
                 "needle": needle,
                 "value": value,
+                "meter_tag": meter_tag,
                 "center_x": center_x,
                 "center_y": center_y,
+                "preferred_center_y": center_y,
+                "radius": radius,
+                "base_radius": radius,
+                "value_y": value_y,
+                "row_top": y0,
+                "row_bottom": y0 + row_height,
                 "needle_length": int(max(1.0, radius - 9.0)),
+                "base_needle_length": int(max(1.0, radius - 9.0)),
             }
 
     def _update_system_monitor_meter_values(self, canvas: tk.Canvas) -> None:
@@ -2323,6 +2355,9 @@ class EasyTrackingGUI(ctk.CTk):
 
         def pair_label(current: float, maximum: float, unit: str) -> str:
             compact_value = f"{current:.1f}/{maximum:.1f}"
+            text_width = int(canvas.tk.call("font", "measure", _VISUAL_PROGRESS_FONT, compact_value))
+            if text_width > max(1, int(width / 3.0 - 4)):
+                return f"{current:.1f}/\n{maximum:.1f}\n{unit}"
             if width / 3.0 < 112.0:
                 return f"{compact_value}\n{unit}"
             return f"{compact_value} {unit}"
@@ -2361,6 +2396,32 @@ class EasyTrackingGUI(ctk.CTk):
         for name, (label, fraction) in measurements.items():
             items = self._system_monitor_meter_items[name]
             canvas.itemconfigure(items["value"], text=label)
+            value_bounds = canvas.bbox(items["value"])
+            value_height = value_bounds[3] - value_bounds[1]
+            name_bounds = canvas.bbox(items["name"])
+            name_height = name_bounds[3] - name_bounds[1]
+            # Reserve the measured text height when narrow cells wrap readouts.
+            gauge_space = items["row_bottom"] - items["row_top"] - name_height - value_height - 8
+            radius = max(2.0, min(items["base_radius"], gauge_space / (1 + 3 / items["base_radius"])))
+            scale = radius / items["radius"]
+            if scale != 1.0:
+                canvas.scale(items["meter_tag"], items["center_x"], items["center_y"], scale, scale)
+                items["radius"] = radius
+            hub_radius = 3 * radius / items["base_radius"]
+            items["needle_length"] = items["base_needle_length"] * radius / items["base_radius"]
+            center_y = min(
+                max(items["preferred_center_y"], items["row_top"] + name_height + radius + 4),
+                items["row_bottom"] - value_height - hub_radius - 4,
+            )
+            canvas.move(items["meter_tag"], 0, center_y - items["center_y"])
+            items["center_y"] = center_y
+            name_y = max(items["row_top"] + name_height + 2, center_y - items["radius"] - 7)
+            canvas.coords(items["name"], items["center_x"], name_y)
+            value_y = max(
+                center_y + hub_radius + 2 + value_height / 2,
+                min(items["value_y"], items["row_bottom"] - 2 - value_height / 2),
+            )
+            canvas.coords(items["value"], items["center_x"], value_y)
             if fraction is None:
                 canvas.itemconfigure(items["needle"], state="hidden")
                 continue
@@ -2376,7 +2437,7 @@ class EasyTrackingGUI(ctk.CTk):
             canvas.itemconfigure(items["needle"], state="normal")
 
     def _render_training_monitor(self, data: dict) -> None:
-        """Training view: full-width loss above 3:1 mAP fitness/system monitor."""
+        """Training view: full-width loss above a responsive fitness/monitor split."""
         self._canvas_content = {"type": "training_monitor", "data": data}
         c = self._display_canvas
         c.delete("all")
@@ -2409,8 +2470,8 @@ class EasyTrackingGUI(ctk.CTk):
             )
 
         c.create_line(0, half, cw, half, fill="#2d2d2d", width=1)
-        fitness_width = max(1, int(round(cw * 0.75)))
-        monitor_width = max(1, cw - fitness_width)
+        monitor_width = max(cw - int(round(cw * 0.75)), min(180, cw // 2))
+        fitness_width = max(1, cw - monitor_width)
 
         if fitness:
             self._render_line_chart(
@@ -2637,7 +2698,7 @@ class EasyTrackingGUI(ctk.CTk):
     # Canvas content updaters
 
     def _show_training_loss(self, session: str) -> None:
-        """Plot completed training epochs from CSV plus the active epoch's live Loss."""
+        """Keep live Loss continuous, with CSV means before the retained history."""
         # The running trainer identifies its own CSV, including resumed
         # and direction-free runs. Never borrow another experiment's CSV.
         path = self._train_results_csv
@@ -2647,52 +2708,67 @@ class EasyTrackingGUI(ctk.CTk):
         # The checkpoint defines which epochs are complete. During a recovery,
         # any old CSV row for the epoch now being replayed must not be plotted.
         active_epoch = self._train_epoch
+        epoch_size = self._train_epoch_images
+        batch_size = self._train_batch_size
+        live_count = len(self._batch_losses)
         saved = [
             (epoch, loss)
             for epoch, loss in zip(data.get("train_epochs", []), data.get("train", []))
             if active_epoch == 0 or epoch < active_epoch
         ]
-        epoch_size = self._train_epoch_images
-        batch_size = self._train_batch_size
-        live = list(zip(self._batch_loss_images, self._batch_losses))
-        live_count = len(live)
-        # Rendering at most about 1200 current-epoch points prevents the Tk
-        # Canvas from slowing down on exceptionally large training datasets.
-        if len(live) > 1200:
-            stride = math.ceil((len(live) - 1) / 1199)
-            sampled = live[::stride]
-            if sampled[-1] != live[-1]:
-                sampled.append(live[-1])
-            live = sampled
+        if live_count:
+            # Completed epochs already represented by live points must not
+            # appear again as CSV means or send the image axis backwards.
+            saved = [
+                (epoch, loss) for epoch, loss in saved
+                if epoch * epoch_size < self._batch_loss_images[0]
+            ]
 
-        loss_values = [loss for _, loss in saved] + [loss for _, loss in live]
-        if not loss_values:
+        saved_count = len(saved)
+        point_count = saved_count + live_count
+        if not point_count:
             self._draw_placeholder("Training in progress...\nLoss chart will appear here.")
             self._canvas_status.configure(text="Waiting for training results...")
             return
 
-        if epoch_size > 0:
-            x_values = [epoch * epoch_size for epoch, _ in saved] + [
-                images for images, _ in live
-            ]
-        else:
-            # The actual image count arrives from the trainer on epoch start.
-            # Before that, stored CSV epochs still have meaningful coordinates.
-            x_values = [epoch for epoch, _ in saved]
+        # Bound rendering work across the whole run without copying every
+        # recorded batch on each refresh. Keep both sides of the CSV/live join.
+        stride = max(1, math.ceil((point_count - 1) / 1199))
+        indices = list(range(0, point_count, stride))
+        if indices[-1] != point_count - 1:
+            indices.append(point_count - 1)
+        if saved_count and live_count:
+            indices = sorted(set(indices + [saved_count - 1, saved_count]))
+        loss_values, x_values = [], []
+        history_count = 0
+        for index in indices:
+            if index < saved_count:
+                epoch, loss = saved[index]
+                x_values.append(epoch * epoch_size if epoch_size > 0 else epoch)
+                loss_values.append(loss)
+                history_count += 1
+            else:
+                live_index = index - saved_count
+                x_values.append(self._batch_loss_images[live_index])
+                loss_values.append(self._batch_losses[live_index])
         self._draw_training_monitor(
             {
                 "loss_series": [(loss_values, "#1f8040", "train")],
                 "loss_x_label": "Images" if epoch_size > 0 else "epoch",
-                "loss_x_values": x_values if len(x_values) == len(loss_values) else None,
-                "loss_history_count": len(saved),
+                "loss_x_values": x_values,
+                "loss_history_count": history_count,
                 "fitness": fitness,
             }
         )
-        if live:
+        if live_count:
+            current_batch = math.ceil(
+                max(0, self._batch_loss_images[-1] - (active_epoch - 1) * epoch_size)
+                / batch_size
+            )
             status = (
-                f"Batch {live_count}  |  Batch size {batch_size}"
-                f"  |  Images {live[-1][0]}"
-                f"  |  train/box_loss = {live[-1][1]:.3f}"
+                f"Batch {current_batch}  |  Batch size {batch_size}"
+                f"  |  Images {self._batch_loss_images[-1]}"
+                f"  |  train/box_loss = {self._batch_losses[-1]:.3f}"
             )
         else:
             latest_epoch, latest_loss = saved[-1]
@@ -2890,11 +2966,9 @@ class EasyTrackingGUI(ctk.CTk):
     ) -> None:
         """Use the running trainer's actual dataset size and batch size."""
         self._train_epoch_started_at = received_at
-        if self._active_step == 7:
-            # Keep fine-grained Loss data for the active epoch only. On OOM
-            # recovery the callback fires again for the restarted epoch.
-            self._batch_losses = []
-            self._batch_loss_images = []
+        # Ordinary epoch changes retain completed live history. A restarted
+        # epoch discards only points belonging to the attempt being replayed.
+        self._trim_training_loss((epoch - 1) * images, refine=self._active_step == 2)
         self._train_epoch = epoch
         self._train_total_epochs = total_epochs
         self._train_epoch_images = images
@@ -2903,11 +2977,11 @@ class EasyTrackingGUI(ctk.CTk):
         device = f"   {self._training_backend_label}" if self._training_backend_label else ""
         self._on_tqdm_progress(
             0.0,
-            f"Epoch: {epoch}/{total_epochs}{device}   --fps",
+            f"Epoch: {epoch}/{total_epochs}{device}   --fps   ETA: --h --m --s",
         )
 
     def _training_progress(self, desc: str, batch: int, batch_total: int, received_at: float):
-        """Display progress through the current epoch and image throughput."""
+        """Display epoch progress, throughput and time left for all training epochs."""
         match = _YOLO_TRAIN_DESC_PAT.match(desc)
         if match is None:
             return None
@@ -2928,22 +3002,36 @@ class EasyTrackingGUI(ctk.CTk):
         elapsed = now - self._train_epoch_started_at
         fps = processed / elapsed if elapsed > 0 and processed > 0 else None
         fps_text = f"{fps:.0f}fps" if fps is not None else "--fps"
+        eta_text = "ETA: --h --m --s"
+        if fps is not None:
+            # Project the remaining training images at the same unrounded rate
+            # shown as fps. Validation and checkpoint saves are not timed here.
+            remaining_images = max(0, total_epochs * epoch_images - self._train_processed_images)
+            seconds = math.ceil(remaining_images / fps)
+            hours, seconds = divmod(seconds, 3600)
+            minutes, seconds = divmod(seconds, 60)
+            eta_text = f"ETA: {hours}h {minutes:02d}m {seconds:02d}s"
         fields = [f"Epoch: {epoch}/{total_epochs}"]
         if self._training_backend_label:
             fields.append(self._training_backend_label)
-        fields.extend((f"{image_size}px", fps_text))
+        fields.extend((f"{image_size}px", fps_text, eta_text))
         return max(0.0, min(1.0, batch / max(1, batch_total))), _TRAIN_FIELD_GAP.join(fields)
+
+    def _trim_training_loss(self, images: int, *, refine: bool) -> None:
+        """Discard live samples after a restored checkpoint or epoch boundary."""
+        values = self._refine_losses if refine else self._batch_losses
+        counts = self._refine_loss_images if refine else self._batch_loss_images
+        while counts and counts[-1] > images:
+            counts.pop()
+            values.pop()
 
     def _record_training_loss(self, value: float, images: int, *, refine: bool) -> None:
         """One loss point per processed batch, ordered by cumulative images."""
         if images <= 0:
             return
+        self._trim_training_loss(images, refine=refine)
         values = self._refine_losses if refine else self._batch_losses
         counts = self._refine_loss_images if refine else self._batch_loss_images
-        # A resumed attempt can replay images after its last checkpoint.
-        while counts and counts[-1] > images:
-            counts.pop()
-            values.pop()
         if counts and counts[-1] == images:
             values[-1] = value
         else:
@@ -2954,15 +3042,23 @@ class EasyTrackingGUI(ctk.CTk):
         c = self._progress_canvas
         c.delete("all")
         w = c.winfo_width()
-        h = c.winfo_height()
         if w <= 1:
             return
+        text_item = c.create_text(
+            w // 2, 0, text=self._progress_text, fill="white",
+            font=("TkDefaultFont", 10, "bold"), anchor="n", width=max(1, w - 16),
+        )
+        text_bounds = c.bbox(text_item)
+        h = max(30, text_bounds[3] - text_bounds[1] + 8)
+        if int(c.cget("height")) != h:
+            c.configure(height=h)
+        c.coords(text_item, w // 2, h // 2)
+        c.itemconfigure(text_item, anchor="center")
         c.create_rectangle(0, 0, w, h, fill="#2b2b2b", outline="")
         filled = max(0, int(w * self._progress_pct))
         if filled:
             c.create_rectangle(0, 0, filled, h, fill="#1f8040", outline="")
-        c.create_text(w // 2, h // 2, text=self._progress_text, fill="white",
-                      font=("TkDefaultFont", 10, "bold"), anchor="center")
+        c.tag_raise(text_item)
 
     def _set_progress(self, pct: float, text: str) -> None:
         self._progress_pct = max(0.0, min(1.0, pct))
@@ -3843,12 +3939,16 @@ class EasyTrackingGUI(ctk.CTk):
 
         run_prefix = "[AMADEUS TRAIN RUN] "
         if line.startswith(run_prefix):
-            if self._active_step == 7:
+            if self._active_step in (2, 7):
                 run = json.loads(line[len(run_prefix):])
+                completed_epochs = int(run["completed_epochs"])
+                retained_images = (
+                    completed_epochs * self._train_epoch_images
+                    if run["results_csv"] == self._train_results_csv else 0
+                )
+                self._trim_training_loss(retained_images, refine=self._active_step == 2)
                 self._train_results_csv = run["results_csv"]
-                self._train_epoch = int(run["completed_epochs"]) + 1
-                self._batch_losses = []
-                self._batch_loss_images = []
+                self._train_epoch = completed_epochs + 1
             return
 
         epoch_meta = _TRAIN_EPOCH_META_PAT.fullmatch(line)
