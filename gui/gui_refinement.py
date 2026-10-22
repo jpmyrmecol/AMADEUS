@@ -4288,12 +4288,6 @@ class ExportVideoDialog(ctk.CTkToplevel):
             self._width_rows[mode] = width_row
         self._update_render_mode_controls()
 
-        if not self.has_obb_data:
-            ctk.CTkLabel(
-                root, text="OBB and ellipse require AMADEUS result geometry.",
-                text_color="#9aa4ad", anchor="w",
-            ).grid(row=4, column=0, columnspan=3, sticky="e", padx=8)
-
         ctk.CTkLabel(root, text="Output path:").grid(row=5, column=0, sticky="w", **pad)
         out_row = ctk.CTkFrame(root, corner_radius=0)
         out_row.grid(row=5, column=1, columnspan=2, sticky="we", **pad)
