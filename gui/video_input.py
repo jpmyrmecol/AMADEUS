@@ -47,6 +47,7 @@ from main.video_compat import (  # noqa: E402
     ffmpeg_is_available,
     find_existing_conversions,
     metadata_path_for,
+    probe_opencv,
     read_conversion_metadata,
     run_conversion,
     validate_frame_range,
@@ -415,6 +416,22 @@ class VideoConversionDialog(ctk.CTkToplevel):
                     messagebox.showerror(
                         "Video conversion",
                         f"The analysis copy is no longer there:\n{converted}",
+                        parent=self,
+                    )
+                    return
+                probe = probe_opencv(converted)
+                recorded_frames = int(metadata.get("converted_video", {}).get("frames_written", 0) or 0)
+                if not (
+                    probe.opened and probe.first_frame_decoded and probe.random_seek_ok
+                    and probe.seekable_frame_count > 0
+                    and probe.seekable_frame_count == probe.reported_frame_count
+                    and (recorded_frames <= 0 or recorded_frames == probe.seekable_frame_count)
+                ):
+                    messagebox.showerror(
+                        "Video conversion",
+                        "The saved analysis copy is damaged or cannot be accessed "
+                        "frame by frame. Convert the source video again:\n\n"
+                        f"{converted}",
                         parent=self,
                     )
                     return
