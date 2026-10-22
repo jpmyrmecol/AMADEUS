@@ -106,7 +106,7 @@ class OBBGeometryTests(unittest.TestCase):
                 )
                 self.assertFalse(transparent[25, 60].any())
                 self.assertTrue(opaque[25, 60].any())
-                edge = (35, 50) if mode == "obb" else (60, 50)
+                edge = (85, 50) if mode == "obb" else (60, 50)
                 np.testing.assert_array_equal(
                     transparent[edge], opaque[edge],
                 )
