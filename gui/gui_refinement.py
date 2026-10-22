@@ -58,7 +58,10 @@ from gui.refinement_video_export import (
     DEFAULT_CENTER_RADIUS,
     DEFAULT_ELLIPSE_WIDTH,
     DEFAULT_OBB_WIDTH,
+    DIRECTION_MARKER_ALPHA,
     RENDER_MODES,
+    crop_refinement_preview,
+    draw_refinement_annotations,
     export_refinement_video as _export_video,
     prepare_refined_obb_rows,
 )
@@ -3636,9 +3639,61 @@ class UmaDirectionRefinementApp(ctk.CTk):
             return
         ExportVideoDialog(self)
 
+    def render_export_preview(self, *, render_mode: str, line_width: int,
+                              triangle_alpha: float) -> tuple[np.ndarray, int | None]:
+        """Render original video frame 0 with current unsaved Refinement edits."""
+        if self.reader is None or self.df_np is None:
+            raise RuntimeError("Load a video and tracking CSV before previewing.")
+
+        cap = cv2.VideoCapture(self.video_path_var.get().strip())
+        if not cap.isOpened():
+            raise RuntimeError("Cannot open the input video for preview.")
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, bgr = cap.read()
+            if not ok:
+                raise RuntimeError("Cannot read video frame 0.")
+        finally:
+            cap.release()
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        pose_row = self.df_np[0].copy() if len(self.df_np) and self.df_np[0, 0] == 0 else None
+
+        frame_obbs = None
+        if render_mode in ("obb", "ellipse"):
+            if self.refinement_obb_df is None:
+                raise ValueError("OBB and ellipse preview require AMADEUS result data.")
+            position_keys = {key for key in self.position_edited_keys if key[0] == 0}
+            direction_keys = {key for key in self.direction_reversed_keys if key[0] == 0}
+            obb_source = self.refinement_obb_df.loc[
+                self.refinement_obb_df["frame"] == 0
+            ].copy(deep=True)
+            pose_source = (
+                self.df.iloc[[0]].copy(deep=True)
+                if position_keys or direction_keys else None
+            )
+            frames, values = prepare_refined_obb_rows(
+                obb_source, pose_source, self.num_ids, position_keys, direction_keys,
+            )
+            if len(frames):
+                frame_obbs = values[0]
+
+        draw_refinement_annotations(
+            rgb, pose_row, frame_obbs,
+            self._front_x_idx, self._front_y_idx, self._rear_x_idx, self._rear_y_idx,
+            self.id_palette, self.num_ids, line_width,
+            max(6, int(self.label_size_var.get())),
+            render_mode, bool(self.show_labels_var.get()),
+            bool(self.reverse_direction_var.get()), triangle_alpha,
+        )
+        return crop_refinement_preview(
+            rgb, pose_row, frame_obbs,
+            self._front_x_idx, self._front_y_idx, self._rear_x_idx, self._rear_y_idx,
+            render_mode,
+        )
+
     def export_video_async(self, *, out_path: str, start_frame: int, end_frame: int,
                            speed: float, output_fps: float, render_mode: str,
-                           line_width: int, progress_cb, done_cb) -> None:
+                           line_width: int, triangle_alpha: float, progress_cb, done_cb) -> None:
         if self.reader is None or self.df_np is None:
             done_cb(RuntimeError("Data has not been loaded."))
             return
@@ -3683,6 +3738,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
                     df_np_snap, front_x_idx, front_y_idx, rear_x_idx, rear_y_idx,
                     id_palette, num_ids, line_width, label_size, render_mode, show_labels, reverse,
                     progress_cb, obb_frames=obb_frames, obb_values=obb_values,
+                    triangle_alpha=triangle_alpha,
                 )
             except Exception as e:
                 err = e
@@ -4221,6 +4277,10 @@ class ExportVideoDialog(ctk.CTkToplevel):
             "obb": tk.IntVar(value=DEFAULT_OBB_WIDTH),
             "ellipse": tk.IntVar(value=DEFAULT_ELLIPSE_WIDTH),
         }
+        self.triangle_alpha_vars = {
+            mode: tk.DoubleVar(value=DIRECTION_MARKER_ALPHA)
+            for mode in ("obb", "ellipse")
+        }
         self.has_obb_data = parent.refinement_obb_df is not None
 
         self._spin_cfg = dict(
@@ -4284,6 +4344,15 @@ class ExportVideoDialog(ctk.CTkToplevel):
                 width_row, from_=1, to=30, width=5,
                 textvariable=self.stroke_vars[mode], **self._spin_cfg,
             ).pack(side="left")
+            if mode in ("obb", "ellipse"):
+                ctk.CTkLabel(width_row, text="Triangle alpha (0-1):").pack(
+                    side="left", padx=(18, 8),
+                )
+                dark_spinbox(
+                    width_row, from_=0.0, to=1.0, increment=0.1, width=6,
+                    format="%.2f", textvariable=self.triangle_alpha_vars[mode],
+                    **self._spin_cfg,
+                ).pack(side="left")
             self._width_rows[mode] = width_row
         self._update_render_mode_controls()
 
@@ -4300,8 +4369,13 @@ class ExportVideoDialog(ctk.CTkToplevel):
         self.progress_bar.set(0.0)
         self.progress_bar.grid(row=7, column=0, columnspan=3, sticky="we", padx=8, pady=4)
 
-        self.export_btn = ctk.CTkButton(root, text="Export", command=self._start_export)
-        self.export_btn.grid(row=8, column=0, columnspan=3, pady=(4, 0))
+        action_row = ctk.CTkFrame(root, corner_radius=0)
+        action_row.grid(row=8, column=0, columnspan=3, pady=(4, 0))
+        ctk.CTkButton(action_row, text="Preview", command=self._show_preview).pack(
+            side="left", padx=(0, 8),
+        )
+        self.export_btn = ctk.CTkButton(action_row, text="Export", command=self._start_export)
+        self.export_btn.pack(side="left")
 
         root.columnconfigure(1, weight=1)
         root.columnconfigure(2, weight=0)
@@ -4338,6 +4412,71 @@ class ExportVideoDialog(ctk.CTkToplevel):
         if path:
             self.out_var.set(path)
 
+    def _validated_render_options(self) -> tuple[str, int, float]:
+        mode = self.render_mode_var.get()
+        if mode not in RENDER_MODES:
+            raise ValueError("Select one drawing mode.")
+        if mode in ("obb", "ellipse") and not self.has_obb_data:
+            raise ValueError("AMADEUS OBB data is required.")
+        try:
+            width = int(self.stroke_vars[mode].get())
+            alpha = (
+                float(self.triangle_alpha_vars[mode].get())
+                if mode in ("obb", "ellipse") else DIRECTION_MARKER_ALPHA
+            )
+        except (ValueError, tk.TclError) as exc:
+            raise ValueError(f"Invalid drawing parameter: {exc}") from exc
+        if not 1 <= width <= 30:
+            raise ValueError("Width or radius must be between 1 and 30 pixels.")
+        if not np.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+            raise ValueError("Triangle alpha must be between 0 and 1.")
+        return mode, width, alpha
+
+    def _show_preview(self) -> None:
+        try:
+            mode, width, alpha = self._validated_render_options()
+            preview, tid = self.app.render_export_preview(
+                render_mode=mode, line_width=width, triangle_alpha=alpha,
+            )
+        except Exception as exc:
+            messagebox.showerror("Preview error", str(exc), parent=self)
+            return
+
+        h, w = preview.shape[:2]
+        max_w = min(900, max(300, self.winfo_screenwidth() - 150))
+        max_h = min(650, max(250, self.winfo_screenheight() - 180))
+        scale = min(max_w / w, max_h / h)
+        display_size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
+        pil_image = Image.fromarray(preview).resize(display_size, Image.Resampling.BILINEAR)
+
+        popup = ctk.CTkToplevel(self)
+        install_window_icon(popup)
+        popup.title("Export Preview - Frame 0")
+        popup.geometry(f"{display_size[0] + 24}x{display_size[1] + 92}")
+        popup.resizable(False, False)
+        popup.transient(self)
+        subject = (
+            f"Frame 0 | ID {tid} | surrounding area"
+            if tid is not None else "Frame 0 | no tracked individual; full frame"
+        )
+        ctk.CTkLabel(popup, text=subject).pack(pady=(10, 4))
+        photo = ImageTk.PhotoImage(pil_image, master=popup)
+        label = tk.Label(popup, image=photo, bg="#242424", bd=0)
+        label.image = photo
+        label.pack(padx=12, pady=(0, 6))
+
+        def close_preview() -> None:
+            popup.grab_release()
+            popup.destroy()
+            if self.winfo_exists():
+                self.grab_set()
+
+        ctk.CTkButton(popup, text="Close", command=close_preview).pack(pady=(0, 8))
+        popup.protocol("WM_DELETE_WINDOW", close_preview)
+        self.grab_release()
+        popup.grab_set()
+        popup.focus_set()
+
     def _start_export(self) -> None:
         out_path = self.out_var.get().strip()
         if not out_path:
@@ -4360,20 +4499,10 @@ class ExportVideoDialog(ctk.CTkToplevel):
         if fps <= 0:
             messagebox.showerror("Error", "FPS must be greater than 0.", parent=self)
             return
-        mode = self.render_mode_var.get()
-        if mode not in RENDER_MODES:
-            messagebox.showerror("Error", "Select one drawing mode.", parent=self)
-            return
-        if mode in ("obb", "ellipse") and not self.has_obb_data:
-            messagebox.showerror("Error", "AMADEUS OBB data is required.", parent=self)
-            return
         try:
-            width = int(self.stroke_vars[mode].get())
-        except (ValueError, tk.TclError) as exc:
-            messagebox.showerror("Error", f"Invalid width or radius: {exc}", parent=self)
-            return
-        if not 1 <= width <= 30:
-            messagebox.showerror("Error", "Width or radius must be between 1 and 30 pixels.", parent=self)
+            mode, width, alpha = self._validated_render_options()
+        except ValueError as exc:
+            messagebox.showerror("Error", str(exc), parent=self)
             return
         self.export_btn.configure(state="disabled")
         self.app.export_video_async(
@@ -4384,6 +4513,7 @@ class ExportVideoDialog(ctk.CTkToplevel):
             output_fps=fps,
             render_mode=mode,
             line_width=width,
+            triangle_alpha=alpha,
             progress_cb=self._update_progress,
             done_cb=self._on_done,
         )
