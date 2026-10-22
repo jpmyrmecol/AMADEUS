@@ -155,10 +155,10 @@ def export_refinement_video(
 
         total = len(source_indices)
         tip_length = max(8, int(round(arrow_width * 5.0)))
-        prev_idx = -1
+        prev_idx = None
         try:
             for done, src_idx in enumerate(source_indices):
-                if src_idx != prev_idx + 1:
+                if prev_idx is None or src_idx != prev_idx + 1:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, src_idx)
                 ok, bgr = cap.read()
                 if not ok:
