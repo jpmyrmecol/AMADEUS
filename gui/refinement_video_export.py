@@ -53,39 +53,132 @@ def prepare_refined_obb_rows(
         raise ValueError("AMADEUS result contains duplicate frame numbers.")
     return frames, values
 
+# create_video.py defaults. Triangle/ellipse direction markers are drawn with
+# the same opacity and size as the normal tracking result video.
+RENDER_MODES = ("center", "arrow", "obb", "ellipse")
+DEFAULT_CENTER_RADIUS = 3
+DEFAULT_OBB_WIDTH = 1
+DEFAULT_ELLIPSE_WIDTH = 1
+DIRECTION_MARKER_ALPHA = 0.3
+OBB_TRIANGLE_SCALE = 1.2
+
 
 def obb_corners(record: np.ndarray) -> np.ndarray | None:
-    """OBB corners using AMADEUS heading (0=up, positive=counterclockwise)."""
+    """Return unrounded OBB corners (0 degrees points upward)."""
     cx, cy, width, height, heading = np.asarray(record, dtype=float)
     if not np.isfinite([cx, cy, width, height, heading]).all() or width <= 0 or height <= 0:
         return None
-
     theta = np.deg2rad(heading)
-    major = np.array([np.sin(theta), -np.cos(theta)]) * (width / 2.0)
-    minor = np.array([-np.cos(theta), -np.sin(theta)]) * (height / 2.0)
+    major = np.array([np.sin(theta), -np.cos(theta)]) * (width * 0.5)
+    minor = np.array([-np.cos(theta), -np.sin(theta)]) * (height * 0.5)
     center = np.array([cx, cy], dtype=float)
-    corners = np.stack([
+    return np.stack((
         center - major - minor,
         center - major + minor,
         center + major + minor,
         center + major - minor,
+    )).astype(np.float32)
+
+
+def _draw_obb_triangle(
+    image: np.ndarray, pts: np.ndarray, heading: float, color: tuple,
+) -> None:
+    """create_video's short-edge triangle: 0.3 opacity, 1.2 scale, no outline."""
+    direction = np.array([
+        np.sin(np.deg2rad(heading)), -np.cos(np.deg2rad(heading))
+    ], dtype=float)
+    center = np.mean(pts, axis=0)
+    lengths = np.linalg.norm(np.roll(pts, -1, axis=0) - pts, axis=1)
+    shortest = float(np.min(lengths))
+    if shortest <= 0:
+        return
+    candidates = []
+    for i, edge_len in enumerate(lengths):
+        if abs(float(edge_len) - shortest) > max(1e-6, shortest * 0.05):
+            continue
+        p0, p1 = pts[i].astype(float), pts[(i + 1) % 4].astype(float)
+        edge = p1 - p0
+        normal = np.array([edge[1], -edge[0]], dtype=float) / max(float(edge_len), 1e-6)
+        midpoint = (p0 + p1) / 2
+        if float(np.dot(midpoint - center, normal)) < 0:
+            normal = -normal
+        candidates.append((float(np.dot(normal, direction)), p0, p1, normal, float(edge_len)))
+    if not candidates:
+        return
+    _, p0, p1, normal, base_len = max(candidates, key=lambda item: item[0])
+    apex = (p0 + p1) * 0.5 + normal * (OBB_TRIANGLE_SCALE * np.sqrt(3.0) * 0.5 * base_len)
+    triangle = np.rint(np.stack((p0, p1, apex))).astype(np.int32)
+    overlay = image.copy()
+    cv2.fillConvexPoly(overlay, triangle, color, lineType=cv2.LINE_AA)
+    cv2.addWeighted(
+        overlay, DIRECTION_MARKER_ALPHA, image, 1.0 - DIRECTION_MARKER_ALPHA,
+        0.0, dst=image,
+    )
+
+
+def _draw_ellipse_with_arrowhead(
+    image: np.ndarray, record: np.ndarray, color: tuple, line_width: int,
+) -> None:
+    """Match create_video's fitted ellipse and tangent-arc direction marker."""
+    cx, cy, width, height, heading = map(float, record)
+    theta = np.deg2rad(heading)
+    major = np.array([np.sin(theta), -np.cos(theta)], dtype=float)
+    minor = np.array([-major[1], major[0]], dtype=float)
+    center = np.array([cx, cy], dtype=float)
+    axis_angle = float(np.degrees(np.arctan2(major[1], major[0])))
+    cv2.ellipse(
+        image, tuple(np.rint(center).astype(np.int32)),
+        (max(1, int(round(width / 2))), max(1, int(round(height / 2)))),
+        axis_angle, 0.0, 360.0, color, line_width, cv2.LINE_AA,
+    )
+
+    semi_major, semi_minor = width / 2.0, height / 2.0
+    tip_distance = semi_major + width / 3.0
+    if semi_major <= 0 or semi_minor <= 0:
+        return
+    tangent_x = semi_major * semi_major / tip_distance
+    tangent_angle = np.arccos(np.clip(tangent_x / semi_major, -1.0, 1.0))
+    arc = np.linspace(tangent_angle, -tangent_angle, 25)
+    arc_points = np.array([
+        center + major * (semi_major * np.cos(a)) + minor * (semi_minor * np.sin(a))
+        for a in arc
     ])
-    return np.rint(corners).astype(np.int32).reshape(4, 1, 2)
+    tip = center + major * tip_distance
+    polygon = np.rint(np.vstack((tip, arc_points))).astype(np.int32).reshape(-1, 1, 2)
+    overlay = image.copy()
+    cv2.fillPoly(overlay, [polygon], color, lineType=cv2.LINE_AA)
+    cv2.addWeighted(
+        overlay, DIRECTION_MARKER_ALPHA, image, 1.0 - DIRECTION_MARKER_ALPHA,
+        0.0, dst=image,
+    )
 
 
-def draw_refined_obbs(
+def draw_refined_shapes(
     image: np.ndarray,
     frame_obbs: np.ndarray,
     id_palette: list[tuple[int, int, int]],
-    thickness: int = 2,
+    mode: str,
+    line_width: int,
+    *,
+    reverse: bool = False,
 ) -> None:
-    """Draw only valid boxes. The image and palette both use RGB ordering."""
-    for tid, record in enumerate(frame_obbs):
-        corners = obb_corners(record)
-        if corners is None:
+    """Draw the mutually exclusive OBB or ellipse style with head direction."""
+    if mode not in ("obb", "ellipse"):
+        raise ValueError(f"Unsupported box drawing style: {mode}")
+    for tid, raw in enumerate(frame_obbs):
+        record = np.array(raw, dtype=float, copy=True)
+        if reverse:
+            record[4] = (record[4] + 180.0) % 360.0
+        pts = obb_corners(record)
+        if pts is None:
             continue
         color = id_palette[tid] if tid < len(id_palette) else WHITE_RGB
-        cv2.polylines(image, [corners], True, color, thickness, cv2.LINE_AA)
+        if mode == "obb":
+            polygon = np.rint(pts).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(image, [polygon], True, color, line_width, cv2.LINE_AA)
+            _draw_obb_triangle(image, pts, float(record[4]), color)
+        else:
+            _draw_ellipse_with_arrowhead(image, record, color, line_width)
 
 
 def export_refinement_video(
@@ -102,32 +195,33 @@ def export_refinement_video(
     rear_y_idx: np.ndarray,
     id_palette: list,
     num_ids: int,
-    arrow_width: int,
+    line_width: int,
     label_size: int,
-    show_arrows: bool,
+    render_mode: str,
     show_labels: bool,
     reverse: bool,
     progress_cb: Callable[[int, int, str], None] | None,
     *,
-    show_obbs: bool = False,
     obb_frames: np.ndarray | None = None,
     obb_values: np.ndarray | None = None,
 ) -> None:
-    """Write the existing arrow overlay and, optionally, corrected OBB outlines."""
-    if show_obbs:
+    """Export one of center, arrow, OBB, or ellipse for each animal."""
+    if render_mode not in RENDER_MODES:
+        raise ValueError(f"Unknown Refinement drawing mode: {render_mode}")
+    if line_width < 1:
+        raise ValueError("Drawing width or point radius must be positive.")
+    if render_mode in ("obb", "ellipse"):
         if obb_frames is None or obb_values is None:
-            raise ValueError("OBB export requires AMADEUS OBB data.")
+            raise ValueError("OBB and ellipse export require AMADEUS result geometry.")
         if obb_values.shape != (len(obb_frames), num_ids, 5):
             raise ValueError("Refinement OBB data does not match the selected individuals.")
 
     pose_row_for_frame = {
-        int(frame): i
-        for i, frame in enumerate(df_np[:, 0])
-        if np.isfinite(frame)
+        int(frame): i for i, frame in enumerate(df_np[:, 0]) if np.isfinite(frame)
     }
     obb_row_for_frame = (
         {int(frame): i for i, frame in enumerate(obb_frames)}
-        if show_obbs else {}
+        if render_mode in ("obb", "ellipse") else {}
     )
 
     cap = cv2.VideoCapture(video_path)
@@ -154,7 +248,7 @@ def export_refinement_video(
             raise RuntimeError(f"Cannot create video file: {out_path}")
 
         total = len(source_indices)
-        tip_length = max(8, int(round(arrow_width * 5.0)))
+        tip_length = max(8, int(round(line_width * 5.0)))
         prev_idx = None
         try:
             for done, src_idx in enumerate(source_indices):
@@ -166,37 +260,58 @@ def export_refinement_video(
                 prev_idx = src_idx
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-                if show_obbs:
+                if render_mode in ("obb", "ellipse"):
                     obb_idx = obb_row_for_frame.get(src_idx)
                     if obb_idx is not None:
-                        draw_refined_obbs(rgb, obb_values[obb_idx], id_palette)
-
-                pose_idx = pose_row_for_frame.get(src_idx)
-                if pose_idx is not None and num_ids > 0:
-                    row = df_np[pose_idx]
-                    fronts = np.column_stack([row[front_x_idx], row[front_y_idx]])
-                    rears = np.column_stack([row[rear_x_idx], row[rear_y_idx]])
-                    if reverse:
-                        fronts, rears = rears, fronts
-                    valid = np.isfinite(fronts).all(axis=1) & np.isfinite(rears).all(axis=1)
-                    for tid in np.flatnonzero(valid).tolist():
-                        f_pt = np.round(fronts[tid]).astype(int)
-                        r_pt = np.round(rears[tid]).astype(int)
-                        color = id_palette[tid] if tid < len(id_palette) else WHITE_RGB
-                        alen = max(1.0, float(np.linalg.norm(f_pt - r_pt)))
-                        tip = min(0.8, tip_length / alen)
-                        if show_arrows:
-                            cv2.arrowedLine(
-                                rgb, tuple(r_pt), tuple(f_pt), color,
-                                arrow_width, cv2.LINE_AA, tipLength=tip,
-                            )
+                        frame_obbs = obb_values[obb_idx]
+                        draw_refined_shapes(
+                            rgb, frame_obbs, id_palette, render_mode, line_width,
+                            reverse=reverse,
+                        )
                         if show_labels:
-                            anchor = np.round((fronts[tid] + rears[tid]) / 2.0).astype(int)
-                            lpos = (int(anchor[0]) + 6, int(anchor[1]) - 6)
-                            cv2.putText(
-                                rgb, f"ID {tid}", lpos, cv2.FONT_HERSHEY_SIMPLEX,
-                                label_size / 28.0, color, max(1, label_size // 10), cv2.LINE_AA,
-                            )
+                            for tid, record in enumerate(frame_obbs):
+                                if obb_corners(record) is None:
+                                    continue
+                                color = id_palette[tid] if tid < len(id_palette) else WHITE_RGB
+                                anchor = np.rint(record[:2]).astype(int)
+                                cv2.putText(
+                                    rgb, f"ID {tid}",
+                                    (int(anchor[0]) + 6, int(anchor[1]) - 6),
+                                    cv2.FONT_HERSHEY_SIMPLEX, label_size / 28.0,
+                                    color, max(1, label_size // 10), cv2.LINE_AA,
+                                )
+                else:
+                    pose_idx = pose_row_for_frame.get(src_idx)
+                    if pose_idx is not None and num_ids > 0:
+                        row = df_np[pose_idx]
+                        fronts = np.column_stack([row[front_x_idx], row[front_y_idx]])
+                        rears = np.column_stack([row[rear_x_idx], row[rear_y_idx]])
+                        if reverse:
+                            fronts, rears = rears, fronts
+                        valid = np.isfinite(fronts).all(axis=1) & np.isfinite(rears).all(axis=1)
+                        for tid in np.flatnonzero(valid).tolist():
+                            f_pt = np.rint(fronts[tid]).astype(int)
+                            r_pt = np.rint(rears[tid]).astype(int)
+                            color = id_palette[tid] if tid < len(id_palette) else WHITE_RGB
+                            if render_mode == "center":
+                                center = np.rint((fronts[tid] + rears[tid]) * 0.5).astype(int)
+                                cv2.circle(
+                                    rgb, tuple(center), line_width, color, -1, cv2.LINE_AA,
+                                )
+                            else:
+                                alen = max(1.0, float(np.linalg.norm(f_pt - r_pt)))
+                                cv2.arrowedLine(
+                                    rgb, tuple(r_pt), tuple(f_pt), color, line_width,
+                                    cv2.LINE_AA, tipLength=min(0.8, tip_length / alen),
+                                )
+                                if show_labels:
+                                    center = np.rint((fronts[tid] + rears[tid]) * 0.5).astype(int)
+                                    cv2.putText(
+                                        rgb, f"ID {tid}",
+                                        (int(center[0]) + 6, int(center[1]) - 6),
+                                        cv2.FONT_HERSHEY_SIMPLEX, label_size / 28.0,
+                                        color, max(1, label_size // 10), cv2.LINE_AA,
+                                    )
 
                 writer.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
                 if progress_cb and (done % 10 == 0 or done == total - 1):
