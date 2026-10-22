@@ -7403,8 +7403,10 @@ class CrossingReviewApp(ctk.CTk):
         self.redraw_current_frame()
 
     def on_canvas_press(self, event):
-        ix, iy = self._canvas_to_image(float(event.x), float(event.y))
         self.last_drag_canvas = None
+        if self.frame_bgr_cache is None:
+            return
+        ix, iy = self._canvas_to_image(float(event.x), float(event.y))
         if self._start_roi_drag(ix, iy):
             self.stop_playback()
             return
