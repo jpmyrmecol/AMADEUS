@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import os
+import random
+from pathlib import Path
 from typing import Callable
 
 import cv2
@@ -53,13 +55,12 @@ def prepare_refined_obb_rows(
         raise ValueError("AMADEUS result contains duplicate frame numbers.")
     return frames, values
 
-# create_video.py defaults. Triangle/ellipse direction markers are drawn with
-# the same opacity and size as the normal tracking result video.
+# Refinement video drawing defaults.
 RENDER_MODES = ("center", "arrow", "obb", "ellipse")
 DEFAULT_CENTER_RADIUS = 3
-DEFAULT_OBB_WIDTH = 1
-DEFAULT_ELLIPSE_WIDTH = 1
-DIRECTION_MARKER_ALPHA = 0.3
+DEFAULT_OBB_WIDTH = 2
+DEFAULT_ELLIPSE_WIDTH = 2
+DIRECTION_MARKER_ALPHA = 0.6
 OBB_TRIANGLE_SCALE = 1.2
 
 
@@ -255,6 +256,110 @@ def draw_refinement_annotations(
                 )
 
 
+
+def default_refinement_video_path(video_path: str) -> str:
+    """Name the export beside its source video, using a supported output format."""
+    source = Path(video_path)
+    extension = ".avi" if source.suffix.lower() == ".avi" else ".mp4"
+    return str(source.with_name(f"{source.stem}_refined{extension}"))
+
+
+def _preview_subject_geometry(
+    pose_row: np.ndarray | None,
+    frame_obbs: np.ndarray | None,
+    front_x_idx: np.ndarray,
+    front_y_idx: np.ndarray,
+    rear_x_idx: np.ndarray,
+    rear_y_idx: np.ndarray,
+    render_mode: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return centers, major lengths, and tracking validity for one frame."""
+    if render_mode in ("obb", "ellipse"):
+        if frame_obbs is None:
+            return np.empty((0, 2)), np.empty(0), np.zeros(0, dtype=bool)
+        obbs = np.asarray(frame_obbs, dtype=float)
+        centers = obbs[:, :2]
+        spans = np.maximum(obbs[:, 2], obbs[:, 3])
+        valid = np.isfinite(obbs).all(axis=1) & (obbs[:, 2] > 0) & (obbs[:, 3] > 0)
+    else:
+        if pose_row is None:
+            return np.empty((0, 2)), np.empty(0), np.zeros(0, dtype=bool)
+        fronts = np.column_stack([pose_row[front_x_idx], pose_row[front_y_idx]])
+        rears = np.column_stack([pose_row[rear_x_idx], pose_row[rear_y_idx]])
+        centers = (fronts + rears) * 0.5
+        spans = np.linalg.norm(fronts - rears, axis=1)
+        valid = np.isfinite(fronts).all(axis=1) & np.isfinite(rears).all(axis=1)
+    return centers, spans, valid
+
+
+def valid_refinement_preview_ids(
+    pose_row: np.ndarray | None,
+    frame_obbs: np.ndarray | None,
+    front_x_idx: np.ndarray,
+    front_y_idx: np.ndarray,
+    rear_x_idx: np.ndarray,
+    rear_y_idx: np.ndarray,
+    render_mode: str,
+    image_width: int,
+    image_height: int,
+) -> np.ndarray:
+    """Select individuals with valid geometry inside the source image."""
+    centers, _, valid = _preview_subject_geometry(
+        pose_row, frame_obbs, front_x_idx, front_y_idx,
+        rear_x_idx, rear_y_idx, render_mode,
+    )
+    valid &= (
+        (centers[:, 0] >= 0) & (centers[:, 0] < image_width)
+        & (centers[:, 1] >= 0) & (centers[:, 1] < image_height)
+    )
+    return np.flatnonzero(valid)
+
+
+def choose_random_refinement_preview_target(
+    start_frame: int,
+    end_frame: int,
+    valid_ids_for_frame: Callable[[int], np.ndarray],
+    *,
+    previous_target: tuple[int, int] | None = None,
+    rng: random.Random | None = None,
+) -> tuple[int, int]:
+    """Sample a nonempty frame and an animal, avoiding the previous pair if possible.
+
+    Random probing is efficient for tracking data with many valid frames.
+    When valid frames are sparse, a reservoir pass still selects a valid target.
+    """
+    if start_frame < 0 or end_frame < start_frame:
+        raise ValueError("Invalid preview frame range.")
+    generator = rng if rng is not None else random
+    same_target = None
+    for _ in range(64):
+        frame = generator.randint(start_frame, end_frame)
+        ids = valid_ids_for_frame(frame)
+        if len(ids) == 0:
+            continue
+        subject = (frame, int(generator.choice(ids)))
+        if subject != previous_target:
+            return subject
+        same_target = subject
+
+    selected = None
+    seen = 0
+    for frame in range(start_frame, end_frame + 1):
+        for tid in valid_ids_for_frame(frame):
+            subject = (frame, int(tid))
+            if subject == previous_target:
+                same_target = subject
+                continue
+            seen += 1
+            if generator.randrange(seen) == 0:
+                selected = subject
+    if selected is not None:
+        return selected
+    if same_target is not None:
+        return same_target
+    raise ValueError("No tracked individuals are visible in the selected frame range.")
+
+
 def crop_refinement_preview(
     image: np.ndarray,
     pose_row: np.ndarray | None,
@@ -264,35 +369,29 @@ def crop_refinement_preview(
     rear_x_idx: np.ndarray,
     rear_y_idx: np.ndarray,
     render_mode: str,
+    *,
+    target_tid: int | None = None,
 ) -> tuple[np.ndarray, int | None]:
-    """Focus on the visible animal nearest the image center, with surrounding context."""
+    """Crop around a chosen valid individual, retaining its surroundings."""
     height, width = image.shape[:2]
-    if render_mode in ("obb", "ellipse"):
-        if frame_obbs is None:
-            return image.copy(), None
-        obbs = np.asarray(frame_obbs, dtype=float)
-        centers = obbs[:, :2]
-        spans = np.maximum(obbs[:, 2], obbs[:, 3])
-        valid = np.isfinite(obbs).all(axis=1) & (obbs[:, 2] > 0) & (obbs[:, 3] > 0)
-    else:
-        if pose_row is None:
-            return image.copy(), None
-        fronts = np.column_stack([pose_row[front_x_idx], pose_row[front_y_idx]])
-        rears = np.column_stack([pose_row[rear_x_idx], pose_row[rear_y_idx]])
-        centers = (fronts + rears) * 0.5
-        spans = np.linalg.norm(fronts - rears, axis=1)
-        valid = np.isfinite(fronts).all(axis=1) & np.isfinite(rears).all(axis=1)
-
-    valid &= (
-        (centers[:, 0] >= 0) & (centers[:, 0] < width)
-        & (centers[:, 1] >= 0) & (centers[:, 1] < height)
+    centers, spans, _ = _preview_subject_geometry(
+        pose_row, frame_obbs, front_x_idx, front_y_idx,
+        rear_x_idx, rear_y_idx, render_mode,
     )
-    ids = np.flatnonzero(valid)
+    ids = valid_refinement_preview_ids(
+        pose_row, frame_obbs, front_x_idx, front_y_idx,
+        rear_x_idx, rear_y_idx, render_mode, width, height,
+    )
     if len(ids) == 0:
         return image.copy(), None
 
-    relative = (centers[ids] - np.array([width / 2, height / 2])) / [width, height]
-    tid = int(ids[np.argmin(np.sum(relative * relative, axis=1))])
+    if target_tid is None:
+        relative = (centers[ids] - np.array([width / 2, height / 2])) / [width, height]
+        tid = int(ids[np.argmin(np.sum(relative * relative, axis=1))])
+    else:
+        if target_tid not in ids:
+            raise ValueError(f"Individual {target_tid} is not visible in the preview frame.")
+        tid = int(target_tid)
     center_x, center_y = centers[tid]
     animal_size = max(1.0, float(spans[tid]))
     crop_w = min(width, max(160, int(round(animal_size * 6))))
