@@ -54,7 +54,14 @@ except ImportError:  # Preserve direct execution with: python gui/gui_refinement
 
 ensure_import_paths(PROJECT_ROOT, MAIN_DIR)
 from gui.color import WHITE_RGB, make_id_palette
-from gui.refinement_video_export import export_refinement_video as _export_video, prepare_refined_obb_rows
+from gui.refinement_video_export import (
+    DEFAULT_CENTER_RADIUS,
+    DEFAULT_ELLIPSE_WIDTH,
+    DEFAULT_OBB_WIDTH,
+    RENDER_MODES,
+    export_refinement_video as _export_video,
+    prepare_refined_obb_rows,
+)
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
 from gui.preview_playback_timing import AdaptivePreviewPacer
 from gui.reverse_playback_buffer import PreparedFrame, ReversePlaybackBuffer
@@ -3631,13 +3638,14 @@ class UmaDirectionRefinementApp(ctk.CTk):
         ExportVideoDialog(self)
 
     def export_video_async(self, *, out_path: str, start_frame: int, end_frame: int,
-                           speed: float, output_fps: float, show_obbs: bool,
-                           show_arrows: bool, show_labels: bool, progress_cb, done_cb) -> None:
+                           speed: float, output_fps: float, render_mode: str,
+                           line_width: int, progress_cb, done_cb) -> None:
         if self.reader is None or self.df_np is None:
             done_cb(RuntimeError("Data has not been loaded."))
             return
-        if show_obbs and self.refinement_obb_df is None:
-            done_cb(ValueError("OBB export requires AMADEUS result data."))
+        needs_obb = render_mode in ("obb", "ellipse")
+        if needs_obb and self.refinement_obb_df is None:
+            done_cb(ValueError("OBB and ellipse export require AMADEUS result data."))
             return
 
         video_path = self.video_path_var.get().strip()
@@ -3648,18 +3656,18 @@ class UmaDirectionRefinementApp(ctk.CTk):
         rear_y_idx = self._rear_y_idx.copy()
         id_palette = list(self.id_palette)
         num_ids = self.num_ids
-        arrow_width = max(1, int(self.arrow_width_var.get()))
         label_size = max(6, int(self.label_size_var.get()))
-        reverse = self.reverse_direction_var.get()
+        show_labels = bool(self.show_labels_var.get())
+        reverse = bool(self.reverse_direction_var.get())
 
-        # The worker must see one consistent snapshot even if editing continues.
-        # ID swaps are already present in refinement_obb_df; outstanding manual
-        # edits and direction flips are applied using the same logic as CSV save.
-        obb_source = self.refinement_obb_df.copy(deep=True) if show_obbs else None
-        position_keys = set(self.position_edited_keys) if show_obbs else set()
-        direction_keys = set(self.direction_reversed_keys) if show_obbs else set()
+        # The worker sees one consistent snapshot even if editing continues.
+        # ID swaps already updated refinement_obb_df. Save-compatible conversion
+        # applies remaining point movements and head-direction flips.
+        obb_source = self.refinement_obb_df.copy(deep=True) if needs_obb else None
+        position_keys = set(self.position_edited_keys) if needs_obb else set()
+        direction_keys = set(self.direction_reversed_keys) if needs_obb else set()
         pose_source = (
-            self.df.copy(deep=True) if show_obbs and (position_keys or direction_keys)
+            self.df.copy(deep=True) if needs_obb and (position_keys or direction_keys)
             else None
         )
 
@@ -3667,15 +3675,15 @@ class UmaDirectionRefinementApp(ctk.CTk):
             err = None
             try:
                 obb_frames = obb_values = None
-                if show_obbs:
+                if needs_obb:
                     obb_frames, obb_values = prepare_refined_obb_rows(
                         obb_source, pose_source, num_ids, position_keys, direction_keys
                     )
                 _export_video(
                     video_path, out_path, start_frame, end_frame, speed, output_fps,
                     df_np_snap, front_x_idx, front_y_idx, rear_x_idx, rear_y_idx,
-                    id_palette, num_ids, arrow_width, label_size, show_arrows, show_labels, reverse,
-                    progress_cb, show_obbs=show_obbs, obb_frames=obb_frames, obb_values=obb_values,
+                    id_palette, num_ids, line_width, label_size, render_mode, show_labels, reverse,
+                    progress_cb, obb_frames=obb_frames, obb_values=obb_values,
                 )
             except Exception as e:
                 err = e
@@ -4189,7 +4197,7 @@ class ExportVideoDialog(ctk.CTkToplevel):
         install_window_icon(self)
         self.app = parent
         self.title("Export Video")
-        self.geometry("560x365")
+        self.geometry("600x370")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -4207,9 +4215,13 @@ class ExportVideoDialog(ctk.CTkToplevel):
         self.speed_var = tk.DoubleVar(value=1.0)
         self.fps_var = tk.DoubleVar(value=round(src_fps, 2))
         self.out_var = tk.StringVar()
-        self.show_obbs_var = tk.BooleanVar(value=False)
-        self.show_arrows_var = tk.BooleanVar(value=bool(parent.show_arrows_var.get()))
-        self.show_labels_var = tk.BooleanVar(value=bool(parent.show_labels_var.get()))
+        self.render_mode_var = tk.StringVar(value="arrow")
+        self.stroke_vars = {
+            "center": tk.IntVar(value=DEFAULT_CENTER_RADIUS),
+            "arrow": tk.IntVar(value=max(1, int(parent.arrow_width_var.get()))),
+            "obb": tk.IntVar(value=DEFAULT_OBB_WIDTH),
+            "ellipse": tk.IntVar(value=DEFAULT_ELLIPSE_WIDTH),
+        }
         self.has_obb_data = parent.refinement_obb_df is not None
 
         self._spin_cfg = dict(
@@ -4249,29 +4261,38 @@ class ExportVideoDialog(ctk.CTkToplevel):
                    textvariable=self.fps_var, format="%.2f", **self._spin_cfg).pack(side="left")
         ctk.CTkLabel(fps_row, text=f"fps  (source: {self._src_fps:.2f} fps)").pack(side="left", padx=(6, 0))
 
-        ctk.CTkLabel(root, text="Overlays:").grid(row=3, column=0, sticky="w", **pad)
-        overlay_row = ctk.CTkFrame(root, corner_radius=0)
-        overlay_row.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
-        obb_check = ctk.CTkCheckBox(
-            overlay_row, text="OBBs", variable=self.show_obbs_var,
-            checkbox_width=18, checkbox_height=18,
-        )
-        obb_check.pack(side="left", padx=(0, 12))
-        if not self.has_obb_data:
-            obb_check.configure(state="disabled")
-        ctk.CTkCheckBox(
-            overlay_row, text="Arrows", variable=self.show_arrows_var,
-            checkbox_width=18, checkbox_height=18,
-        ).pack(side="left", padx=(0, 12))
-        ctk.CTkCheckBox(
-            overlay_row, text="Labels", variable=self.show_labels_var,
-            checkbox_width=18, checkbox_height=18,
-        ).pack(side="left")
+        ctk.CTkLabel(root, text="Drawing mode:").grid(row=3, column=0, sticky="w", **pad)
+        mode_row = ctk.CTkFrame(root, corner_radius=0)
+        mode_row.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
+        labels = {"center": "Center", "arrow": "Arrow", "obb": "OBB", "ellipse": "Ellipse"}
+        for mode in RENDER_MODES:
+            radio = ctk.CTkRadioButton(
+                mode_row, text=labels[mode], variable=self.render_mode_var,
+                value=mode, command=self._update_render_mode_controls,
+                radiobutton_width=18, radiobutton_height=18,
+            )
+            radio.pack(side="left", padx=(0, 10))
+            if mode in ("obb", "ellipse") and not self.has_obb_data:
+                radio.configure(state="disabled")
+
+        self._width_rows = {}
+        for mode in RENDER_MODES:
+            width_row = ctk.CTkFrame(root, corner_radius=0)
+            width_row.grid(row=4, column=1, columnspan=2, sticky="w", **pad)
+            field_label = "Point radius (px):" if mode == "center" else "Line width (px):"
+            ctk.CTkLabel(width_row, text=field_label).pack(side="left", padx=(0, 8))
+            dark_spinbox(
+                width_row, from_=1, to=30, width=5,
+                textvariable=self.stroke_vars[mode], **self._spin_cfg,
+            ).pack(side="left")
+            self._width_rows[mode] = width_row
+        self._update_render_mode_controls()
+
         if not self.has_obb_data:
             ctk.CTkLabel(
-                root, text="OBBs require an AMADEUS result CSV.",
+                root, text="OBB and ellipse require AMADEUS result geometry.",
                 text_color="#9aa4ad", anchor="w",
-            ).grid(row=4, column=1, columnspan=2, sticky="w", padx=8)
+            ).grid(row=4, column=0, columnspan=3, sticky="e", padx=8)
 
         ctk.CTkLabel(root, text="Output path:").grid(row=5, column=0, sticky="w", **pad)
         out_row = ctk.CTkFrame(root, corner_radius=0)
@@ -4294,6 +4315,14 @@ class ExportVideoDialog(ctk.CTkToplevel):
 
         self._ui_queue: queue.Queue = queue.Queue()
         self._poll_ui_queue()
+
+    def _update_render_mode_controls(self) -> None:
+        selected = self.render_mode_var.get()
+        for mode, width_row in self._width_rows.items():
+            if mode == selected:
+                width_row.grid()
+            else:
+                width_row.grid_remove()
 
     def _poll_ui_queue(self) -> None:
         while True:
@@ -4338,6 +4367,21 @@ class ExportVideoDialog(ctk.CTkToplevel):
         if fps <= 0:
             messagebox.showerror("Error", "FPS must be greater than 0.", parent=self)
             return
+        mode = self.render_mode_var.get()
+        if mode not in RENDER_MODES:
+            messagebox.showerror("Error", "Select one drawing mode.", parent=self)
+            return
+        if mode in ("obb", "ellipse") and not self.has_obb_data:
+            messagebox.showerror("Error", "AMADEUS OBB data is required.", parent=self)
+            return
+        try:
+            width = int(self.stroke_vars[mode].get())
+        except (ValueError, tk.TclError) as exc:
+            messagebox.showerror("Error", f"Invalid width or radius: {exc}", parent=self)
+            return
+        if not 1 <= width <= 30:
+            messagebox.showerror("Error", "Width or radius must be between 1 and 30 pixels.", parent=self)
+            return
         self.export_btn.configure(state="disabled")
         self.app.export_video_async(
             out_path=out_path,
@@ -4345,9 +4389,8 @@ class ExportVideoDialog(ctk.CTkToplevel):
             end_frame=end,
             speed=speed,
             output_fps=fps,
-            show_obbs=bool(self.show_obbs_var.get()),
-            show_arrows=bool(self.show_arrows_var.get()),
-            show_labels=bool(self.show_labels_var.get()),
+            render_mode=mode,
+            line_width=width,
             progress_cb=self._update_progress,
             done_cb=self._on_done,
         )
