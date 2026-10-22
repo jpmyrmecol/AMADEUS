@@ -60,8 +60,11 @@ from gui.refinement_video_export import (
     DEFAULT_OBB_WIDTH,
     DIRECTION_MARKER_ALPHA,
     RENDER_MODES,
+    choose_random_refinement_preview_target,
     crop_refinement_preview,
+    default_refinement_video_path,
     draw_refinement_annotations,
+    valid_refinement_preview_ids,
     export_refinement_video as _export_video,
     prepare_refined_obb_rows,
 )
@@ -3640,43 +3643,83 @@ class UmaDirectionRefinementApp(ctk.CTk):
         ExportVideoDialog(self)
 
     def render_export_preview(self, *, render_mode: str, line_width: int,
-                              triangle_alpha: float) -> tuple[np.ndarray, int | None]:
-        """Render original video frame 0 with current unsaved Refinement edits."""
+                              triangle_alpha: float, start_frame: int,
+                              end_frame: int,
+                              previous_target: tuple[int, int] | None = None,
+                              ) -> tuple[np.ndarray, int, int]:
+        """Preview a random tracked individual within the selected export range."""
         if self.reader is None or self.df_np is None:
             raise RuntimeError("Load a video and tracking CSV before previewing.")
+        if start_frame < 0 or end_frame >= self.frame_count or start_frame > end_frame:
+            raise ValueError("Preview frame range is outside the loaded video.")
+
+        needs_obb = render_mode in ("obb", "ellipse")
+        source = self.refinement_obb_df if needs_obb else None
+        if needs_obb and source is None:
+            raise ValueError("OBB and ellipse preview require AMADEUS result data.")
+        obb_columns = (
+            [f"{name}{tid}" for tid in range(self.num_ids)
+             for name in ("cx", "cy", "w", "h", "heading")]
+            if needs_obb else []
+        )
+
+        def obbs_for_frame(frame: int) -> np.ndarray | None:
+            if source is None:
+                return None
+            if frame < len(source) and int(source.iloc[frame]["frame"]) == frame:
+                row = source.iloc[frame]
+            else:
+                matching = source.loc[source["frame"] == frame]
+                if matching.empty:
+                    return None
+                row = matching.iloc[0]
+            return row[obb_columns].to_numpy(dtype=float).reshape(self.num_ids, 5)
 
         cap = cv2.VideoCapture(self.video_path_var.get().strip())
         if not cap.isOpened():
             raise RuntimeError("Cannot open the input video for preview.")
         try:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            image_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            image_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if image_width <= 0 or image_height <= 0:
+                raise RuntimeError("Cannot determine the source video dimensions.")
+
+            def visible_ids(frame: int) -> np.ndarray:
+                return valid_refinement_preview_ids(
+                    self.df_np[frame], obbs_for_frame(frame),
+                    self._front_x_idx, self._front_y_idx,
+                    self._rear_x_idx, self._rear_y_idx,
+                    render_mode, image_width, image_height,
+                )
+
+            frame, tid = choose_random_refinement_preview_target(
+                start_frame, end_frame, visible_ids,
+                previous_target=previous_target,
+            )
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
             ok, bgr = cap.read()
             if not ok:
-                raise RuntimeError("Cannot read video frame 0.")
+                raise RuntimeError(f"Cannot read video frame {frame}.")
         finally:
             cap.release()
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        pose_row = self.df_np[0].copy() if len(self.df_np) and self.df_np[0, 0] == 0 else None
 
-        frame_obbs = None
-        if render_mode in ("obb", "ellipse"):
-            if self.refinement_obb_df is None:
-                raise ValueError("OBB and ellipse preview require AMADEUS result data.")
-            position_keys = {key for key in self.position_edited_keys if key[0] == 0}
-            direction_keys = {key for key in self.direction_reversed_keys if key[0] == 0}
-            obb_source = self.refinement_obb_df.loc[
-                self.refinement_obb_df["frame"] == 0
-            ].copy(deep=True)
-            pose_source = (
-                self.df.iloc[[0]].copy(deep=True)
-                if position_keys or direction_keys else None
-            )
+        pose_row = self.df_np[frame].copy()
+        frame_obbs = obbs_for_frame(frame)
+        if needs_obb and (
+            any(key[0] == frame for key in self.position_edited_keys)
+            or any(key[0] == frame for key in self.direction_reversed_keys)
+        ):
+            # Use the full source when applying unsaved edits, because the
+            # original width interpolation uses neighboring unedited frames.
             frames, values = prepare_refined_obb_rows(
-                obb_source, pose_source, self.num_ids, position_keys, direction_keys,
+                source, self.df, self.num_ids,
+                set(self.position_edited_keys), set(self.direction_reversed_keys),
             )
-            if len(frames):
-                frame_obbs = values[0]
+            matching = np.flatnonzero(frames == frame)
+            if len(matching):
+                frame_obbs = values[matching[0]]
 
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         draw_refinement_annotations(
             rgb, pose_row, frame_obbs,
             self._front_x_idx, self._front_y_idx, self._rear_x_idx, self._rear_y_idx,
@@ -3685,11 +3728,12 @@ class UmaDirectionRefinementApp(ctk.CTk):
             render_mode, bool(self.show_labels_var.get()),
             bool(self.reverse_direction_var.get()), triangle_alpha,
         )
-        return crop_refinement_preview(
+        cropped, _ = crop_refinement_preview(
             rgb, pose_row, frame_obbs,
             self._front_x_idx, self._front_y_idx, self._rear_x_idx, self._rear_y_idx,
-            render_mode,
+            render_mode, target_tid=tid,
         )
+        return cropped, frame, tid
 
     def export_video_async(self, *, out_path: str, start_frame: int, end_frame: int,
                            speed: float, output_fps: float, render_mode: str,
@@ -4252,7 +4296,7 @@ class ExportVideoDialog(ctk.CTkToplevel):
         install_window_icon(self)
         self.app = parent
         self.title("Export Video")
-        self.geometry("600x370")
+        self.geometry("650x420")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -4269,7 +4313,10 @@ class ExportVideoDialog(ctk.CTkToplevel):
         self.end_var = tk.IntVar(value=max(0, frame_count - 1))
         self.speed_var = tk.DoubleVar(value=1.0)
         self.fps_var = tk.DoubleVar(value=round(src_fps, 2))
-        self.out_var = tk.StringVar()
+        self.out_var = tk.StringVar(
+            value=default_refinement_video_path(parent.video_path_var.get().strip())
+        )
+        self._last_preview_target: tuple[int, int] | None = None
         self.render_mode_var = tk.StringVar(value="arrow")
         self.stroke_vars = {
             "center": tk.IntVar(value=DEFAULT_CENTER_RADIUS),
@@ -4404,9 +4451,12 @@ class ExportVideoDialog(ctk.CTkToplevel):
             pass
 
     def _browse_out(self) -> None:
+        initial = Path(self.out_var.get())
         path = filedialog.asksaveasfilename(
             title="Save video",
-            defaultextension=".mp4",
+            initialdir=str(initial.parent),
+            initialfile=initial.name,
+            defaultextension=initial.suffix or ".mp4",
             filetypes=[("MP4", "*.mp4"), ("AVI", "*.avi"), ("All files", "*.*")],
         )
         if path:
@@ -4435,13 +4485,18 @@ class ExportVideoDialog(ctk.CTkToplevel):
     def _show_preview(self) -> None:
         try:
             mode, width, alpha = self._validated_render_options()
-            preview, tid = self.app.render_export_preview(
+            start = int(self.start_var.get())
+            end = int(self.end_var.get())
+            preview, frame, tid = self.app.render_export_preview(
                 render_mode=mode, line_width=width, triangle_alpha=alpha,
+                start_frame=start, end_frame=end,
+                previous_target=self._last_preview_target,
             )
         except Exception as exc:
             messagebox.showerror("Preview error", str(exc), parent=self)
             return
 
+        self._last_preview_target = (frame, tid)
         h, w = preview.shape[:2]
         max_w = min(900, max(300, self.winfo_screenwidth() - 150))
         max_h = min(650, max(250, self.winfo_screenheight() - 180))
@@ -4451,14 +4506,11 @@ class ExportVideoDialog(ctk.CTkToplevel):
 
         popup = ctk.CTkToplevel(self)
         install_window_icon(popup)
-        popup.title("Export Preview - Frame 0")
+        popup.title(f"Export Preview - Frame {frame}")
         popup.geometry(f"{display_size[0] + 24}x{display_size[1] + 92}")
         popup.resizable(False, False)
         popup.transient(self)
-        subject = (
-            f"Frame 0 | ID {tid} | surrounding area"
-            if tid is not None else "Frame 0 | no tracked individual; full frame"
-        )
+        subject = f"Frame {frame} | ID {tid} | surrounding area"
         ctk.CTkLabel(popup, text=subject).pack(pady=(10, 4))
         photo = ImageTk.PhotoImage(pil_image, master=popup)
         label = tk.Label(popup, image=photo, bg="#242424", bd=0)
