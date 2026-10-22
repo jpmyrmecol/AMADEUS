@@ -54,6 +54,7 @@ except ImportError:  # Preserve direct execution with: python gui/gui_refinement
 
 ensure_import_paths(PROJECT_ROOT, MAIN_DIR)
 from gui.color import WHITE_RGB, make_id_palette
+from gui.refinement_video_export import export_refinement_video as _export_video, prepare_refined_obb_rows
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
 from gui.preview_playback_timing import AdaptivePreviewPacer
 from gui.reverse_playback_buffer import PreparedFrame, ReversePlaybackBuffer
@@ -3630,32 +3631,51 @@ class UmaDirectionRefinementApp(ctk.CTk):
         ExportVideoDialog(self)
 
     def export_video_async(self, *, out_path: str, start_frame: int, end_frame: int,
-                           speed: float, output_fps: float, progress_cb, done_cb) -> None:
+                           speed: float, output_fps: float, show_obbs: bool,
+                           show_arrows: bool, show_labels: bool, progress_cb, done_cb) -> None:
         if self.reader is None or self.df_np is None:
             done_cb(RuntimeError("Data has not been loaded."))
             return
+        if show_obbs and self.refinement_obb_df is None:
+            done_cb(ValueError("OBB export requires AMADEUS result data."))
+            return
+
         video_path = self.video_path_var.get().strip()
         df_np_snap = self.df_np.copy()
         front_x_idx = self._front_x_idx.copy()
         front_y_idx = self._front_y_idx.copy()
-        rear_x_idx  = self._rear_x_idx.copy()
-        rear_y_idx  = self._rear_y_idx.copy()
+        rear_x_idx = self._rear_x_idx.copy()
+        rear_y_idx = self._rear_y_idx.copy()
         id_palette = list(self.id_palette)
         num_ids = self.num_ids
         arrow_width = max(1, int(self.arrow_width_var.get()))
         label_size = max(6, int(self.label_size_var.get()))
-        show_arrows = self.show_arrows_var.get()
-        show_labels = self.show_labels_var.get()
         reverse = self.reverse_direction_var.get()
+
+        # The worker must see one consistent snapshot even if editing continues.
+        # ID swaps are already present in refinement_obb_df; outstanding manual
+        # edits and direction flips are applied using the same logic as CSV save.
+        obb_source = self.refinement_obb_df.copy(deep=True) if show_obbs else None
+        position_keys = set(self.position_edited_keys) if show_obbs else set()
+        direction_keys = set(self.direction_reversed_keys) if show_obbs else set()
+        pose_source = (
+            self.df.copy(deep=True) if show_obbs and (position_keys or direction_keys)
+            else None
+        )
 
         def worker():
             err = None
             try:
+                obb_frames = obb_values = None
+                if show_obbs:
+                    obb_frames, obb_values = prepare_refined_obb_rows(
+                        obb_source, pose_source, num_ids, position_keys, direction_keys
+                    )
                 _export_video(
                     video_path, out_path, start_frame, end_frame, speed, output_fps,
                     df_np_snap, front_x_idx, front_y_idx, rear_x_idx, rear_y_idx,
                     id_palette, num_ids, arrow_width, label_size, show_arrows, show_labels, reverse,
-                    progress_cb,
+                    progress_cb, show_obbs=show_obbs, obb_frames=obb_frames, obb_values=obb_values,
                 )
             except Exception as e:
                 err = e
@@ -4163,104 +4183,13 @@ class UmaDirectionRefinementApp(ctk.CTk):
         return float(np.linalg.norm(p - proj))
 
 
-def _export_video(
-    video_path: str,
-    out_path: str,
-    start_frame: int,
-    end_frame: int,
-    speed: float,
-    output_fps: float,
-    df_np: np.ndarray,
-    front_x_idx: np.ndarray,
-    front_y_idx: np.ndarray,
-    rear_x_idx: np.ndarray,
-    rear_y_idx: np.ndarray,
-    id_palette: list,
-    num_ids: int,
-    arrow_width: int,
-    label_size: int,
-    show_arrows: bool,
-    show_labels: bool,
-    reverse: bool,
-    progress_cb,
-) -> None:
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
-    try:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        ok, first = cap.read()
-        if not ok:
-            raise RuntimeError("Cannot read frame.")
-        h, w = first.shape[:2]
-
-        total_source = end_frame - start_frame + 1
-        n_output = max(1, int(round(total_source / speed)))
-        source_indices = [
-            min(end_frame, start_frame + int(round(j * speed)))
-            for j in range(n_output)
-        ]
-
-        ext = os.path.splitext(out_path)[1].lower()
-        fourcc = cv2.VideoWriter_fourcc(*("XVID" if ext == ".avi" else "mp4v"))
-        writer = cv2.VideoWriter(out_path, fourcc, output_fps, (w, h))
-        if not writer.isOpened():
-            raise RuntimeError(f"Cannot create video file: {out_path}")
-
-        total = len(source_indices)
-        tip_length = max(8, int(round(arrow_width * 5.0)))
-        prev_idx = -1
-        try:
-            for done, src_idx in enumerate(source_indices):
-                if src_idx != prev_idx + 1:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, src_idx)
-                ok, bgr = cap.read()
-                if not ok:
-                    break
-                prev_idx = src_idx
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-                if df_np is not None and num_ids > 0 and src_idx < len(df_np):
-                    row = df_np[src_idx]
-                    fronts = np.column_stack([row[front_x_idx], row[front_y_idx]])
-                    rears  = np.column_stack([row[rear_x_idx],  row[rear_y_idx]])
-                    if reverse:
-                        fronts, rears = rears, fronts
-                    valid = np.isfinite(fronts).all(axis=1) & np.isfinite(rears).all(axis=1)
-                    for tid in np.flatnonzero(valid).tolist():
-                        f_pt = np.round(fronts[tid]).astype(int)
-                        r_pt = np.round(rears[tid]).astype(int)
-                        color = id_palette[tid] if 0 <= tid < len(id_palette) else WHITE_RGB
-                        alen = max(1.0, float(np.linalg.norm(f_pt - r_pt)))
-                        tip = min(0.8, tip_length / alen)
-                        if show_arrows:
-                            cv2.arrowedLine(rgb, tuple(r_pt), tuple(f_pt), color,
-                                            arrow_width, cv2.LINE_AA, tipLength=tip)
-                        if show_labels:
-                            anchor = np.round((fronts[tid] + rears[tid]) / 2.0).astype(int)
-                            lpos = (int(anchor[0]) + 6, int(anchor[1]) - 6)
-                            cv2.putText(rgb, f"ID {tid}", lpos, cv2.FONT_HERSHEY_SIMPLEX,
-                                        label_size / 28.0, color, max(1, label_size // 10), cv2.LINE_AA)
-
-                writer.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
-                if progress_cb and (done % 10 == 0 or done == total - 1):
-                    progress_cb(done + 1, total, f"Writing frame {src_idx} ({done + 1}/{total})")
-        finally:
-            writer.release()
-
-        if progress_cb:
-            progress_cb(total, total, f"Done: {total} frames -> {os.path.basename(out_path)}")
-    finally:
-        cap.release()
-
-
 class ExportVideoDialog(ctk.CTkToplevel):
     def __init__(self, parent: "UmaDirectionRefinementApp") -> None:
         super().__init__(parent)
         install_window_icon(self)
         self.app = parent
         self.title("Export Video")
-        self.geometry("520x310")
+        self.geometry("560x365")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -4278,6 +4207,10 @@ class ExportVideoDialog(ctk.CTkToplevel):
         self.speed_var = tk.DoubleVar(value=1.0)
         self.fps_var = tk.DoubleVar(value=round(src_fps, 2))
         self.out_var = tk.StringVar()
+        self.show_obbs_var = tk.BooleanVar(value=False)
+        self.show_arrows_var = tk.BooleanVar(value=bool(parent.show_arrows_var.get()))
+        self.show_labels_var = tk.BooleanVar(value=bool(parent.show_labels_var.get()))
+        self.has_obb_data = parent.refinement_obb_df is not None
 
         self._spin_cfg = dict(
             bg="#343638", fg="#dce4ee", insertbackground="#dce4ee",
@@ -4316,21 +4249,45 @@ class ExportVideoDialog(ctk.CTkToplevel):
                    textvariable=self.fps_var, format="%.2f", **self._spin_cfg).pack(side="left")
         ctk.CTkLabel(fps_row, text=f"fps  (source: {self._src_fps:.2f} fps)").pack(side="left", padx=(6, 0))
 
-        ctk.CTkLabel(root, text="Output path:").grid(row=3, column=0, sticky="w", **pad)
+        ctk.CTkLabel(root, text="Overlays:").grid(row=3, column=0, sticky="w", **pad)
+        overlay_row = ctk.CTkFrame(root, corner_radius=0)
+        overlay_row.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
+        obb_check = ctk.CTkCheckBox(
+            overlay_row, text="OBBs", variable=self.show_obbs_var,
+            checkbox_width=18, checkbox_height=18,
+        )
+        obb_check.pack(side="left", padx=(0, 12))
+        if not self.has_obb_data:
+            obb_check.configure(state="disabled")
+        ctk.CTkCheckBox(
+            overlay_row, text="Arrows", variable=self.show_arrows_var,
+            checkbox_width=18, checkbox_height=18,
+        ).pack(side="left", padx=(0, 12))
+        ctk.CTkCheckBox(
+            overlay_row, text="Labels", variable=self.show_labels_var,
+            checkbox_width=18, checkbox_height=18,
+        ).pack(side="left")
+        if not self.has_obb_data:
+            ctk.CTkLabel(
+                root, text="OBBs require an AMADEUS result CSV.",
+                text_color="#9aa4ad", anchor="w",
+            ).grid(row=4, column=1, columnspan=2, sticky="w", padx=8)
+
+        ctk.CTkLabel(root, text="Output path:").grid(row=5, column=0, sticky="w", **pad)
         out_row = ctk.CTkFrame(root, corner_radius=0)
-        out_row.grid(row=3, column=1, columnspan=2, sticky="we", **pad)
+        out_row.grid(row=5, column=1, columnspan=2, sticky="we", **pad)
         ctk.CTkEntry(out_row, textvariable=self.out_var, width=280).pack(side="left", fill="x", expand=True)
         ctk.CTkButton(out_row, text="...", width=36, command=self._browse_out).pack(side="left", padx=(4, 0))
 
         self.status_var = tk.StringVar(value="")
         ctk.CTkLabel(root, textvariable=self.status_var, anchor="w").grid(
-            row=4, column=0, columnspan=3, sticky="we", padx=8, pady=(4, 0))
+            row=6, column=0, columnspan=3, sticky="we", padx=8, pady=(4, 0))
         self.progress_bar = ctk.CTkProgressBar(root, mode="determinate")
         self.progress_bar.set(0.0)
-        self.progress_bar.grid(row=5, column=0, columnspan=3, sticky="we", padx=8, pady=4)
+        self.progress_bar.grid(row=7, column=0, columnspan=3, sticky="we", padx=8, pady=4)
 
         self.export_btn = ctk.CTkButton(root, text="Export", command=self._start_export)
-        self.export_btn.grid(row=6, column=0, columnspan=3, pady=(4, 0))
+        self.export_btn.grid(row=8, column=0, columnspan=3, pady=(4, 0))
 
         root.columnconfigure(1, weight=1)
         root.columnconfigure(2, weight=0)
@@ -4388,6 +4345,9 @@ class ExportVideoDialog(ctk.CTkToplevel):
             end_frame=end,
             speed=speed,
             output_fps=fps,
+            show_obbs=bool(self.show_obbs_var.get()),
+            show_arrows=bool(self.show_arrows_var.get()),
+            show_labels=bool(self.show_labels_var.get()),
             progress_cb=self._update_progress,
             done_cb=self._on_done,
         )
