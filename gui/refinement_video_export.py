@@ -81,9 +81,9 @@ def obb_corners(record: np.ndarray) -> np.ndarray | None:
 
 
 def _draw_obb_triangle(
-    image: np.ndarray, pts: np.ndarray, heading: float, color: tuple,
+    image: np.ndarray, pts: np.ndarray, heading: float, color: tuple, alpha: float,
 ) -> None:
-    """create_video's short-edge triangle: 0.3 opacity, 1.2 scale, no outline."""
+    """Draw the OBB head triangle using the selected opacity."""
     direction = np.array([
         np.sin(np.deg2rad(heading)), -np.cos(np.deg2rad(heading))
     ], dtype=float)
@@ -111,13 +111,13 @@ def _draw_obb_triangle(
     overlay = image.copy()
     cv2.fillConvexPoly(overlay, triangle, color, lineType=cv2.LINE_AA)
     cv2.addWeighted(
-        overlay, DIRECTION_MARKER_ALPHA, image, 1.0 - DIRECTION_MARKER_ALPHA,
+        overlay, alpha, image, 1.0 - alpha,
         0.0, dst=image,
     )
 
 
 def _draw_ellipse_with_arrowhead(
-    image: np.ndarray, record: np.ndarray, color: tuple, line_width: int,
+    image: np.ndarray, record: np.ndarray, color: tuple, line_width: int, alpha: float,
 ) -> None:
     """Match create_video's fitted ellipse and tangent-arc direction marker."""
     cx, cy, width, height, heading = map(float, record)
@@ -148,7 +148,7 @@ def _draw_ellipse_with_arrowhead(
     overlay = image.copy()
     cv2.fillPoly(overlay, [polygon], color, lineType=cv2.LINE_AA)
     cv2.addWeighted(
-        overlay, DIRECTION_MARKER_ALPHA, image, 1.0 - DIRECTION_MARKER_ALPHA,
+        overlay, alpha, image, 1.0 - alpha,
         0.0, dst=image,
     )
 
@@ -161,10 +161,13 @@ def draw_refined_shapes(
     line_width: int,
     *,
     reverse: bool = False,
+    triangle_alpha: float = DIRECTION_MARKER_ALPHA,
 ) -> None:
     """Draw the mutually exclusive OBB or ellipse style with head direction."""
     if mode not in ("obb", "ellipse"):
         raise ValueError(f"Unsupported box drawing style: {mode}")
+    if not np.isfinite(triangle_alpha) or not 0.0 <= triangle_alpha <= 1.0:
+        raise ValueError("Triangle alpha must be between 0 and 1.")
     for tid, raw in enumerate(frame_obbs):
         record = np.array(raw, dtype=float, copy=True)
         if reverse:
@@ -176,9 +179,127 @@ def draw_refined_shapes(
         if mode == "obb":
             polygon = np.rint(pts).astype(np.int32).reshape(-1, 1, 2)
             cv2.polylines(image, [polygon], True, color, line_width, cv2.LINE_AA)
-            _draw_obb_triangle(image, pts, float(record[4]), color)
+            _draw_obb_triangle(image, pts, float(record[4]), color, triangle_alpha)
         else:
-            _draw_ellipse_with_arrowhead(image, record, color, line_width)
+            _draw_ellipse_with_arrowhead(image, record, color, line_width, triangle_alpha)
+
+
+
+def draw_refinement_annotations(
+    image: np.ndarray,
+    pose_row: np.ndarray | None,
+    frame_obbs: np.ndarray | None,
+    front_x_idx: np.ndarray,
+    front_y_idx: np.ndarray,
+    rear_x_idx: np.ndarray,
+    rear_y_idx: np.ndarray,
+    id_palette: list,
+    num_ids: int,
+    line_width: int,
+    label_size: int,
+    render_mode: str,
+    show_labels: bool,
+    reverse: bool,
+    triangle_alpha: float = DIRECTION_MARKER_ALPHA,
+) -> None:
+    """Draw one source frame identically for video export and preview."""
+    if render_mode in ("obb", "ellipse"):
+        if frame_obbs is None:
+            return
+        draw_refined_shapes(
+            image, frame_obbs, id_palette, render_mode, line_width,
+            reverse=reverse, triangle_alpha=triangle_alpha,
+        )
+        if show_labels:
+            for tid, record in enumerate(frame_obbs):
+                if obb_corners(record) is None:
+                    continue
+                color = id_palette[tid] if tid < len(id_palette) else WHITE_RGB
+                anchor = np.rint(record[:2]).astype(int)
+                cv2.putText(
+                    image, f"ID {tid}",
+                    (int(anchor[0]) + 6, int(anchor[1]) - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, label_size / 28.0,
+                    color, max(1, label_size // 10), cv2.LINE_AA,
+                )
+        return
+
+    if pose_row is None or num_ids == 0:
+        return
+    fronts = np.column_stack([pose_row[front_x_idx], pose_row[front_y_idx]])
+    rears = np.column_stack([pose_row[rear_x_idx], pose_row[rear_y_idx]])
+    if reverse:
+        fronts, rears = rears, fronts
+    valid = np.isfinite(fronts).all(axis=1) & np.isfinite(rears).all(axis=1)
+    tip_length = max(8, int(round(line_width * 5.0)))
+    for tid in np.flatnonzero(valid).tolist():
+        f_pt = np.rint(fronts[tid]).astype(int)
+        r_pt = np.rint(rears[tid]).astype(int)
+        color = id_palette[tid] if tid < len(id_palette) else WHITE_RGB
+        if render_mode == "center":
+            center = np.rint((fronts[tid] + rears[tid]) * 0.5).astype(int)
+            cv2.circle(image, tuple(center), line_width, color, -1, cv2.LINE_AA)
+        else:
+            alen = max(1.0, float(np.linalg.norm(f_pt - r_pt)))
+            cv2.arrowedLine(
+                image, tuple(r_pt), tuple(f_pt), color, line_width,
+                cv2.LINE_AA, tipLength=min(0.8, tip_length / alen),
+            )
+            if show_labels:
+                center = np.rint((fronts[tid] + rears[tid]) * 0.5).astype(int)
+                cv2.putText(
+                    image, f"ID {tid}",
+                    (int(center[0]) + 6, int(center[1]) - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, label_size / 28.0,
+                    color, max(1, label_size // 10), cv2.LINE_AA,
+                )
+
+
+def crop_refinement_preview(
+    image: np.ndarray,
+    pose_row: np.ndarray | None,
+    frame_obbs: np.ndarray | None,
+    front_x_idx: np.ndarray,
+    front_y_idx: np.ndarray,
+    rear_x_idx: np.ndarray,
+    rear_y_idx: np.ndarray,
+    render_mode: str,
+) -> tuple[np.ndarray, int | None]:
+    """Focus on the visible animal nearest the image center, with surrounding context."""
+    height, width = image.shape[:2]
+    if render_mode in ("obb", "ellipse"):
+        if frame_obbs is None:
+            return image.copy(), None
+        obbs = np.asarray(frame_obbs, dtype=float)
+        centers = obbs[:, :2]
+        spans = np.maximum(obbs[:, 2], obbs[:, 3])
+        valid = np.isfinite(obbs).all(axis=1) & (obbs[:, 2] > 0) & (obbs[:, 3] > 0)
+    else:
+        if pose_row is None:
+            return image.copy(), None
+        fronts = np.column_stack([pose_row[front_x_idx], pose_row[front_y_idx]])
+        rears = np.column_stack([pose_row[rear_x_idx], pose_row[rear_y_idx]])
+        centers = (fronts + rears) * 0.5
+        spans = np.linalg.norm(fronts - rears, axis=1)
+        valid = np.isfinite(fronts).all(axis=1) & np.isfinite(rears).all(axis=1)
+
+    valid &= (
+        (centers[:, 0] >= 0) & (centers[:, 0] < width)
+        & (centers[:, 1] >= 0) & (centers[:, 1] < height)
+    )
+    ids = np.flatnonzero(valid)
+    if len(ids) == 0:
+        return image.copy(), None
+
+    relative = (centers[ids] - np.array([width / 2, height / 2])) / [width, height]
+    tid = int(ids[np.argmin(np.sum(relative * relative, axis=1))])
+    center_x, center_y = centers[tid]
+    animal_size = max(1.0, float(spans[tid]))
+    crop_w = min(width, max(160, int(round(animal_size * 6))))
+    crop_h = min(height, max(120, int(round(animal_size * 4.5))))
+    x0 = int(np.clip(round(center_x - crop_w / 2), 0, width - crop_w))
+    y0 = int(np.clip(round(center_y - crop_h / 2), 0, height - crop_h))
+    return image[y0:y0 + crop_h, x0:x0 + crop_w].copy(), tid
 
 
 def export_refinement_video(
@@ -204,12 +325,15 @@ def export_refinement_video(
     *,
     obb_frames: np.ndarray | None = None,
     obb_values: np.ndarray | None = None,
+    triangle_alpha: float = DIRECTION_MARKER_ALPHA,
 ) -> None:
     """Export one of center, arrow, OBB, or ellipse for each animal."""
     if render_mode not in RENDER_MODES:
         raise ValueError(f"Unknown Refinement drawing mode: {render_mode}")
     if line_width < 1:
         raise ValueError("Drawing width or point radius must be positive.")
+    if not np.isfinite(triangle_alpha) or not 0.0 <= triangle_alpha <= 1.0:
+        raise ValueError("Triangle alpha must be between 0 and 1.")
     if render_mode in ("obb", "ellipse"):
         if obb_frames is None or obb_values is None:
             raise ValueError("OBB and ellipse export require AMADEUS result geometry.")
@@ -248,7 +372,6 @@ def export_refinement_video(
             raise RuntimeError(f"Cannot create video file: {out_path}")
 
         total = len(source_indices)
-        tip_length = max(8, int(round(line_width * 5.0)))
         prev_idx = None
         try:
             for done, src_idx in enumerate(source_indices):
@@ -260,58 +383,16 @@ def export_refinement_video(
                 prev_idx = src_idx
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-                if render_mode in ("obb", "ellipse"):
-                    obb_idx = obb_row_for_frame.get(src_idx)
-                    if obb_idx is not None:
-                        frame_obbs = obb_values[obb_idx]
-                        draw_refined_shapes(
-                            rgb, frame_obbs, id_palette, render_mode, line_width,
-                            reverse=reverse,
-                        )
-                        if show_labels:
-                            for tid, record in enumerate(frame_obbs):
-                                if obb_corners(record) is None:
-                                    continue
-                                color = id_palette[tid] if tid < len(id_palette) else WHITE_RGB
-                                anchor = np.rint(record[:2]).astype(int)
-                                cv2.putText(
-                                    rgb, f"ID {tid}",
-                                    (int(anchor[0]) + 6, int(anchor[1]) - 6),
-                                    cv2.FONT_HERSHEY_SIMPLEX, label_size / 28.0,
-                                    color, max(1, label_size // 10), cv2.LINE_AA,
-                                )
-                else:
-                    pose_idx = pose_row_for_frame.get(src_idx)
-                    if pose_idx is not None and num_ids > 0:
-                        row = df_np[pose_idx]
-                        fronts = np.column_stack([row[front_x_idx], row[front_y_idx]])
-                        rears = np.column_stack([row[rear_x_idx], row[rear_y_idx]])
-                        if reverse:
-                            fronts, rears = rears, fronts
-                        valid = np.isfinite(fronts).all(axis=1) & np.isfinite(rears).all(axis=1)
-                        for tid in np.flatnonzero(valid).tolist():
-                            f_pt = np.rint(fronts[tid]).astype(int)
-                            r_pt = np.rint(rears[tid]).astype(int)
-                            color = id_palette[tid] if tid < len(id_palette) else WHITE_RGB
-                            if render_mode == "center":
-                                center = np.rint((fronts[tid] + rears[tid]) * 0.5).astype(int)
-                                cv2.circle(
-                                    rgb, tuple(center), line_width, color, -1, cv2.LINE_AA,
-                                )
-                            else:
-                                alen = max(1.0, float(np.linalg.norm(f_pt - r_pt)))
-                                cv2.arrowedLine(
-                                    rgb, tuple(r_pt), tuple(f_pt), color, line_width,
-                                    cv2.LINE_AA, tipLength=min(0.8, tip_length / alen),
-                                )
-                                if show_labels:
-                                    center = np.rint((fronts[tid] + rears[tid]) * 0.5).astype(int)
-                                    cv2.putText(
-                                        rgb, f"ID {tid}",
-                                        (int(center[0]) + 6, int(center[1]) - 6),
-                                        cv2.FONT_HERSHEY_SIMPLEX, label_size / 28.0,
-                                        color, max(1, label_size // 10), cv2.LINE_AA,
-                                    )
+                pose_idx = pose_row_for_frame.get(src_idx)
+                obb_idx = obb_row_for_frame.get(src_idx)
+                draw_refinement_annotations(
+                    rgb,
+                    df_np[pose_idx] if pose_idx is not None else None,
+                    obb_values[obb_idx] if obb_idx is not None else None,
+                    front_x_idx, front_y_idx, rear_x_idx, rear_y_idx,
+                    id_palette, num_ids, line_width, label_size,
+                    render_mode, show_labels, reverse, triangle_alpha,
+                )
 
                 writer.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
                 if progress_cb and (done % 10 == 0 or done == total - 1):
