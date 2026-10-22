@@ -3,6 +3,7 @@
 
 """Mutually exclusive Refinement video styles and corrected OBB data."""
 
+import random
 import unittest
 from unittest.mock import patch
 
@@ -16,8 +17,11 @@ from gui.refinement_video_export import (
     DEFAULT_OBB_WIDTH,
     DIRECTION_MARKER_ALPHA,
     RENDER_MODES,
+    choose_random_refinement_preview_target,
     crop_refinement_preview,
+    default_refinement_video_path,
     draw_refinement_annotations,
+    valid_refinement_preview_ids,
     draw_refined_shapes,
     export_refinement_video,
     obb_corners,
@@ -47,10 +51,10 @@ class OBBGeometryTests(unittest.TestCase):
         self.assertFalse(rgb.any())
 
     def test_create_video_defaults(self):
-        self.assertEqual(DEFAULT_OBB_WIDTH, 1)
-        self.assertEqual(DEFAULT_ELLIPSE_WIDTH, 1)
+        self.assertEqual(DEFAULT_OBB_WIDTH, 2)
+        self.assertEqual(DEFAULT_ELLIPSE_WIDTH, 2)
         self.assertEqual(DEFAULT_CENTER_RADIUS, 3)
-        self.assertEqual(DIRECTION_MARKER_ALPHA, 0.3)
+        self.assertEqual(DIRECTION_MARKER_ALPHA, 0.6)
         self.assertEqual(RENDER_MODES, ("center", "arrow", "obb", "ellipse"))
 
     def test_obb_has_triangle_toward_head_and_reverses(self):
@@ -177,6 +181,109 @@ class PreviewTests(unittest.TestCase):
         self.assertTrue(cropped[35, 50].any())
         self.assertFalse(cropped[25, 60].any())
 
+
+
+    def test_crop_can_focus_on_explicit_individual(self):
+        cropped, tid = crop_refinement_preview(
+            self.image, self.pose_row, None,
+            self.front_x, self.front_y, self.rear_x, self.rear_y, "arrow",
+            target_tid=1,
+        )
+        self.assertEqual(tid, 1)
+        self.assertEqual(cropped.shape, (270, 360, 3))
+
+    def test_crop_rejects_invisible_requested_individual(self):
+        with self.assertRaisesRegex(ValueError, "not visible"):
+            crop_refinement_preview(
+                self.image, self.pose_row, None,
+                self.front_x, self.front_y, self.rear_x, self.rear_y, "arrow",
+                target_tid=99,
+            )
+
+    def test_valid_ids_are_bounded_by_video_dimensions(self):
+        self.assertEqual(
+            valid_refinement_preview_ids(
+                self.pose_row, None,
+                self.front_x, self.front_y, self.rear_x, self.rear_y,
+                "center", 1200, 900,
+            ).tolist(), [0, 1],
+        )
+        boxes = np.array([
+            [500, 400, 50, 20, 0],
+            [1500, 40, 40, 10, 0],
+        ], dtype=float)
+        self.assertEqual(
+            valid_refinement_preview_ids(
+                self.pose_row, boxes,
+                self.front_x, self.front_y, self.rear_x, self.rear_y,
+                "obb", 1200, 900,
+            ).tolist(), [0],
+        )
+
+
+class RandomPreviewTests(unittest.TestCase):
+    def test_random_frame_and_individual_with_no_immediate_duplicate(self):
+        eligible = {
+            5: np.array([0, 2]),
+            13: np.array([1, 2]),
+            25: np.array([0]),
+        }
+        rng = random.Random(41)
+        seen_frames, seen_ids = set(), set()
+        previous = None
+        for _ in range(40):
+            frame, tid = choose_random_refinement_preview_target(
+                0, 30, lambda f: eligible.get(f, np.array([], dtype=int)),
+                previous_target=previous, rng=rng,
+            )
+            self.assertIn(tid, eligible[frame])
+            self.assertNotEqual((frame, tid), previous)
+            seen_frames.add(frame)
+            seen_ids.add(tid)
+            previous = (frame, tid)
+        self.assertEqual(seen_frames, {5, 13, 25})
+        self.assertEqual(seen_ids, {0, 1, 2})
+
+    def test_selected_range_and_sparse_frames(self):
+        targets = {90: np.array([3]), 200: np.array([0, 1])}
+        frame, tid = choose_random_refinement_preview_target(
+            100, 220, lambda f: targets.get(f, np.array([], dtype=int)),
+            rng=random.Random(7),
+        )
+        self.assertEqual(frame, 200)
+        self.assertIn(tid, [0, 1])
+
+    def test_one_possible_pair_may_repeat(self):
+        for _ in range(2):
+            target = choose_random_refinement_preview_target(
+                2, 2, lambda f: np.array([7]),
+                previous_target=(2, 7), rng=random.Random(1),
+            )
+            self.assertEqual(target, (2, 7))
+
+    def test_no_visible_individual_reports_error(self):
+        with self.assertRaisesRegex(ValueError, "No tracked individuals"):
+            choose_random_refinement_preview_target(
+                0, 3, lambda _: np.array([], dtype=int), rng=random.Random(1),
+            )
+        with self.assertRaisesRegex(ValueError, "Invalid preview frame range"):
+            choose_random_refinement_preview_target(
+                3, 2, lambda _: np.array([0]),
+            )
+
+    def test_export_path_is_next_to_input_video(self):
+        self.assertEqual(
+            default_refinement_video_path("/tmp/video.mp4"),
+            "/tmp/video_refined.mp4",
+        )
+        self.assertEqual(
+            default_refinement_video_path("/tmp/video.avi"),
+            "/tmp/video_refined.avi",
+        )
+        self.assertEqual(
+            default_refinement_video_path("/tmp/video.mov"),
+            "/tmp/video_refined.mp4",
+        )
 
 class RefinedSnapshotTests(unittest.TestCase):
     def setUp(self):
