@@ -3675,7 +3675,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
                 row = matching.iloc[0]
             return row[obb_columns].to_numpy(dtype=float).reshape(self.num_ids, 5)
 
-        cap = cv2.VideoCapture(self.video_path_var.get().strip())
+        cap = cv2.VideoCapture(self.reader.video_path)
         if not cap.isOpened():
             raise RuntimeError("Cannot open the input video for preview.")
         try:
@@ -3746,7 +3746,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
             done_cb(ValueError("OBB and ellipse export require AMADEUS result data."))
             return
 
-        video_path = self.video_path_var.get().strip()
+        video_path = self.reader.video_path
         df_np_snap = self.df_np.copy()
         front_x_idx = self._front_x_idx.copy()
         front_y_idx = self._front_y_idx.copy()
@@ -4314,7 +4314,7 @@ class ExportVideoDialog(ctk.CTkToplevel):
         self.speed_var = tk.DoubleVar(value=1.0)
         self.fps_var = tk.DoubleVar(value=round(src_fps, 2))
         self.out_var = tk.StringVar(
-            value=default_refinement_video_path(parent.video_path_var.get().strip())
+            value=default_refinement_video_path(parent.reader.video_path)
         )
         self._last_preview_target: tuple[int, int] | None = None
         self.render_mode_var = tk.StringVar(value="arrow")
