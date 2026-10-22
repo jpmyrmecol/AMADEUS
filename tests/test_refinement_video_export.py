@@ -14,7 +14,10 @@ from gui.refinement_video_export import (
     DEFAULT_CENTER_RADIUS,
     DEFAULT_ELLIPSE_WIDTH,
     DEFAULT_OBB_WIDTH,
+    DIRECTION_MARKER_ALPHA,
     RENDER_MODES,
+    crop_refinement_preview,
+    draw_refinement_annotations,
     draw_refined_shapes,
     export_refinement_video,
     obb_corners,
@@ -47,6 +50,7 @@ class OBBGeometryTests(unittest.TestCase):
         self.assertEqual(DEFAULT_OBB_WIDTH, 1)
         self.assertEqual(DEFAULT_ELLIPSE_WIDTH, 1)
         self.assertEqual(DEFAULT_CENTER_RADIUS, 3)
+        self.assertEqual(DIRECTION_MARKER_ALPHA, 0.3)
         self.assertEqual(RENDER_MODES, ("center", "arrow", "obb", "ellipse"))
 
     def test_obb_has_triangle_toward_head_and_reverses(self):
@@ -86,6 +90,92 @@ class OBBGeometryTests(unittest.TestCase):
             draw_refined_shapes(thin, row, [(0, 255, 0)], mode, 1)
             draw_refined_shapes(thick, row, [(0, 255, 0)], mode, 4)
             self.assertGreater(np.count_nonzero(thick), np.count_nonzero(thin))
+
+
+    def test_head_marker_opacity_changes_only_fill(self):
+        row = np.array([[60, 60, 50, 20, 0]])
+        for mode in ("obb", "ellipse"):
+            with self.subTest(mode=mode):
+                transparent = np.zeros((120, 120, 3), dtype=np.uint8)
+                opaque = np.zeros_like(transparent)
+                draw_refined_shapes(
+                    transparent, row, [(0, 255, 0)], mode, 1, triangle_alpha=0.0,
+                )
+                draw_refined_shapes(
+                    opaque, row, [(0, 255, 0)], mode, 1, triangle_alpha=1.0,
+                )
+                self.assertFalse(transparent[25, 60].any())
+                self.assertTrue(opaque[25, 60].any())
+                edge = (35, 50) if mode == "obb" else (60, 50)
+                np.testing.assert_array_equal(
+                    transparent[edge], opaque[edge],
+                )
+
+    def test_invalid_triangle_alpha_is_rejected(self):
+        for mode in ("obb", "ellipse"):
+            for alpha in (-0.1, 1.1, float("nan")):
+                with self.subTest(mode=mode, alpha=alpha):
+                    with self.assertRaisesRegex(ValueError, "Triangle alpha"):
+                        draw_refined_shapes(
+                            np.zeros((120, 120, 3), dtype=np.uint8),
+                            np.array([[60, 60, 50, 20, 0]]),
+                            [(0, 255, 0)], mode, 1, triangle_alpha=alpha,
+                        )
+
+
+class PreviewTests(unittest.TestCase):
+    def setUp(self):
+        self.image = np.zeros((900, 1200, 3), dtype=np.uint8)
+        self.front_x = np.array([1, 5])
+        self.front_y = np.array([2, 6])
+        self.rear_x = np.array([3, 7])
+        self.rear_y = np.array([4, 8])
+        self.pose_row = np.array([
+            0, 500, 350, 500, 450,
+            25, 25, 25, 85,
+        ], dtype=float)
+
+    def test_crop_chooses_central_individual_and_keeps_context(self):
+        self.image[400, 500] = (255, 0, 0)
+        cropped, tid = crop_refinement_preview(
+            self.image, self.pose_row, None,
+            self.front_x, self.front_y, self.rear_x, self.rear_y, "arrow",
+        )
+        self.assertEqual(tid, 0)
+        self.assertEqual(cropped.shape, (450, 600, 3))
+        np.testing.assert_array_equal(cropped[225, 300], [255, 0, 0])
+
+    def test_obb_crop_uses_shape_center_and_size(self):
+        obbs = np.array([
+            [500, 400, 50, 20, 0],
+            [25, 50, 40, 10, 90],
+        ], dtype=float)
+        cropped, tid = crop_refinement_preview(
+            self.image, self.pose_row, obbs,
+            self.front_x, self.front_y, self.rear_x, self.rear_y, "ellipse",
+        )
+        self.assertEqual(tid, 0)
+        self.assertEqual(cropped.shape, (225, 300, 3))
+
+    def test_no_valid_individual_preserves_full_frame(self):
+        blank = np.full_like(self.pose_row, np.nan)
+        cropped, tid = crop_refinement_preview(
+            self.image, blank, None,
+            self.front_x, self.front_y, self.rear_x, self.rear_y, "center",
+        )
+        self.assertIsNone(tid)
+        self.assertEqual(cropped.shape, self.image.shape)
+
+    def test_frame_annotation_can_be_used_for_preview_without_writing(self):
+        cropped = np.zeros((120, 120, 3), dtype=np.uint8)
+        draw_refinement_annotations(
+            cropped, np.array([0, 60, 35, 60, 85], dtype=float),
+            np.array([[60, 60, 50, 20, 0]], dtype=float),
+            np.array([1]), np.array([2]), np.array([3]), np.array([4]),
+            [(0, 255, 0)], 1, 1, 12, "obb", False, False, 0.0,
+        )
+        self.assertTrue(cropped[35, 50].any())
+        self.assertFalse(cropped[25, 60].any())
 
 
 class RefinedSnapshotTests(unittest.TestCase):
@@ -178,7 +268,8 @@ class FakeWriter:
 
 
 class ExportTests(unittest.TestCase):
-    def run_export(self, mode, width=2, *, reverse=False, show_labels=False):
+    def run_export(self, mode, width=2, *, reverse=False, show_labels=False,
+                   triangle_alpha=DIRECTION_MARKER_ALPHA):
         capture = FakeCapture()
         writer = FakeWriter()
         # Input frames 0 and 2 have tracking rows. Frame 1 has no tracking row.
@@ -204,6 +295,7 @@ class ExportTests(unittest.TestCase):
                 lambda done, total, msg: events.append((done, total, msg)),
                 obb_frames=frames if mode in ("obb", "ellipse") else None,
                 obb_values=boxes if mode in ("obb", "ellipse") else None,
+                triangle_alpha=triangle_alpha,
             )
         self.assertTrue(writer.released)
         self.assertEqual(len(writer.frames), 3)
@@ -243,6 +335,14 @@ class ExportTests(unittest.TestCase):
         self.assertTrue(frames[0][25, 60].any())
         self.assertTrue(frames[0][60, 50].any())
         self.assertFalse(frames[0][60, 60].any())
+
+    def test_video_export_uses_selected_triangle_alpha(self):
+        for mode in ("obb", "ellipse"):
+            with self.subTest(mode=mode):
+                transparent = self.run_export(mode, 1, triangle_alpha=0.0)
+                opaque = self.run_export(mode, 1, triangle_alpha=1.0)
+                self.assertFalse(transparent[0][25, 60].any())
+                self.assertTrue(opaque[0][25, 60].any())
 
     def test_obb_and_ellipse_require_amadeus_geometry(self):
         for mode in ("obb", "ellipse"):
