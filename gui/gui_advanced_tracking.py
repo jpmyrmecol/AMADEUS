@@ -1487,6 +1487,7 @@ class ConfigGUI(ctk.CTk):
         id_tracking_active = not bool(self.skip_id_tracking.get())
         refinement_active = not bool(self.skip_refinement.get())
         any_analysis_active = detection_active or id_tracking_active or refinement_active
+        create_video_active = not bool(self.skip_creating_video.get())
 
         # Detection-only controls.
         set_keys(
@@ -1561,14 +1562,17 @@ class ConfigGUI(ctk.CTk):
         # regardless of the individual Analysis skip states.
         set_keys("Analysis", ["INTERACT_IOU"], True)
 
+        # Create Video also consumes analysis.FIRST_FRAME / LAST_FRAME.
+        # Keep its range editable even if all analysis stages are skipped.
         for widget in getattr(self, "analysis_range", {}).values():
             try:
-                widget.configure(state="normal" if any_analysis_active else "disabled")
+                widget.configure(
+                    state="normal" if (any_analysis_active or create_video_active) else "disabled"
+                )
             except Exception:
                 pass
 
         # Create Video.
-        create_video_active = not bool(self.skip_creating_video.get())
         set_keys(
             "Create Video",
             list(self.sections.get("Create Video", {}).get("widgets", {}).keys()),
