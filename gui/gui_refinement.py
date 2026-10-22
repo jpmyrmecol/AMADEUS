@@ -918,6 +918,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
         ctk.CTkFrame(ctrl, width=2, fg_color=("gray60", "gray40"), corner_radius=0).pack(side="left", fill="y", padx=7, pady=4)
         self._assign_history_var = tk.StringVar()
         ctk.CTkLabel(ctrl, textvariable=self._assign_history_var, anchor="w", text_color=("gray20", "gray80")).pack(side="left", padx=(2, 0))
+        # Keep video export available in both AMADEUS and Dataset modes.
+        # With side="right", the first packed button is the rightmost one.
+        ctk.CTkButton(ctrl, text="Export Video", width=120, height=22, corner_radius=3,
+                      command=self.open_export_video_dialog).pack(side="right", padx=(4, 0), pady=4)
         ctk.CTkButton(ctrl, text="Save Screenshot", width=120, height=22, corner_radius=3,
                       command=self.save_canvas_screenshot).pack(side="right", padx=(4, 0), pady=4)
         ctk.CTkButton(ctrl, text="Fit Window Scale", width=120, height=22, corner_radius=3,
@@ -967,11 +971,6 @@ class UmaDirectionRefinementApp(ctk.CTk):
         cand_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.candidate_tree.yview)
         cand_scroll.pack(side="right", fill="y")
         self.candidate_tree.configure(yscrollcommand=cand_scroll.set)
-
-        export_row = ctk.CTkFrame(candidate_frame, corner_radius=0)
-        export_row.pack(fill="x", padx=4, pady=(4, 2))
-        ctk.CTkButton(export_row, text="Export Video", width=120, height=26,
-                      command=self.open_export_video_dialog).pack(side="left")
 
         nav = ctk.CTkFrame(right, corner_radius=0)
         nav.pack(fill="x", pady=(0, 6))
