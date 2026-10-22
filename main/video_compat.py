@@ -1380,77 +1380,93 @@ def run_conversion(
     cancel: threading.Event | None = None,
     log: Callable[[str], None] | None = None,
 ) -> ConversionResult:
-    """Produce the analysis copy described by ``plan``.
+    """Produce a verified analysis copy without exposing an incomplete MP4.
 
-    ``progress`` receives ``(fraction, frames_done)``. Setting ``cancel`` stops
-    FFmpeg and removes the partial file. The source video is never written to.
+    FFmpeg writes to a temporary .mp4 in the destination directory. Only after
+    conversion and frame-access verification succeeds is it published under the
+    final name. A failed or cancelled replacement leaves an older copy intact.
+    The source video is never modified.
     """
     if os.path.normcase(plan.output_path) == os.path.normcase(plan.source_path):
         raise RuntimeError("The converted video would overwrite the source video.")
 
-    command = build_ffmpeg_command(plan)
     os.makedirs(os.path.dirname(plan.output_path), exist_ok=True)
-    if log is not None:
-        log("FFmpeg: " + " ".join(command))
-
-    expected = max(1, plan.expected_output_frames)
-    started = time.perf_counter()
-    frames_done = 0
-
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_subprocess_kwargs(),
+    fd, staging_path = tempfile.mkstemp(
+        prefix=f".{Path(plan.output_path).stem}.",
+        suffix=".partial.mp4",
+        dir=os.path.dirname(plan.output_path),
     )
+    os.close(fd)
     try:
-        assert process.stdout is not None
-        for line in process.stdout:
-            if cancel is not None and cancel.is_set():
-                process.terminate()
-                break
-            line = line.strip()
-            if line.startswith("frame="):
-                try:
-                    frames_done = max(frames_done, int(line.split("=", 1)[1]))
-                except ValueError:
-                    continue
-                if progress is not None:
-                    progress(min(1.0, frames_done / expected), frames_done)
-        stderr_text = process.stderr.read() if process.stderr is not None else ""
-        return_code = process.wait()
+        staged_plan = replace(plan, output_path=staging_path)
+        command = build_ffmpeg_command(staged_plan)
+        if log is not None:
+            log("FFmpeg: " + " ".join(command))
+
+        expected = max(1, plan.expected_output_frames)
+        started = time.perf_counter()
+        frames_done = 0
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_subprocess_kwargs(),
+        )
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                if cancel is not None and cancel.is_set():
+                    process.terminate()
+                    break
+                line = line.strip()
+                if line.startswith("frame="):
+                    try:
+                        frames_done = max(frames_done, int(line.split("=", 1)[1]))
+                    except ValueError:
+                        continue
+                    if progress is not None:
+                        progress(min(1.0, frames_done / expected), frames_done)
+            stderr_text = process.stderr.read() if process.stderr is not None else ""
+            return_code = process.wait()
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+        if cancel is not None and cancel.is_set():
+            raise ConversionCancelled("The conversion was stopped before it finished.")
+        if return_code != 0:
+            detail = (stderr_text or "").strip() or f"FFmpeg exited with code {return_code}"
+            raise RuntimeError(f"The video conversion failed.\n\n{detail}")
+
+        frames_written, warnings = _verify_conversion(staged_plan)
+        if cancel is not None and cancel.is_set():
+            raise ConversionCancelled("The conversion was stopped before it finished.")
+
+        metadata = conversion_metadata(
+            plan, command=command, frames_written=frames_written or frames_done, warnings=warnings
+        )
+        # A pre-existing record must never describe the replacement between
+        # publication of its MP4 and publication of its new metadata.
+        _delete_quietly(plan.metadata_path)
+        os.replace(staging_path, plan.output_path)
+        metadata_path = write_conversion_metadata(plan, metadata)
+        if progress is not None:
+            progress(1.0, frames_written or frames_done)
+        return ConversionResult(
+            plan=plan,
+            output_path=plan.output_path,
+            metadata_path=metadata_path,
+            frames_written=frames_written or frames_done,
+            elapsed_seconds=time.perf_counter() - started,
+            warnings=tuple(warnings),
+        )
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-
-    if cancel is not None and cancel.is_set():
-        _delete_quietly(plan.output_path)
-        raise ConversionCancelled("The conversion was stopped before it finished.")
-    if return_code != 0:
-        _delete_quietly(plan.output_path)
-        detail = (stderr_text or "").strip() or f"FFmpeg exited with code {return_code}"
-        raise RuntimeError(f"The video conversion failed.\n\n{detail}")
-
-    frames_written, warnings = _verify_conversion(plan)
-    metadata = conversion_metadata(
-        plan, command=command, frames_written=frames_written or frames_done, warnings=warnings
-    )
-    metadata_path = write_conversion_metadata(plan, metadata)
-    if progress is not None:
-        progress(1.0, frames_written or frames_done)
-    return ConversionResult(
-        plan=plan,
-        output_path=plan.output_path,
-        metadata_path=metadata_path,
-        frames_written=frames_written or frames_done,
-        elapsed_seconds=time.perf_counter() - started,
-        warnings=tuple(warnings),
-    )
-
+        _delete_quietly(staging_path)
 
 def _delete_quietly(path: str) -> None:
     try:
