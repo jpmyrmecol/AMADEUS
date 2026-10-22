@@ -30,9 +30,10 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -645,9 +646,21 @@ def probe_opencv(path: str) -> OpenCvProbe:
         seek_tested: tuple[int, ...] = ()
         seek_failed: tuple[int, ...] = ()
         random_ok = False
+        seekable = 0
         if first_ok and reported > 0:
             seek_tested, seek_failed = _multi_point_seek_test(cap, reported)
             random_ok = bool(seek_tested) and not seek_failed
+            if seek_failed == (reported - 1,) and len(seek_tested) >= 2:
+                # Some MOV/HEVC files over-report the final frame. When all
+                # interior seeks work, confirm the last reachable frame instead
+                # of treating a short unreadable tail as a seek failure.
+                tail_count = detect_seekable_frame_count(path, reported)
+                if (seek_tested[-2] < tail_count < reported
+                        and _seek_and_decode_exact(cap, tail_count - 1)):
+                    seekable = tail_count
+                    seek_tested = seek_tested[:-1]
+                    seek_failed = ()
+                    random_ok = True
         elif first_ok:
             # Preserve the previous behavior for unusual backends that decode a
             # frame but do not report a frame count. Downstream frame-range
@@ -656,10 +669,9 @@ def probe_opencv(path: str) -> OpenCvProbe:
     finally:
         cap.release()
 
-    # detect_seekable_frame_count() probes the tail frame by frame, which is slow
-    # and floods the console with decoder errors on a file OpenCV cannot seek in
-    # at all. That file already needs converting, so skip the count.
-    seekable = detect_seekable_frame_count(path, reported) if random_ok else 0
+    # Avoid a potentially slow tail scan when arbitrary seeking is broken.
+    if random_ok and not seekable:
+        seekable = detect_seekable_frame_count(path, reported)
 
     variable = None
     if irregular is not None:
