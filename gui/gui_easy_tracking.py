@@ -1825,9 +1825,12 @@ class EasyTrackingGUI(ctk.CTk):
 
     def _wrap_canvas_panel_label(self, event: tk.Event) -> None:
         label = event.widget
-        inset = 2 * sum(int(label.cget(option)) for option in ("padx", "borderwidth", "highlightthickness"))
+        inset = 2 * sum(
+            label.winfo_pixels(str(label.cget(option)))
+            for option in ("padx", "borderwidth", "highlightthickness")
+        )
         wraplength = max(1, event.width - inset)
-        if int(label.cget("wraplength")) != wraplength:
+        if label.winfo_pixels(str(label.cget("wraplength"))) != wraplength:
             label.configure(wraplength=wraplength)
 
     def _update_next_action(self) -> None:
