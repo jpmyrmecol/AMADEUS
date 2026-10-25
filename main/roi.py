@@ -65,7 +65,11 @@ def insert_roi_vertex_at(points: list[list[int]], point: tuple[int, int]) -> lis
         bx, by = points[(i + 1) % len(points)]
         dx, dy = bx - ax, by - ay
         length_sq = dx * dx + dy * dy
-        t = max(0.0, min(1.0, ((vertex[0] - ax) * dx + (vertex[1] - ay) * dy) / length_sq)) if length_sq else 0.0
+        if length_sq:
+            t = ((vertex[0] - ax) * dx + (vertex[1] - ay) * dy) / length_sq
+            t = max(0.0, min(1.0, t))
+        else:
+            t = 0.0
         return (vertex[0] - ax - t * dx) ** 2 + (vertex[1] - ay - t * dy) ** 2
 
     edge_index = min(range(len(points)), key=distance_sq)
