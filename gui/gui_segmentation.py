@@ -66,6 +66,7 @@ from gui.video_input import (
 from main.path_utils import resolve_config_paths, resolve_path, to_relative_path
 from main.roi import (
     default_roi_set, initial_roi_points,
+    insert_longest_edge_midpoint, insert_roi_vertex_at,
     normalize_roi_set, load_roi_settings, roi_is_active, roi_signature,
     build_single_roi_mask as _build_single_roi_mask,
     build_roi_mask_for_frame as _build_roi_mask_for_frame,
@@ -1948,8 +1949,14 @@ class CrossingReviewApp(ctk.CTk):
         self.roi_edit_button.pack(side="left", padx=(10, 0))
         self.roi_params_frame = ctk.CTkFrame(roi, corner_radius=0)
         self.roi_params_frame.pack(fill="x", padx=0, pady=(0, 4))
-        ctk.CTkLabel(self.roi_params_frame, text="Edit: drag a vertex to reshape, inside to move.\nDrag outside the polygon to pan.",
+        ctk.CTkLabel(self.roi_params_frame,
+                        text="Edit: drag vertices to reshape, inside to move.\n"
+                             "Right-click to add a vertex; drag outside to pan.",
                         justify="left", anchor="w", wraplength=340).pack(fill="x", padx=6, pady=(0, 4))
+        self.roi_add_vertex_button = ctk.CTkButton(
+            self.roi_params_frame, text="Add vertex (longest edge)", command=self._add_roi_vertex
+        )
+        self.roi_add_vertex_button.pack(fill="x", padx=6, pady=(0, 4))
         self.roi_frame_start_scale = self._pack_scale_entry(self.roi_params_frame, "From frame", self.roi_frame_start_var, 0, 999999, 1)
         self.roi_frame_end_scale = self._pack_scale_entry(self.roi_params_frame, "To frame (-1=end)", self.roi_frame_end_var, -1, 999999, 1, slider_lo=0, end_sentinel=-1)
         ctk.CTkCheckBox(self.roi_params_frame, text="Reverse ROI", variable=self.roi_reverse_var).pack(anchor="w", padx=6, pady=(4, 6))
@@ -4110,6 +4117,7 @@ class CrossingReviewApp(ctk.CTk):
         self.canvas.bind("<Button-4>", self.on_mousewheel)
         self.canvas.bind("<Button-5>", self.on_mousewheel)
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
+        self.canvas.bind("<ButtonPress-3>", self.on_canvas_right_click)
         self.canvas.bind("<Double-Button-1>", lambda event: self.on_canvas_speed_click(event, 2.0))
         self.canvas.bind("<Triple-Button-1>", lambda event: self.on_canvas_speed_click(event, 4.0))
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
@@ -5025,6 +5033,7 @@ class CrossingReviewApp(ctk.CTk):
             self._ensure_roi_points()
         state = "normal" if self.reader is not None else "disabled"
         self.roi_edit_button.configure(state=state, text="Edit ROI: ON" if self.roi_edit_var.get() else "Edit ROI")
+        self.roi_add_vertex_button.configure(state=state)
         if hasattr(self, "canvas"):
             self.canvas.configure(cursor="crosshair" if self.roi_edit_var.get() else "")
 
@@ -5034,6 +5043,23 @@ class CrossingReviewApp(ctk.CTk):
             return False
         roi["points"] = initial_roi_points((self.reader.height, self.reader.width))
         return True
+
+    def _add_roi_vertex(self):
+        if self.reader is None:
+            return
+        self.on_canvas_release()
+        self.stop_playback()
+        self._ensure_roi_points()
+        roi = self.roi_sets[self.roi_active_set_idx]
+        updated = insert_longest_edge_midpoint(roi["points"])
+        if updated is None:
+            self.set_status("No distinct pixel available on the longest ROI edge")
+            return
+        roi["points"] = updated
+        self.roi_edit_var.set(True)
+        self._toggle_roi_params()
+        self._on_roi_geometry_changed()
+        self.set_status(f"ROI Set {self.roi_active_set_idx + 1}: {len(updated)} vertices")
 
     def _toggle_roi_edit(self):
         if self.reader is None:
@@ -7411,6 +7437,24 @@ class CrossingReviewApp(ctk.CTk):
             self.stop_playback()
             return
         self.last_drag_canvas = np.array([event.x, event.y], dtype=float)
+
+    def on_canvas_right_click(self, event):
+        points = self._active_roi_geometry()
+        if points is None or self.reader is None:
+            return "break"
+        ix, iy = self._canvas_to_image(float(event.x), float(event.y))
+        if not (0 <= ix < self.reader.width and 0 <= iy < self.reader.height):
+            return "break"
+        click = (min(self.reader.width - 1, round(ix)), min(self.reader.height - 1, round(iy)))
+        updated = insert_roi_vertex_at(points, click)
+        if updated is None:
+            return "break"
+        self.on_canvas_release()
+        self.stop_playback()
+        self.roi_sets[self.roi_active_set_idx]["points"] = updated
+        self._on_roi_geometry_changed()
+        self.set_status(f"ROI Set {self.roi_active_set_idx + 1}: {len(updated)} vertices")
+        return "break"
 
     def on_canvas_drag(self, event):
         if self._roi_drag_mode is not None:
