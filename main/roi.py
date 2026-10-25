@@ -23,10 +23,61 @@ def initial_roi_points(image_shape: tuple) -> list[list[int]]:
     return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
 
 
+def insert_longest_edge_midpoint(points: list[list[int]]) -> list[list[int]] | None:
+    """Insert a vertex on the longest polygon edge, including the closing edge.
+
+    Equal-length edges are resolved by their order in the polygon. Return None
+    if pixel rounding cannot produce a distinct new vertex.
+    """
+    if len(points) < 3:
+        raise ValueError("A polygon requires at least three vertices.")
+
+    edge_index = max(
+        range(len(points)),
+        key=lambda i: (
+            (points[(i + 1) % len(points)][0] - points[i][0]) ** 2
+            + (points[(i + 1) % len(points)][1] - points[i][1]) ** 2
+        ),
+    )
+    start, end = points[edge_index], points[(edge_index + 1) % len(points)]
+    midpoint = [round((start[0] + end[0]) / 2), round((start[1] + end[1]) / 2)]
+    if midpoint in points:
+        return None
+    result = [list(vertex) for vertex in points]
+    result.insert(edge_index + 1, midpoint)
+    return result
+
+
+def insert_roi_vertex_at(points: list[list[int]], point: tuple[int, int]) -> list[list[int]] | None:
+    """Insert at the click location after the closest polygon edge.
+
+    Edge distance is measured to the finite segment rather than to the
+    infinite line so corners and concave polygons behave consistently.
+    """
+    if len(points) < 3:
+        raise ValueError("A polygon requires at least three vertices.")
+    vertex = [int(point[0]), int(point[1])]
+    if vertex in points:
+        return None
+
+    def distance_sq(i: int) -> float:
+        ax, ay = points[i]
+        bx, by = points[(i + 1) % len(points)]
+        dx, dy = bx - ax, by - ay
+        length_sq = dx * dx + dy * dy
+        t = max(0.0, min(1.0, ((vertex[0] - ax) * dx + (vertex[1] - ay) * dy) / length_sq)) if length_sq else 0.0
+        return (vertex[0] - ax - t * dx) ** 2 + (vertex[1] - ay - t * dy) ** 2
+
+    edge_index = min(range(len(points)), key=distance_sq)
+    result = [list(existing) for existing in points]
+    result.insert(edge_index + 1, vertex)
+    return result
+
+
 def normalize_roi_set(roi: dict, image_shape: tuple | None = None) -> dict:
     points = roi.get("points", [])
-    if not isinstance(points, (list, tuple)) or len(points) not in (0, 4):
-        raise ValueError("Each ROI must have four polygon vertices, or no vertices yet.")
+    if not isinstance(points, (list, tuple)) or (points and len(points) < 3):
+        raise ValueError("Each ROI must have at least three polygon vertices, or no vertices yet.")
     normalized = []
     for point in points:
         if not isinstance(point, (list, tuple)) or len(point) != 2:
