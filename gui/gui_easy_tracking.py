@@ -3671,6 +3671,7 @@ class EasyTrackingGUI(ctk.CTk):
             "RUN_DELETE_RATIO":        run_delete_ratio,
             "SKIP_REFINE_PREVIEW":     False,
 
+            "PASTE_SAME_FRAME_ONLY": False,
             # Paste composition
             "RATIO_SINGLE":            0.1,
             "RATIO_P2":                0.5,

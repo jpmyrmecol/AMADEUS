@@ -1181,6 +1181,13 @@ def sample_donors_from_candidates(rng: random.Random, candidates: List[dict], nu
     return [rng.choice(candidates) for _ in range(num_pastes)]
 
 
+def donor_candidates_and_scope(cfg: dict, all_objects: List[dict], ref_items: List[dict]) -> Tuple[List[dict], str]:
+    """Select across the entire object pool unless same-frame donors are requested."""
+    if bool(cfg.get("PASTE_SAME_FRAME_ONLY", False)):
+        return ref_items, "same_frame"
+    return all_objects, "object_pool"
+
+
 # Mixed paste pipeline
 def reset_output_dir(out_dir: str) -> None:
     if os.path.isdir(out_dir):
@@ -1374,6 +1381,7 @@ def build_free_group_patch(
     obb_fit_mode: str = "min_area",
     paste_scale_min: float = 1.0,
     paste_scale_max: float = 1.0,
+    donor_scope: str = "same_frame",
 ) -> Optional[Tuple[np.ndarray, np.ndarray, List[dict]]]:
     """Build a group patch, attaching each None donor to the existing group.
 
@@ -1388,7 +1396,7 @@ def build_free_group_patch(
     loaded: List[Tuple[np.ndarray, np.ndarray, dict]] = []
     for d in donors:
         img, mask = donor_image_and_mask(
-            d, base_img, cache, "same_frame", rng=rng, mask_expansion_ratio=mask_expansion_ratio,
+            d, base_img, cache, donor_scope, rng=rng, mask_expansion_ratio=mask_expansion_ratio,
         )
         if img is None or mask is None:
             return None
@@ -1945,11 +1953,11 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
     mask_lines = list(base_mask_lines)
     rng = rng_pool.for_frame_dataset(fid, num_base_single + num_p2 * 10 + num_p3 * 100, repeat_index=repeat_index)
 
-    frame_donor_candidates = list(ref_items)
+    frame_donor_candidates, donor_scope = donor_candidates_and_scope(cfg, all_objects, ref_items)
 
     global _DONOR_SCOPE_LOGGED
     if not _DONOR_SCOPE_LOGGED:
-        print(f"[paste_blobs] donor scope: same_frame, candidates per frame: {len(frame_donor_candidates)}")
+        print(f"[paste_blobs] donor scope: {donor_scope}, candidates: {len(frame_donor_candidates)}")
         _DONOR_SCOPE_LOGGED = True
 
     if not frame_donor_candidates:
@@ -1987,7 +1995,7 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
         ] + list(pasted_donor_masks)
         for donor in donors:
             donor_img, donor_mask = donor_image_and_mask(
-                donor, base_img, cache, "same_frame", rng=rng, mask_expansion_ratio=mask_expansion_ratio,
+                donor, base_img, cache, donor_scope, rng=rng, mask_expansion_ratio=mask_expansion_ratio,
             )
             if donor_img is None or donor_mask is None or donor_img.shape[:2] != donor_mask.shape[:2]:
                 _cnt_contact_failed += 1
@@ -2100,7 +2108,7 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
             preserve_contacts=none_overlap,
         )
         for _ in range(n_free_single):
-            _result = build_free_group_patch(rng, [rng.choice(frame_donor_candidates)], cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode, paste_scale_min, paste_scale_max)
+            _result = build_free_group_patch(rng, [rng.choice(frame_donor_candidates)], cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode, paste_scale_min, paste_scale_max, donor_scope=donor_scope)
             if _result is not None:
                 _placed = paste_free_group_into_frame(**_free_kwargs, patch=_result[0], union_mask=_result[1], local_objects=_result[2])
                 if _placed:
@@ -2112,7 +2120,7 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
                 _cnt_free_failed += 1
         for _ in range(n_free_p2):
             _d2 = sample_donors_from_candidates(rng, frame_donor_candidates, 2)
-            _result = build_free_group_patch(rng, _d2, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode, paste_scale_min, paste_scale_max)
+            _result = build_free_group_patch(rng, _d2, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode, paste_scale_min, paste_scale_max, donor_scope=donor_scope)
             if _result is not None:
                 _placed = paste_free_group_into_frame(**_free_kwargs, patch=_result[0], union_mask=_result[1], local_objects=_result[2])
                 if _placed:
@@ -2124,7 +2132,7 @@ def _process_paste_frame(job: Tuple[int, int]) -> Tuple[int, int, bool]:
                 _cnt_free_failed += 1
         for _ in range(n_free_p3):
             _d3 = sample_donors_from_candidates(rng, frame_donor_candidates, 3)
-            _result = build_free_group_patch(rng, _d3, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode, paste_scale_min, paste_scale_max)
+            _result = build_free_group_patch(rng, _d3, cache, min_cover, max_cover, max_tries, base_img, paste_width_scale_min, paste_width_scale_max, paste_min_obb_aspect_ratio, mask_expansion_ratio, obb_fit_mode, paste_scale_min, paste_scale_max, donor_scope=donor_scope)
             if _result is not None:
                 _placed = paste_free_group_into_frame(**_free_kwargs, patch=_result[0], union_mask=_result[1], local_objects=_result[2])
                 if _placed:

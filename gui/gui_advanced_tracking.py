@@ -585,6 +585,7 @@ class ConfigGUI(ctk.CTk):
                 ("WIDTH_SCALE_MIN", "Width Scale Min", 0.9),
                 ("WIDTH_SCALE_MAX", "Width Scale Max", 1.1),
                 ("MASK_EXPANSION_RATIO", "Mask Expansion Ratio", 1.05),
+                ("PASTE_SAME_FRAME_ONLY", "Same-frame donors only", False),
 
                 ("BRIGHT_MIN", "Brightness Min", 0.90),
                 ("BRIGHT_MAX", "Brightness Max", 1.10),
@@ -1383,7 +1384,7 @@ class ConfigGUI(ctk.CTk):
 
         shared_paste_keys = [
             "MAX_OVERLAP", "PASTE_SCALE_MIN", "PASTE_SCALE_MAX",
-            "WIDTH_SCALE_MIN", "WIDTH_SCALE_MAX",
+            "WIDTH_SCALE_MIN", "WIDTH_SCALE_MAX", "PASTE_SAME_FRAME_ONLY",
             "BRIGHT_MIN", "BRIGHT_MAX", "CONTRAST_MIN", "CONTRAST_MAX",
             "PASTE_LAYER_MODE", "ALPHA_MODE",
             "FEATHER_MIN", "FEATHER_MAX", "MAX_TRIES",
@@ -1854,6 +1855,7 @@ class ConfigGUI(ctk.CTk):
 
         self._loaded_config_path = file_path
         cfg = prepare_config_for_gui(cfg or {}, file_path, parent=self)
+        cfg.setdefault("PASTE_SAME_FRAME_ONLY", False)
         # PICKLE_PATH/BACKGROUND_PATH always live under SESSION_PATH; always
         # recompute rather than trust whatever an old config.yaml stored, so
         # a stale value never survives a load.

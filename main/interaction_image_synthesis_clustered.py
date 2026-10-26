@@ -29,6 +29,7 @@ from interaction_image_synthesis import (
     build_base_mask_lines,
     choose_under,
     donor_image_and_mask,
+    donor_candidates_and_scope,
     donor_result_to_group_obj,
     get_mask_expansion_ratio,
     draw_preview_from_label_lines,
@@ -363,7 +364,7 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
     cluster_obb_fit_scale_long = float(cfg.get("CLUSTER_FIT_LONG", 0.8))
     cluster_obb_fit_scale_short = float(cfg.get("CLUSTER_FIT_SHORT", 0.8))
     parallel_break_prob = float(cfg.get("CLUSTER_BREAK_PROB", 0.20))
-    cluster_donor_scope = "same_frame"
+    donor_candidates, cluster_donor_scope = donor_candidates_and_scope(cfg, all_objects, ref_items)
 
     if no_overlap:
         base_occupied = np.zeros((H, W), np.uint8)
@@ -414,7 +415,6 @@ def _process_frame(job: Tuple[int, int]) -> Tuple[int, int, int]:
             if k_neighbors <= 0:
                 return None
 
-            donor_candidates = list(ref_items)
             if not donor_candidates:
                 return None
             if len(donor_candidates) >= k_neighbors:

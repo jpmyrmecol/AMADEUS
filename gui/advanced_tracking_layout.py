@@ -45,6 +45,7 @@ CATEGORY_COLUMN_LAYOUT: dict[tuple[str, str], tuple[tuple[str, ...], ...]] = {
             "WIDTH_SCALE_MIN",
             "WIDTH_SCALE_MAX",
             "MASK_EXPANSION_RATIO",
+            "PASTE_SAME_FRAME_ONLY",
         ),
         (
             "BRIGHT_MIN",
