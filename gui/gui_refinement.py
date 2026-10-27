@@ -313,6 +313,17 @@ class ArrowState:
     rear: np.ndarray
 
 
+@dataclass
+class PlaybackDrag:
+    mode: str
+    tid: int
+    state: ArrowState
+    start_frame: int
+    direction: int
+    reverse_display: bool
+    end_frame: int | None = None
+
+
 class VideoFrameReader:
     """Thread-safe video reader with bounded, latest-request prefetching.
 
@@ -729,6 +740,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._companion_save_messages: queue.Queue = queue.Queue()
         self.prefetch_after_id: Optional[str] = None
         self._decode_gen: int = 0
+        self._playback_drag_gen: int | None = None
+        self._pending_playback_drags: list[PlaybackDrag] = []
         self._paused_decode_gen: int | None = None
         self._paused_decode_direction = 1
         self._reverse_waiting_for_cache = False
@@ -2313,8 +2326,19 @@ class UmaDirectionRefinementApp(ctk.CTk):
     def _invalidate_decode_requests(self) -> None:
         """Invalidate queued/completed decodes without waiting for codec threads."""
         self._decode_gen += 1
+        self._playback_drag_gen = None
+        self._pending_playback_drags.clear()
         self._drain_queue(self._decode_request_queue)
         self._drain_queue(self._frame_queue)
+
+    def _begin_frame_decode(self, *, playback: bool = False) -> int:
+        self._decode_gen += 1
+        self._playback_drag_gen = self._decode_gen if playback else None
+        if playback:
+            self._capture_playback_drag(self.current_frame)
+        else:
+            self._pending_playback_drags.clear()
+        return self._decode_gen
 
     def _enqueue_decode_request(
         self,
@@ -2410,6 +2434,10 @@ class UmaDirectionRefinementApp(ctk.CTk):
             or (frame_idx - self.requested_frame) * direction < 0
         ):
             return
+        # Use the accepted decoded frame, which can be ahead of the requested
+        # frame. Reverse playback and cache hits also finish here.
+        if generation == self._playback_drag_gen:
+            self._apply_playback_drag(frame_idx)
         self.current_frame = frame_idx
         self.requested_frame = frame_idx
         self.frame_var.set(frame_idx)
@@ -2439,6 +2467,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
             return
         self._stop_key_play()
         self.stop_playback()
+        self._playback_drag_gen = None
+        self._pending_playback_drags.clear()
         fallback = self._last_displayed_frame
         if fallback < 0:
             fallback = max(0, min(self.frame_count - 1, frame_idx))
@@ -2629,7 +2659,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.frame_render_job = None
         self._set_frame(self.requested_frame, reset_view=reset_view)
 
-    def _set_frame(self, frame_idx: int, reset_view: bool = False):
+    def _set_frame(self, frame_idx: int, reset_view: bool = False, *, playback: bool = False):
         if self.reader is None:
             return
         frame_idx = max(0, min(self.frame_count - 1, int(frame_idx)))
@@ -2643,7 +2673,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self._reverse_waiting_for_cache = not self.reader.reverse_buffer.ready(frame_idx)
             self._playback_timing = (float(frame_idx), time.perf_counter(), timing[2])
 
-        if self.drag_mode is not None and self.drag_tid is not None and self.drag_last_canvas is not None and self.left_button_down:
+        if not playback and self.drag_mode is not None and self.drag_tid is not None and self.drag_last_canvas is not None and self.left_button_down:
             if self.drag_mode == "whole":
                 held_state = self._drag_state_from_canvas(self.drag_last_canvas)
                 if held_state is not None:
@@ -2660,8 +2690,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
                 self.drag_anchor_img = self.canvas_to_img(self.drag_last_canvas)
                 self._apply_drag_from_canvas(self.drag_last_canvas, frame_idx=frame_idx)
 
-        self._decode_gen += 1
-        generation = self._decode_gen
+        generation = self._begin_frame_decode(playback=playback)
         reader = self.reader
 
         # Cache lookup is non-blocking.  The Tk thread never calls a codec read,
@@ -2793,11 +2822,15 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self._reverse_waiting_for_cache = False
         self._playback_timing = (float(anchor), time.perf_counter(), direction * self.playback_speed)
         self.playback_active = True
+        self._capture_playback_drag(anchor)
         self._update_play_button()
         self._schedule_playback(delay_ms=1)
 
     def stop_playback(self, update_button: bool = True):
         if self.playback_active:
+            self._seal_playback_drag()
+            if self._playback_drag_gen != self._decode_gen:
+                self._pending_playback_drags.clear()
             self._paused_decode_gen = self._decode_gen
             self._paused_decode_direction = (
                 -1 if self._playback_timing is not None and self._playback_timing[2] < 0 else 1
@@ -2898,13 +2931,13 @@ class UmaDirectionRefinementApp(ctk.CTk):
                 # The CSV overlay and frame controls use the actual decoded
                 # sample index, rather than the unsampled clock target.
                 self.requested_frame = target
-                self._decode_gen += 1
+                generation = self._begin_frame_decode(playback=True)
                 self._enqueue_decode_request(
-                    self._decode_gen, reader, target, False, prepared_reverse_frame
+                    generation, reader, target, False, prepared_reverse_frame
                 )
                 self._schedule_playback(delay_ms=8)
             else:
-                self.request_frame(target, reset_view=False, immediate=True)
+                self._set_frame(target, reset_view=False, playback=True)
                 if self._has_pending_frame_request():
                     self._schedule_playback(delay_ms=8)
         else:
@@ -3066,7 +3099,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
             return ArrowState(front=rear, rear=front)
         return ArrowState(front=front, rear=rear)
 
-    def _set_arrow_state(self, frame_idx: int, tid: int, state: ArrowState):
+    def _set_arrow_state(self, frame_idx: int, tid: int, state: ArrowState, *, update_ui: bool = True):
         fx, fy = self._front_col(tid)
         rx, ry = self._rear_col(tid)
         if self.reverse_direction_var.get():
@@ -3102,10 +3135,11 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.df_np[fi, self._rear_x_idx[tid]]  = rx_v
         self.df_np[fi, self._rear_y_idx[tid]]  = ry_v
         self.current_id = int(tid)
-        self.id_var.set(int(tid))
         self.edited_keys.add((fi, int(tid)))
-        self.update_info_panel()
-        self._schedule_refresh_candidate_tree()
+        if update_ui:
+            self.id_var.set(int(tid))
+            self.update_info_panel()
+            self._schedule_refresh_candidate_tree()
 
     def _swap_ids_from_current_frame(self, tid_a: int, tid_b: int):
         start_frame = int(self.current_frame)
@@ -4081,6 +4115,12 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.drag_anchor_img = self.canvas_to_img(canvas_pt)
         self.hover_tid = tid
         self._set_id(tid)
+        if self._playback_timing is not None:
+            # A new grab during decoding starts at the current playback time,
+            # without replacing an earlier grab that ended in this interval.
+            self._capture_playback_drag(self._playback_frame_at(
+                time.perf_counter(), self.reader, self._playback_timing
+            ))
 
     def on_canvas_drag(self, event):
         canvas_pt = np.array([event.x, event.y], dtype=float)
@@ -4099,6 +4139,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._apply_drag_from_canvas(canvas_pt)
 
     def on_canvas_release(self, _event=None):
+        self._seal_playback_drag()
         if self.drag_mode == "pan":
             self.canvas.configure(cursor="")
         self.left_button_down = False
@@ -4230,6 +4271,92 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self._close_swap_popup()
         self.update_info_panel()
         self.redraw_current_frame()
+
+    def _capture_playback_drag(self, start_frame: int) -> None:
+        if self._pending_playback_drags and self._pending_playback_drags[-1].end_frame is None:
+            return
+        if (
+            self.df is None or not self.left_button_down
+            or self.drag_mode not in {"whole", "front", "rear"}
+            or self.drag_tid is None or self.drag_last_canvas is None
+            or self._playback_timing is None
+        ):
+            return
+        state = self._drag_state_from_canvas(self.drag_last_canvas)
+        if state is not None:
+            self._pending_playback_drags.append(PlaybackDrag(
+                self.drag_mode, self.drag_tid, state, int(start_frame),
+                -1 if self._playback_timing[2] < 0 else 1,
+                bool(self.reverse_direction_var.get()),
+            ))
+
+    def _seal_playback_drag(self) -> None:
+        if not self._pending_playback_drags:
+            return
+        drag = self._pending_playback_drags[-1]
+        if drag.end_frame is not None:
+            return
+        state = self._drag_state_from_canvas(self.drag_last_canvas)
+        if state is not None:
+            drag.state = state
+        # Keep a pending edit after release/Stop, but do not let a later
+        # decoder catch-up extend it beyond the time the drag ended.
+        drag.end_frame = self._playback_frame_at(
+            time.perf_counter(), self.reader, self._playback_timing
+        )
+
+    def _apply_playback_drag(self, frame_idx: int) -> None:
+        remaining = []
+        edited = False
+        for drag in self._pending_playback_drags:
+            if drag.end_frame is None:
+                state = self._drag_state_from_canvas(self.drag_last_canvas)
+                if state is not None:
+                    drag.state = state
+            end = frame_idx
+            if drag.end_frame is not None:
+                end = (min(end, drag.end_frame) if drag.direction > 0
+                       else max(end, drag.end_frame))
+            held_state = drag.state
+            mode = drag.mode
+            if drag.reverse_display != bool(self.reverse_direction_var.get()):
+                held_state = ArrowState(held_state.rear, held_state.front)
+                mode = {"front": "rear", "rear": "front", "whole": "whole"}[mode]
+            for fi in range(drag.start_frame, end + drag.direction, drag.direction):
+                state = held_state
+                if mode != "whole":
+                    # Only the held endpoint moves. The other endpoint keeps
+                    # its own position on each source-video frame.
+                    original = self._get_arrow_state(fi, drag.tid)
+                    state = (ArrowState(held_state.front, original.rear)
+                             if mode == "front"
+                             else ArrowState(original.front, held_state.rear))
+                self._set_arrow_state(fi, drag.tid, state, update_ui=False)
+                edited = True
+            if (end - drag.start_frame) * drag.direction >= 0:
+                drag.start_frame = end + drag.direction
+            if drag.end_frame is None or (drag.end_frame - drag.start_frame) * drag.direction >= 0:
+                remaining.append(drag)
+        if self.left_button_down and self.drag_mode in {"whole", "front", "rear"}:
+            # A pending frame can arrive after Stop while the mouse is still
+            # held. Rebase its other endpoint before the next mouse movement.
+            state = self._drag_state_from_canvas(self.drag_last_canvas)
+            original = self._get_arrow_state(frame_idx, self.drag_tid)
+            if self.drag_mode == "front":
+                state = ArrowState(state.front, original.rear)
+            elif self.drag_mode == "rear":
+                state = ArrowState(original.front, state.rear)
+            self.drag_start_front = state.front.copy()
+            self.drag_start_rear = state.rear.copy()
+            self.drag_anchor_img = self.canvas_to_img(self.drag_last_canvas)
+            self.current_id = int(self.drag_tid)
+        if edited:
+            self.id_var.set(self.current_id)
+            self._schedule_refresh_candidate_tree()
+        self._playback_drag_gen = None
+        # Decoding can lag behind a release or a new grab. Keep the portion
+        # not yet displayed for the next playback frame, including closed drags.
+        self._pending_playback_drags = remaining if self.playback_active else []
 
     def _apply_drag_from_canvas(self, canvas_pt: np.ndarray, frame_idx: int | None = None):
         if self.df is None or self.drag_mode is None or self.drag_tid is None:
