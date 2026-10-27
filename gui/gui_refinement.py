@@ -70,6 +70,10 @@ from gui.refinement_video_export import (
 )
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
 from gui.preview_playback_timing import AdaptivePreviewPacer
+from gui.refinement_candidates import (
+    build_candidate_runs, candidate_run_edit_state, visible_candidate_runs,
+)
+from gui.refinement_identity import infer_refinement_identity
 from gui.reverse_playback_buffer import PreparedFrame, ReversePlaybackBuffer
 from main.video_compat import SUPPORTED_VIDEO_SUFFIXES, VIDEO_DROP_SUFFIXES, VIDEO_FILETYPES
 
@@ -696,6 +700,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
         self.video_path_var = tk.StringVar()
         self.csv_path_var = tk.StringVar()
+        self.refinement_csv_path_var = tk.StringVar()
+        self.refinement_csv_paths: list[str] = []
         self.status_var = tk.StringVar(value="Select a video and UMATracker CSV")
         self.preview_title_var = tk.StringVar(value="")
         self.frame_var = tk.IntVar(value=0)
@@ -768,6 +774,11 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.cfg: dict = {}
         self.datasets: list[dict] = []
         self.current_dataset: Optional[dict] = None
+        self._dataset_reference_wide: pd.DataFrame | None = None
+        self._dataset_reference_result: pd.DataFrame | None = None
+        self._source_candidates: list[dict] = []
+        self._candidate_id_map: np.ndarray | None = None
+        self._candidate_runs = []
         self.suspects: list[dict] = []
         self.current_suspect_index: Optional[int] = None
         self.provenance_lookup: dict[tuple[int, int], dict[str, float]] = {}
@@ -893,16 +904,27 @@ class UmaDirectionRefinementApp(ctk.CTk):
         ctk.CTkEntry(self.config_row, textvariable=self.config_path_var, width=300, height=26).pack(side="left", expand=True, fill="x", padx=5)
         ctk.CTkButton(self.config_row, text="Load Config", width=100, height=26, command=self.browse_config).pack(side="left", padx=4)
 
-        # Weight + Dataset on the same row (AMADEUS mode only)
+        # Weight, Dataset and the active/refined CSV (AMADEUS mode only).
         self.num_dataset_row = ctk.CTkFrame(top, corner_radius=0)
         ctk.CTkLabel(self.num_dataset_row, text="Weight", width=110, anchor="w").pack(side="left")
         self.weight_combo = ctk.CTkComboBox(self.num_dataset_row, variable=self.weight_var, state="readonly", width=200, height=26,
                                                    command=lambda choice: self.on_weight_selected())
         self.weight_combo.pack(side="left", padx=(5, 16))
         ctk.CTkLabel(self.num_dataset_row, text="Dataset", anchor="w").pack(side="left")
-        self.dataset_combo = ctk.CTkComboBox(self.num_dataset_row, variable=self.dataset_var, state="readonly", width=400, height=26,
+        self.dataset_combo = ctk.CTkComboBox(self.num_dataset_row, variable=self.dataset_var, state="readonly", width=220, height=26,
                                               command=lambda choice: self.on_dataset_selected())
-        self.dataset_combo.pack(side="left", fill="x", expand=True, padx=(5, 0))
+        self.dataset_combo.pack(side="left", padx=(5, 16))
+        ctk.CTkLabel(self.num_dataset_row, text="CSV path", anchor="w").pack(side="left")
+        self.refinement_csv_combo = ctk.CTkComboBox(
+            self.num_dataset_row, variable=self.refinement_csv_path_var,
+            state="readonly", width=320, height=26,
+            command=self.load_refinement_csv,
+        )
+        self.refinement_csv_combo.pack(side="left", fill="x", expand=True, padx=5)
+        ctk.CTkButton(
+            self.num_dataset_row, text="Load CSV", width=90, height=26,
+            command=self.browse_refinement_csv,
+        ).pack(side="left", padx=(4, 0))
 
         # Video row (Dataset mode only)
         self.video_row = ctk.CTkFrame(top, corner_radius=0)
@@ -1140,6 +1162,14 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.tree_event_suppressed = False
         self._candidate_tree_suppress_token += 1
         self.current_dataset = None
+        self._dataset_reference_wide = None
+        self._dataset_reference_result = None
+        self._source_candidates = []
+        self._candidate_id_map = None
+        self._candidate_runs = []
+        self.refinement_csv_paths = []
+        self.refinement_csv_path_var.set("")
+        self.refinement_csv_combo.configure(values=[])
         self.cfg = {}
         self.datasets = []
         self.available_weight_options = []
@@ -1529,18 +1559,203 @@ class UmaDirectionRefinementApp(ctk.CTk):
         }
         self.csv_path_var.set(csv_path)
         dataset["csv_path"] = csv_path
-        self.load_files(preserve_view=preserve_view)
+        if not self.load_files(preserve_view=preserve_view):
+            return
+        self._dataset_reference_wide = self.df.copy(deep=True)
+        self._dataset_reference_result = result_df
+        self._candidate_id_map = None
         self._load_assign_type_history(dataset.get("history_path"))
         self.load_candidates_from_assign(dataset.get("assign_path"))
         self._append_filter_candidates(self.current_dataset)
         self._append_position_spike_candidates(self.current_dataset)
-        self._rebuild_candidate_label_index()
+        self._source_candidates = [dict(item, source_tid=int(item["tid"])) for item in self.suspects]
+        self._apply_candidate_id_map(None)
+        self._restore_refinement_csv_paths(csv_path)
         self.refresh_candidate_tree()
         self.update_info_panel()
         # Candidate/provenance labels are loaded after the CSV. Force an immediate
         # redraw so the current frame does not wait for a navigation operation.
         self.request_frame(self.current_frame, reset_view=False, immediate=True)
         self.after_idle(self.redraw_current_frame)
+
+    def _refinement_csv_history_path(self) -> Path:
+        return Path(self.current_dataset["converted_csv_path"]).with_suffix(".refinement_paths.json")
+
+    def _restore_refinement_csv_paths(self, source_path: str) -> None:
+        paths = []
+        history_path = self._refinement_csv_history_path()
+        if history_path.is_file():
+            try:
+                paths = json.loads(history_path.read_text(encoding="utf-8"))["csv_paths"]
+                if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+                    raise ValueError("csv_paths must be a list of paths.")
+            except (OSError, ValueError, KeyError) as exc:
+                messagebox.showwarning("CSV path history", f"Could not read {history_path}: {exc}")
+                paths = []
+        source_path = self._normalized_path(source_path)
+        self.refinement_csv_paths = list(dict.fromkeys([source_path, *paths]))
+        self.refinement_csv_combo.configure(values=self.refinement_csv_paths)
+        self.refinement_csv_path_var.set(source_path)
+
+    def _remember_refinement_csv(self, path: str) -> None:
+        path = self._normalized_path(path)
+        self.refinement_csv_path_var.set(path)
+        self.refinement_csv_paths = list(dict.fromkeys([path, *self.refinement_csv_paths]))
+        self.refinement_csv_combo.configure(values=self.refinement_csv_paths)
+        if self.current_dataset is None:
+            return
+        history_path = self._refinement_csv_history_path()
+        temporary = history_path.with_name(f".{history_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(json.dumps({"csv_paths": self.refinement_csv_paths}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.replace(temporary, history_path)
+        except OSError as exc:
+            messagebox.showwarning("CSV path history", f"The CSV is available, but its path history could not be saved: {exc}")
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def browse_refinement_csv(self) -> None:
+        if self.current_dataset is None:
+            messagebox.showinfo("Load CSV", "Select an AMADEUS dataset first.")
+            return
+        path = filedialog.askopenfilename(
+            title="Load refined CSV", filetypes=CSV_EXTS,
+            initialdir=str(Path(self.refinement_csv_path_var.get()).parent),
+        )
+        if path:
+            self.load_refinement_csv(path)
+
+    @staticmethod
+    def _prepare_refinement_csv(path: str, reference_wide: pd.DataFrame, reference_result: pd.DataFrame):
+        format_id = _convert.inspect_tracking_file(path).format_id
+        result_df = pd.read_csv(path) if format_id == "amadeus_result_csv" else None
+        if result_df is not None:
+            wide = _convert.rear_front_to_legacy_wide(
+                _convert.amadeus_result_to_rear_front(result_df, round_digits=None),
+                front_first=True, index_col="frame",
+            )
+        else:
+            wide = _convert.load_wide_for_gui(path, standard_front_first=True)
+        result_reference = _convert.rear_front_to_legacy_wide(
+            _convert.amadeus_result_to_rear_front(reference_result, round_digits=None),
+            front_first=True, index_col="frame",
+        )
+        # Existing dataset conversions use OBB edge midpoints. Saved results
+        # and their companion CSVs use center/width/heading reconstruction.
+        # Both are known representations of the same original IDs.
+        mapping = infer_refinement_identity(reference_wide, wide, source_variants=(result_reference,))
+        return wide, result_df, mapping
+
+    def load_refinement_csv(self, path: str) -> None:
+        if self.current_dataset is None:
+            return
+        source_path = self._normalized_path(self.current_dataset["converted_csv_path"])
+        previous_path = self.last_save_path or self.loaded_csv_path or source_path
+        if self._companion_save_active:
+            self.refinement_csv_path_var.set(previous_path)
+            messagebox.showinfo("Load CSV", "Companion CSVs are still saving. Wait for saving to finish.")
+            return
+        path = self._normalized_path(path)
+        if path == source_path:
+            self.load_dataset_record(self.current_dataset, preserve_view=True)
+            return
+        self.stop_playback()
+        self.on_canvas_release()
+        reference_wide = self._dataset_reference_wide
+        reference_result = self._dataset_reference_result
+        popup = ctk.CTkToplevel(self)
+        install_window_icon(popup)
+        popup.title("Loading refined CSV")
+        popup.transient(self)
+        popup.resizable(False, False)
+        ctk.CTkLabel(popup, text="Checking frame and ID correspondence...", width=380).pack(padx=18, pady=18)
+        popup.grab_set()
+        messages: queue.Queue = queue.Queue(maxsize=1)
+        result = {}
+        poll_job = None
+
+        def worker():
+            try:
+                messages.put((self._prepare_refinement_csv(
+                    path, reference_wide, reference_result,
+                ), None))
+            except Exception as exc:
+                messages.put((None, exc))
+
+        def poll():
+            nonlocal poll_job
+            try:
+                result["data"], result["error"] = messages.get_nowait()
+            except queue.Empty:
+                poll_job = popup.after(30, poll)
+                return
+            popup.destroy()
+
+        threading.Thread(target=worker, name="refinement-csv-load", daemon=True).start()
+        poll_job = popup.after(30, poll)
+        self.wait_window(popup)
+        if poll_job is not None:
+            try:
+                self.after_cancel(poll_job)
+            except tk.TclError:
+                pass
+        if not result:
+            self.refinement_csv_path_var.set(previous_path)
+            return
+        if result["error"] is not None:
+            self.refinement_csv_path_var.set(previous_path)
+            messagebox.showerror("Load CSV", str(result["error"]))
+            return
+        wide, result_df, mapping = result["data"]
+        self._finish_refinement_csv_load(path, wide, result_df, mapping)
+
+    def _finish_refinement_csv_load(self, path: str, wide: pd.DataFrame, result_df, mapping) -> bool:
+        old_csv_path = self.csv_path_var.get()
+        self.csv_path_var.set(path)
+        self._pending_refinement_source = {
+            "output_kind": "amadeus_result" if result_df is not None else "rear_front",
+            "result_df": result_df,
+            "source_path": path,
+            "source_paths": [
+                path,
+                self.current_dataset["obb_path"],
+                self.current_dataset["direction_path"],
+                self.current_dataset["converted_csv_path"],
+            ],
+            "allow_refined_overwrite": True,
+        }
+        if not self.load_files(preserve_view=True, prepared_df=wide):
+            self.csv_path_var.set(old_csv_path)
+            self._pending_refinement_source = None
+            self.refinement_csv_path_var.set(self.last_save_path or self.loaded_csv_path or old_csv_path)
+            return False
+        self._apply_candidate_id_map(mapping.source_to_loaded)
+        self._remember_refinement_csv(path)
+        self.refresh_candidate_tree()
+        self.redraw_current_frame()
+        boundaries = sorted({(switch.start_frame, switch.end_frame) for switch in mapping.switches})
+        locations = ", ".join(str(start) if start == end else f"{start}-{end} (uncertain)" for start, end in boundaries[:8])
+        if len(boundaries) > 8:
+            locations += ", ..."
+        unknown = sum(item["tid"] < 0 for item in self.suspects)
+        detail = f"ID switch frames: {locations or 'none'}"
+        if unknown:
+            detail += f"; {unknown} candidate entries have unresolved IDs (?)"
+        self.set_status(f"Loaded {Path(path).name}. {detail}", auto_clear=False)
+        return True
+
+    def _apply_candidate_id_map(self, mapping: np.ndarray | None) -> None:
+        self._candidate_id_map = mapping
+        self.suspects = []
+        for source in self._source_candidates:
+            item = dict(source)
+            source_tid = int(item["source_tid"])
+            item["tid"] = source_tid if mapping is None else int(mapping[int(item["frame"]), source_tid])
+            self.suspects.append(item)
+        self.current_suspect_index = None
+        self._candidate_runs = build_candidate_runs(self.suspects)
+        self._rebuild_candidate_label_index()
 
     def ensure_converted_dataset_csv(self, dataset: dict) -> str:
         converted_path = str(dataset["converted_csv_path"])
@@ -1695,6 +1910,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
     def _rebuild_candidate_label_index(self) -> None:
         grouped: dict[tuple[int, int], list[str]] = {}
         for item in self.suspects:
+            if int(item["tid"]) < 0:
+                continue
             key = (int(item["frame"]), int(item["tid"]))
             label = str(item.get("label_short", "")).strip()
             if label and label not in grouped.setdefault(key, []):
@@ -1713,6 +1930,11 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
     def _assign_history_entries(self, tid: int, frame: int) -> list:
         history = getattr(self, "assign_type_history", {})
+        if self._candidate_id_map is not None:
+            source_ids = np.flatnonzero(self._candidate_id_map[int(frame)] == int(tid))
+            if len(source_ids) != 1:
+                return []
+            tid = int(source_ids[0])
         tid_history = history.get(int(tid), {})
         if not isinstance(tid_history, dict):
             return []
@@ -2156,24 +2378,26 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if video_path and os.path.isfile(video_path):
             self.load_files()
 
-    def load_files(self, preserve_view: bool = False):
+    def load_files(self, preserve_view: bool = False, *, prepared_df: pd.DataFrame | None = None) -> bool:
         video_path = self.video_path_var.get().strip()
         csv_path = self.csv_path_var.get().strip()
         if not video_path or not os.path.exists(video_path):
             messagebox.showerror("Error", "Video file not found.")
-            return
+            return False
         if csv_path and not os.path.isfile(csv_path):
             messagebox.showerror("Error", "CSV file not found.")
-            return
+            return False
 
         try:
-            df = _convert.load_wide_for_gui(csv_path, standard_front_first=True) if csv_path else None
+            df = prepared_df
+            if df is None and csv_path:
+                df = _convert.load_wide_for_gui(csv_path, standard_front_first=True)
             if df is not None:
                 self._validate_uma_csv(df)
             reader = VideoFrameReader(video_path)
         except Exception as e:
             messagebox.showerror("Error", str(e))
-            return
+            return False
 
         if df is not None:
             _ic = self._idx_col(df)
@@ -2181,7 +2405,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
             if positions.min(initial=0) < 0 or positions.max(initial=0) >= reader.frame_count:
                 messagebox.showerror("Error", f"CSV {_ic} is out of the video's frame range. video frames={reader.frame_count}, CSV {_ic} max={positions.max(initial=0)}")
                 reader.close()
-                return
+                return False
 
         saved_frame = self.current_frame if preserve_view else 0
 
@@ -2196,6 +2420,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
             self.frame_render_job = None
         self._stop_key_play()
         self.stop_playback(update_button=False)
+        self.on_canvas_release()
 
         self.reader = reader
         self._preview_pacer.reset()
@@ -2275,6 +2500,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         detail = f"IDs={self.num_ids}" if self.df is not None else "video only"
         self.set_status(f"Loaded: {os.path.basename(video_path)} / {detail} / frames={self.frame_count} / fps={reader.fps:g}")
         _start_maximized(self)
+        return True
 
     @staticmethod
     def _idx_col(df: pd.DataFrame) -> str:
@@ -3185,6 +3411,16 @@ class UmaDirectionRefinementApp(ctk.CTk):
                 (frame, int(tid_b) if tid == int(tid_a) else int(tid_a))
                 for frame, tid in moving
             )
+        if self.current_dataset is not None:
+            mapping = self._candidate_id_map
+            if mapping is None:
+                mapping = np.tile(np.arange(self.num_ids, dtype=np.int32), (self.frame_count, 1))
+            else:
+                mapping = mapping.copy()
+            part = mapping[start_frame:end_frame]
+            is_a, is_b = part == int(tid_a), part == int(tid_b)
+            part[is_a], part[is_b] = int(tid_b), int(tid_a)
+            self._apply_candidate_id_map(mapping)
         self.current_id = int(tid_b)
         self.id_var.set(int(tid_b))
         for f in range(start_frame, end_frame):
@@ -3348,13 +3584,15 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.candidate_tree.delete(*self.candidate_tree.get_children())
 
         shown = 0
-        for idx, item in enumerate(self.suspects):
-            if float(item["assign_code"]) not in self.enabled_assign_codes:
-                continue
-            edit = "yes" if (int(item["frame"]), int(item["tid"])) in self.edited_keys else ""
-            if self.show_only_unedited_var.get() and edit:
-                continue
-            self.candidate_tree.insert("", "end", iid=str(idx), values=(item["frame"], item["tid"], item["label_short"], edit))
+        for run in visible_candidate_runs(
+            self._candidate_runs, self.enabled_assign_codes, self.edited_keys,
+            show_only_unedited=self.show_only_unedited_var.get(),
+        ):
+            idx = run.first_index
+            item = self.suspects[idx]
+            edit = candidate_run_edit_state(run, self.edited_keys)
+            tid = item["tid"] if int(item["tid"]) >= 0 else f"? (was {item['source_tid']})"
+            self.candidate_tree.insert("", "end", iid=str(idx), values=(item["frame"], tid, item["label_short"], edit))
             shown += 1
         if current_iid and current_iid in self.candidate_tree.get_children():
             self._suppress_candidate_tree_select_until_idle()
@@ -3363,7 +3601,7 @@ class UmaDirectionRefinementApp(ctk.CTk):
         else:
             self._cancel_pending_candidate_select()
         if self.suspects:
-            self.set_status(f"Candidates: {shown:,} shown ({len(self.suspects):,} total entries)")
+            self.set_status(f"Candidates: {shown:,} shown ({len(self._candidate_runs):,} runs; {len(self.suspects):,} frame entries)")
 
     def on_candidate_select(self, _event=None):
         if self.tree_event_suppressed:
@@ -3399,28 +3637,30 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if self.df is None or self.num_ids <= 0:
             return
         frame = max(0, min(self.frame_count - 1, frame))
-        tid = max(0, min(self.num_ids - 1, tid))
         self.selected_tids.clear()
-        self.selected_tids.append(tid)
+        if tid >= 0:
+            self.selected_tids.append(tid)
         # Use the same non-blocking frame request path as the slider.
         self.request_frame(frame, reset_view=False, immediate=False)
-        self._set_id(tid)
+        if tid >= 0:
+            self._set_id(tid)
         iid = str(suspect_index)
         if iid in self.candidate_tree.get_children():
             self._suppress_candidate_tree_select_until_idle()
             if self.candidate_tree.selection() != (iid,):
                 self.candidate_tree.selection_set(iid)
             self.candidate_tree.see(iid)
-        self.set_status(f"Candidate: frame {frame}, ID {tid}, {item['label']}")
+        if tid < 0:
+            self.set_status(f"Candidate: frame {frame}, original ID {item['source_tid']}. Loaded ID is unresolved; inspect this frame.", auto_clear=False)
+        else:
+            self.set_status(f"Candidate: frame {frame}, ID {tid}, {item['label']}")
         self.focus_set()
 
     def _step_candidate(self, delta: int):
-        visible = [
-            idx for idx, item in enumerate(self.suspects)
-            if float(item["assign_code"]) in self.enabled_assign_codes
-            and not (self.show_only_unedited_var.get()
-                     and (int(item["frame"]), int(item["tid"])) in self.edited_keys)
-        ]
+        visible = [run.first_index for run in visible_candidate_runs(
+            self._candidate_runs, self.enabled_assign_codes, self.edited_keys,
+            show_only_unedited=self.show_only_unedited_var.get(),
+        )]
         if not visible:
             return
         if self.current_suspect_index is None:
@@ -3429,7 +3669,22 @@ class UmaDirectionRefinementApp(ctk.CTk):
         try:
             pos = visible.index(self.current_suspect_index)
         except ValueError:
-            pos = 0
+            # Hiding a completed run must advance from that run's position,
+            # rather than skipping the first remaining visible candidate.
+            run_position = next(
+                index for index, run in enumerate(self._candidate_runs)
+                if self.current_suspect_index in run.member_indices
+            )
+            visible_set = set(visible)
+            if delta > 0:
+                following = [run.first_index for run in self._candidate_runs[run_position + 1:]
+                             if run.first_index in visible_set]
+                self.select_candidate(following[0] if following else visible[-1])
+            else:
+                preceding = [run.first_index for run in self._candidate_runs[:run_position]
+                             if run.first_index in visible_set]
+                self.select_candidate(preceding[-1] if preceding else visible[0])
+            return
         new_pos = max(0, min(len(visible) - 1, pos + int(delta)))
         self.select_candidate(visible[new_pos])
 
@@ -3491,8 +3746,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
 
     def _update_type_filter_counts(self):
         counts: dict[float, int] = {}
-        for s in self.suspects:
-            c = float(s["assign_code"])
+        for run in self._candidate_runs:
+            c = run.assign_code
             counts[c] = counts.get(c, 0) + 1
         for code, lvar in self._type_filter_label_vars.items():
             short = ASSIGN_CODE_SHORT_LABELS.get(code, f"t{int(code)}")
@@ -3575,7 +3830,18 @@ class UmaDirectionRefinementApp(ctk.CTk):
         if update_loaded_refined:
             # For a direct *_refined.csv import these are its own derived
             # rear/front and center siblings, refreshed together with Ctrl+S.
-            protected_inputs.difference_update(self._normalized_path(p) for p in sidecar_paths)
+            dataset_inputs = set()
+            if self.current_dataset is not None:
+                for key in ("obb_path", "direction_path", "converted_csv_path"):
+                    original = self.current_dataset[key]
+                    dataset_inputs.add(self._normalized_path(original))
+                    for companion in (_convert.rear_front_csv_path(original), _convert.center_csv_path(original)):
+                        if companion.is_file():
+                            dataset_inputs.add(self._normalized_path(companion))
+            protected_inputs.difference_update(
+                self._normalized_path(p) for p in sidecar_paths
+                if self._normalized_path(p) not in dataset_inputs
+            )
         if (len({output_path, *(self._normalized_path(p) for p in sidecar_paths)})
                 != 1 + len(sidecar_paths)
                 or any(self._normalized_path(p) in protected_inputs for p in sidecar_paths)):
@@ -3614,6 +3880,8 @@ class UmaDirectionRefinementApp(ctk.CTk):
         self.edited_keys.clear()
         self.flip_only_edited_keys.clear()
         self.refinement_pose_np = self.df_np.copy()
+        self.last_save_path = output_path
+        self._remember_refinement_csv(output_path)
         self.save_count += 1
         self._companion_save_active = True
         self.set_status(f"Main CSV saved ({self.save_count}); saving companion CSVs...", auto_clear=False)

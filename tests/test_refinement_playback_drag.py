@@ -53,6 +53,10 @@ def app():
     app.frame_var = Value(2)
     app.frame_scale = Value(2)
     app.id_var = Value(0)
+    app.current_dataset = None
+    app.refinement_csv_path_var = Value("")
+    app.refinement_csv_paths = []
+    app.refinement_csv_combo = Mock()
     app.frame_cache_rgb = np.zeros((8, 8, 3), dtype=np.uint8)
     app.edited_keys = set()
     app.position_edited_keys = set()
