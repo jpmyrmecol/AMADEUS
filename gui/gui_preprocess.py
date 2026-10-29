@@ -43,6 +43,7 @@ from main.video_compat import ffmpeg_executable
 from main.video_encoders import (
     GPU_ENCODER_LABELS,
     detect_gpu_video_encoder,
+    prefer_hardware_video_encoder,
     quality_encoder_args,
 )
 from main.video_frame_count import detect_seekable_frame_count
@@ -955,7 +956,7 @@ class PreprocessApp(ctk.CTk):
 
         self.gpu_acceleration_check = ctk.CTkCheckBox(
             export,
-            text="GPU acceleration",
+            text=("VideoToolbox (faster)" if sys.platform == "darwin" else "GPU acceleration"),
             variable=self.gpu_acceleration_var,
             command=self._schedule_crop_trimming_config_save,
             state="disabled",
@@ -1317,7 +1318,7 @@ class PreprocessApp(ctk.CTk):
             self._pending_gpu_acceleration_preference = None
             self.gpu_acceleration_var.set(False)
             self.gpu_acceleration_check.configure(
-                text="GPU acceleration",
+                text=("VideoToolbox (faster)" if sys.platform == "darwin" else "GPU acceleration"),
                 state="disabled",
             )
             self._refresh_video_controls()
@@ -1328,9 +1329,12 @@ class PreprocessApp(ctk.CTk):
         self.gpu_video_encoder_device = device
         saved_preference = self._pending_gpu_acceleration_preference
         self._pending_gpu_acceleration_preference = None
-        self.gpu_acceleration_var.set(True if saved_preference is None else saved_preference)
+        self.gpu_acceleration_var.set(
+            prefer_hardware_video_encoder("auto")
+            if saved_preference is None else saved_preference
+        )
         self.gpu_acceleration_check.configure(
-            text="GPU acceleration",
+            text=("VideoToolbox (faster)" if sys.platform == "darwin" else "GPU acceleration"),
             state="disabled" if self.export_running else "normal",
         )
         self._refresh_video_controls()

@@ -50,6 +50,7 @@ from main.video_encoders import (
     FfmpegRawVideoWriter,
     GpuVideoEncodingError,
     detect_gpu_video_encoder,
+    prefer_hardware_video_encoder,
     quality_encoder_args,
 )
 
@@ -424,7 +425,7 @@ def _selected_video_encoder(video_acceleration: str, video_codec: str) -> tuple[
         if mode == "gpu":
             print("[WARN] ACCELERATION=gpu requires H.264; VIDEO_CODEC=mp4v requested, using CPU MPEG-4 encoding.")
         return ("mpeg4", None)
-    if mode != "cpu":
+    if prefer_hardware_video_encoder(mode):
         selected = _gpu_video_encoder()
         if selected is not None:
             return selected

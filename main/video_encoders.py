@@ -39,6 +39,11 @@ class GpuVideoEncodingError(RuntimeError):
     """A selected GPU encoder failed during the actual video export."""
 
 
+def prefer_hardware_video_encoder(mode: str) -> bool:
+    """Default to CPU on macOS, but allow explicit VideoToolbox acceleration."""
+    return mode == "gpu" or (mode == "auto" and sys.platform != "darwin")
+
+
 def gpu_encoder_args(encoder: str, *, profile: str = "create_video") -> list[str]:
     """Use common quality targets across preprocessing and rendered exports.
 

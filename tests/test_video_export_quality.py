@@ -66,3 +66,22 @@ def test_shared_writer_preserves_frames_and_color_overlays(tmp_path, monkeypatch
         assert int(decoded[20, 50, 1]) > int(decoded[20, 50, 0]) + 60
     finally:
         cap.release()
+
+
+@pytest.mark.parametrize(
+    ("platform", "mode", "expected"),
+    [
+        ("darwin", "auto", False),
+        ("darwin", "cpu", False),
+        ("darwin", "gpu", True),
+        ("win32", "auto", True),
+        ("win32", "cpu", False),
+        ("win32", "gpu", True),
+        ("linux", "auto", True),
+        ("linux", "cpu", False),
+        ("linux", "gpu", True),
+    ],
+)
+def test_platform_aware_hardware_selection(monkeypatch, platform, mode, expected):
+    monkeypatch.setattr(video_encoders.sys, "platform", platform)
+    assert video_encoders.prefer_hardware_video_encoder(mode) is expected

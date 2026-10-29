@@ -129,12 +129,18 @@ VAAPI tests and exports use the same detected render device. VideoToolbox must
 use its hardware implementation. Results are cached per executable and export
 profile for the process lifetime.
 
-GPU acceleration is enabled by default in Cropping & Trimming only after a
-short encode succeeds. If no candidate succeeds, GPU acceleration is disabled
-and H.264 exports use CPU `libx264`. Create Video uses the same validation with
-and without direction estimation. `ACCELERATION=cpu` always uses CPU encoding.
-`auto` selects a validated GPU encoder or falls back to CPU. `gpu` retains the
-same fallback with a warning when GPU acceleration is unavailable. An explicit
+On Windows and Linux, Cropping & Trimming enables GPU encoding by default
+only after a short encode succeeds. On macOS its default is CPU `libx264`
+with CRF 18, while the VideoToolbox checkbox offers faster hardware encoding.
+Saved GPU selections remain effective. A failed GPU probe disables hardware
+encoding, and H.264 exports use CPU `libx264`.
+
+Create Video uses the same selection policy in every model mode and without
+direction estimation. `ACCELERATION=cpu` always uses CPU encoding, and
+`ACCELERATION=auto` uses CPU `libx264` on macOS but prefers validated
+hardware encoding on Windows and Linux. `ACCELERATION=gpu` explicitly
+requests hardware encoding, including VideoToolbox on macOS, and falls back
+to CPU with a warning when hardware encoding is unavailable. An explicit
 `VIDEO_CODEC=mp4v` selection retains CPU MPEG-4 encoding.
 
 Video exports use high-quality encoder settings rather than limits based on
