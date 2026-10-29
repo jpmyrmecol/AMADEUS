@@ -46,7 +46,12 @@ from tracking_video_inputs import configured_tracking_video_files
 from video_frame_rows import CsvFrameRows, StreamingColorSlots, indexed_assign_types, peak_visible_obb_count
 from gui.color import make_id_palette, resolve_color_seed
 from main.video_compat import ffmpeg_executable
-from main.video_encoders import GpuVideoEncodingError, detect_gpu_video_encoder, gpu_encoder_args
+from main.video_encoders import (
+    FfmpegRawVideoWriter,
+    GpuVideoEncodingError,
+    detect_gpu_video_encoder,
+    quality_encoder_args,
+)
 
 
 DIRECTION_CLASS_NAMES = [
@@ -459,7 +464,7 @@ def make_video_from_image_sequence(
             "-framerate", str(float(fps)),
             "-i", os.path.join(image_dir, f"%06d.{ext}"),
             "-vf", ",".join(filters),
-            *(_cpu_encoder_args(encoder) if encoder in {"libx264", "mpeg4"} else gpu_encoder_args(encoder, profile="create_video")),
+            *quality_encoder_args(encoder),
             out_path,
         ])
         print(f"[INFO] AMADEUS FFmpeg image-sequence encoder for {os.path.basename(out_path)}: {encoder}")
@@ -472,94 +477,6 @@ def make_video_from_image_sequence(
         if encoder in {"libx264", "mpeg4"}:
             raise RuntimeError(f"Image-sequence video encoding failed: {detail}")
         print(f"[WARN] GPU video encoding failed: {detail}. Retrying with CPU libx264.")
-
-
-def _cpu_encoder_args(encoder: str) -> list[str]:
-    if encoder == "mpeg4":
-        return ["-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p"]
-    if encoder == "libx264":
-        return ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
-    raise ValueError(f"Unsupported CPU video encoder: {encoder}")
-
-
-class FfmpegRawVideoWriter:
-    """Write rendered BGR frames through AMADEUS's fixed FFmpeg build."""
-
-    def __init__(
-        self,
-        path: str,
-        fps: float,
-        frame_shape: tuple[int, int, int],
-        encoder: str,
-        device: str | None = None,
-    ) -> None:
-        h, w = frame_shape[:2]
-        ffmpeg = _ffmpeg_path()
-        if not ffmpeg:
-            raise RuntimeError("The pinned AMADEUS FFmpeg is unavailable.")
-        self.path = path
-        self.encoder = encoder
-        self._released = False
-        self.width = int(w)
-        self.height = int(h)
-        filters = ["pad=ceil(iw/2)*2:ceil(ih/2)*2"]
-        if encoder == "h264_vaapi":
-            if not device:
-                raise RuntimeError("VAAPI requires a detected render device.")
-            filters.append("format=nv12,hwupload")
-        command = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
-        if device:
-            command.extend(["-vaapi_device", device])
-        command.extend([
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            "-s", f"{self.width}x{self.height}",
-            "-r", str(float(fps)),
-            "-i", "pipe:0",
-            "-vf", ",".join(filters),
-            *(_cpu_encoder_args(encoder) if encoder in {"libx264", "mpeg4"} else gpu_encoder_args(encoder, profile="create_video")),
-            path,
-        ])
-        self.proc = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-
-    def write(self, frame: np.ndarray) -> None:
-        if self.proc.stdin is None:
-            raise RuntimeError("FFmpeg writer stdin is closed.")
-        arr = np.ascontiguousarray(frame)
-        if arr.shape[0] != self.height or arr.shape[1] != self.width or arr.shape[2] != 3:
-            raise RuntimeError(f"Unexpected frame shape for FFmpeg writer: {arr.shape}")
-        try:
-            self.proc.stdin.write(arr.tobytes())
-        except BrokenPipeError as exc:
-            self.release()
-            error_type = GpuVideoEncodingError if self.encoder not in {"libx264", "mpeg4"} else RuntimeError
-            raise error_type("FFmpeg video writer closed its input unexpectedly.") from exc
-
-    def release(self) -> None:
-        if self._released:
-            return
-        self._released = True
-        if self.proc.stdin is not None and not self.proc.stdin.closed:
-            try:
-                self.proc.stdin.close()
-            except BrokenPipeError:
-                pass
-        err = self.proc.stderr.read() if self.proc.stderr is not None else b""
-        rc = self.proc.wait()
-        if self.proc.stderr is not None:
-            self.proc.stderr.close()
-        if rc != 0:
-            if os.path.exists(self.path):
-                os.remove(self.path)
-            msg = err.decode("utf-8", errors="replace").strip()
-            detail = f": {msg}" if msg else ""
-            error_type = GpuVideoEncodingError if self.encoder not in {"libx264", "mpeg4"} else RuntimeError
-            raise error_type(f"FFmpeg video writer failed with exit code {rc}{detail}")
 
 
 @dataclass
@@ -833,7 +750,7 @@ def _render_video_for_weight(
                 futures = [render_pool.submit(_render_video_frame, fid, frm, ctx) for fid, frm in batch]
                 for (fid, _), fut in zip(batch, futures):
                     rendered, box_count, boxes = fut.result()
-                    if writer is None and not export_images_enabled:
+                    if writer is None:
                         encoder, device = _selected_video_encoder(video_acceleration, video_codec)
                         writer = FfmpegRawVideoWriter(
                             video_path_out, output_fps, rendered.shape, encoder, device
@@ -909,20 +826,7 @@ def _render_video_for_weight(
         f"csv_frames_matched={matched_frames}, csv_frames_missing={missing_frames}, csv_frames_extra={extra_csv_frames}"
     )
 
-    if export_images_enabled:
-        if save_png_frames:
-            make_video_from_image_sequence(
-                png_image_dir, first_frame, output_fps, video_path_out, "png",
-                video_acceleration=video_acceleration,
-            )
-            print(f"Video written -> {video_path_out}")
-        elif save_jpg_frames:
-            make_video_from_image_sequence(
-                jpg_image_dir, first_frame, output_fps, video_path_out, "jpg",
-                video_acceleration=video_acceleration,
-            )
-            print(f"Video written -> {video_path_out}")
-    elif writer is not None:
+    if writer is not None:
         print(f"Video written -> {video_path_out}")
 
     print(

@@ -89,7 +89,8 @@ licenses, and any applicable source-availability obligations. References:
 ## FFmpeg
 
 AMADEUS uses one fixed FFmpeg executable per operating system for video
-inspection, analysis conversion, Cropping & Trimming, and Create Video. It does
+inspection, analysis conversion, Cropping & Trimming, Create Video, and
+Refinement video export. It does
 not select FFmpeg from `PATH` or keep a second GPU-only binary.
 
 On Windows and Linux, the launcher downloads one checksum-pinned BtbN static
@@ -135,6 +136,14 @@ and without direction estimation. `ACCELERATION=cpu` always uses CPU encoding.
 `auto` selects a validated GPU encoder or falls back to CPU. `gpu` retains the
 same fallback with a warning when GPU acceleration is unavailable. An explicit
 `VIDEO_CODEC=mp4v` selection retains CPU MPEG-4 encoding.
+
+Video exports use high-quality encoder settings rather than limits based on
+the source bitrate. CPU H.264 uses x264 CRF 18; hardware options are NVENC
+CQ 18, QSV/AMF/VAAPI quality 18 and VideoToolbox quality 85. These numbers
+do not correspond to identical visual quality across encoders. Output can be
+larger than its source when colored annotations add detail. Refinement uses
+CPU H.264 for MP4 and AVI. Tracking videos are encoded directly from rendered
+frames, including when separate JPEG or PNG images are exported.
 
 GPU acceleration applies to final H.264 encoding. Cropping, rotation, image
 adjustments, and overlay rendering still run on the CPU. A short test cannot

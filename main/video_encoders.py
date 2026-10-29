@@ -8,12 +8,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
-from fractions import Fraction
+
+import numpy as np
 from functools import lru_cache
 from pathlib import Path
 
 from .compute_telemetry import query_nvidia_driver_info
+from .video_compat import ffmpeg_executable
 
 
 GPU_ENCODER_LABELS = {
@@ -31,109 +32,124 @@ _WINDOWS_ENCODERS = {
 }
 
 
-CROP_TRIMMING_QUALITY = "18"  # CRF (libx264) / CQ (NVENC)
+HIGH_QUALITY_QP = "18"  # CRF for x264, CQ/QP for supported hardware encoders
 
 
 class GpuVideoEncodingError(RuntimeError):
     """A selected GPU encoder failed during the actual video export."""
 
 
-def video_stream_bitrate(ffmpeg: str, path: str, *, cancel_event=None) -> int:
-    """Measure average encoded video bitrate without decoding or buffering the file."""
-    command = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-i", path, "-map", "0:v:0", "-c:v", "copy", "-f", "framecrc", "-",
-    ]
-    total_bytes = 0
-    first_pts = None
-    last_end = None
-    time_base = None
-    with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=errors, text=True,
-            encoding="utf-8", errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
-        try:
-            assert process.stdout is not None
-            for line in process.stdout:
-                if cancel_event is not None and cancel_event.is_set():
-                    raise RuntimeError("Video bitrate measurement canceled.")
-                if line.startswith("#tb 0:"):
-                    time_base = Fraction(line.split(":", 1)[1].strip())
-                elif line.strip() and not line.startswith("#"):
-                    values = line.split(",")
-                    pts, duration, size = (int(values[i]) for i in (2, 3, 4))
-                    total_bytes += size
-                    first_pts = pts if first_pts is None else min(first_pts, pts)
-                    end = pts + duration
-                    last_end = end if last_end is None else max(last_end, end)
-            return_code = process.wait()
-            if return_code != 0:
-                errors.seek(0)
-                detail = errors.read().decode("utf-8", errors="replace").strip()
-                raise RuntimeError(f"Could not measure video bitrate: {detail}")
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                process.wait()
-            if process.stdout is not None:
-                process.stdout.close()
-    if not time_base or first_pts is None or last_end is None or last_end <= first_pts or total_bytes <= 0:
-        raise RuntimeError(f"Could not determine encoded video bitrate: {path}")
-    return int(Fraction(total_bytes * 8, last_end - first_pts) / time_base)
+def gpu_encoder_args(encoder: str, *, profile: str = "create_video") -> list[str]:
+    """Use common quality targets across preprocessing and rendered exports.
 
-
-def bitrate_limited_encoder_args(encoder: str, max_bitrate: int) -> list[str]:
-    """Use variable bitrate with a ceiling for Cropping & Trimming."""
-    maximum = int(max_bitrate)
-    if maximum <= 0:
-        raise ValueError("Video bitrate limit must be positive.")
-    average = max(1, int(maximum * 0.9))
-    # Allow two seconds of VBV buffering for complex frames without raising the peak rate.
-    limits = ["-b:v", str(average), "-maxrate:v", str(maximum), "-bufsize:v", str(maximum * 2)]
-    if encoder == "libx264":
-        # Optional SEI packets include x264's encoder identification. Their
-        # fixed overhead can exceed a low source bitrate for short trims.
-        return ["-c:v", encoder, "-preset", "medium", "-crf", CROP_TRIMMING_QUALITY, *limits,
-                "-pix_fmt", "yuv420p", "-bsf:v", "filter_units=remove_types=6"]
-    if encoder == "h264_nvenc":
-        return ["-c:v", encoder, "-preset", "p5", "-tune", "hq", "-rc:v", "vbr", "-cq:v", CROP_TRIMMING_QUALITY, *limits, "-pix_fmt", "yuv420p"]
-    if encoder == "h264_qsv":
-        return ["-c:v", encoder, "-preset", "medium", *limits, "-pix_fmt", "nv12"]
-    if encoder == "h264_amf":
-        return ["-c:v", encoder, "-quality", "quality", "-rc:v", "vbr_peak", *limits, "-pix_fmt", "yuv420p"]
-    if encoder == "h264_vaapi":
-        return ["-c:v", encoder, "-rc_mode", "VBR", *limits]
-    if encoder == "h264_videotoolbox":
-        return ["-c:v", encoder, *limits, "-allow_sw", "0", "-pix_fmt", "yuv420p"]
-    raise ValueError(f"Unsupported video encoder: {encoder}")
-
-
-def gpu_encoder_args(encoder: str, *, profile: str = "preprocess") -> list[str]:
-    """Return encoder options, preserving each export path's quality target."""
+    Encoder-specific quality controls are not numerically equivalent.
+    """
     if profile not in {"preprocess", "create_video"}:
         raise ValueError(f"Unsupported video encoding profile: {profile}")
     if encoder == "h264_nvenc":
-        cq = "12" if profile == "preprocess" else "23"
-        preset = "p5" if profile == "preprocess" else "fast"
-        args = ["-c:v", encoder, "-preset", preset]
-        if profile == "preprocess":
-            args.extend(["-tune", "hq"])
-        args.extend(["-rc:v", "vbr", "-cq:v", cq, "-b:v", "0", "-pix_fmt", "yuv420p"])
-        return args
+        return ["-c:v", encoder, "-preset", "p5", "-tune", "hq", "-rc:v", "vbr",
+                "-cq:v", HIGH_QUALITY_QP, "-b:v", "0", "-pix_fmt", "yuv420p"]
     if encoder == "h264_qsv":
-        quality = "12" if profile == "preprocess" else "23"
-        return ["-c:v", encoder, "-preset", "medium", "-global_quality:v", quality, "-pix_fmt", "nv12"]
+        return ["-c:v", encoder, "-preset", "medium",
+                "-global_quality:v", HIGH_QUALITY_QP, "-pix_fmt", "nv12"]
     if encoder == "h264_amf":
-        quality = "12" if profile == "preprocess" else "23"
-        return ["-c:v", encoder, "-quality", "quality", "-rc:v", "cqp", "-qp_i", quality, "-qp_p", quality, "-qp_b", quality, "-pix_fmt", "yuv420p"]
+        return ["-c:v", encoder, "-quality", "quality", "-rc:v", "cqp",
+                "-qp_i", HIGH_QUALITY_QP, "-qp_p", HIGH_QUALITY_QP,
+                "-qp_b", HIGH_QUALITY_QP, "-pix_fmt", "yuv420p"]
     if encoder == "h264_vaapi":
-        quality = "12" if profile == "preprocess" else "23"
-        return ["-c:v", encoder, "-qp", quality]
+        return ["-c:v", encoder, "-qp", HIGH_QUALITY_QP]
     if encoder == "h264_videotoolbox":
-        return ["-c:v", encoder, "-q:v", "85", "-allow_sw", "0", "-pix_fmt", "yuv420p"]
+        return ["-c:v", encoder, "-q:v", "85", "-allow_sw", "0",
+                "-pix_fmt", "yuv420p"]
     raise ValueError(f"Unsupported GPU video encoder: {encoder}")
+
+
+def quality_encoder_args(encoder: str) -> list[str]:
+    """Encode at high visual quality without a source bitrate ceiling."""
+    if encoder == "libx264":
+        return ["-c:v", encoder, "-preset", "medium",
+                "-crf", HIGH_QUALITY_QP, "-pix_fmt", "yuv420p"]
+    if encoder == "mpeg4":
+        return ["-c:v", encoder, "-q:v", "2", "-pix_fmt", "yuv420p"]
+    return gpu_encoder_args(encoder)
+
+
+class FfmpegRawVideoWriter:
+    """Write rendered BGR frames through AMADEUS's fixed FFmpeg build."""
+
+    def __init__(
+        self,
+        path: str,
+        fps: float,
+        frame_shape: tuple[int, int, int],
+        encoder: str,
+        device: str | None = None,
+    ) -> None:
+        h, w = frame_shape[:2]
+        ffmpeg = ffmpeg_executable()
+        self.path = path
+        self.encoder = encoder
+        self._released = False
+        self.width = int(w)
+        self.height = int(h)
+        filters = ["pad=ceil(iw/2)*2:ceil(ih/2)*2"]
+        if encoder == "h264_vaapi":
+            if not device:
+                raise RuntimeError("VAAPI requires a detected render device.")
+            filters.append("format=nv12,hwupload")
+        command = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
+        if device:
+            command.extend(["-vaapi_device", device])
+        command.extend([
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-s", f"{self.width}x{self.height}",
+            "-r", str(float(fps)),
+            "-i", "pipe:0",
+            "-vf", ",".join(filters),
+            *quality_encoder_args(encoder),
+            path,
+        ])
+        self.proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+    def write(self, frame: np.ndarray) -> None:
+        if self.proc.stdin is None:
+            raise RuntimeError("FFmpeg writer stdin is closed.")
+        arr = np.ascontiguousarray(frame)
+        if arr.shape[0] != self.height or arr.shape[1] != self.width or arr.shape[2] != 3:
+            raise RuntimeError(f"Unexpected frame shape for FFmpeg writer: {arr.shape}")
+        try:
+            self.proc.stdin.write(arr.tobytes())
+        except BrokenPipeError as exc:
+            self.release()
+            error_type = GpuVideoEncodingError if self.encoder not in {"libx264", "mpeg4"} else RuntimeError
+            raise error_type("FFmpeg video writer closed its input unexpectedly.") from exc
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self.proc.stdin is not None and not self.proc.stdin.closed:
+            try:
+                self.proc.stdin.close()
+            except BrokenPipeError:
+                pass
+        err = self.proc.stderr.read() if self.proc.stderr is not None else b""
+        rc = self.proc.wait()
+        if self.proc.stderr is not None:
+            self.proc.stderr.close()
+        if rc != 0:
+            if os.path.exists(self.path):
+                os.remove(self.path)
+            msg = err.decode("utf-8", errors="replace").strip()
+            detail = f": {msg}" if msg else ""
+            error_type = GpuVideoEncodingError if self.encoder not in {"libx264", "mpeg4"} else RuntimeError
+            raise error_type(f"FFmpeg video writer failed with exit code {rc}{detail}")
 
 
 def _windows_gpu_vendors() -> tuple[str, ...]:

@@ -16,6 +16,7 @@ import pandas as pd
 
 from gui import convert as _convert
 from gui.color import WHITE_RGB
+from main.video_encoders import FfmpegRawVideoWriter
 
 
 def prepare_refined_obb_rows(
@@ -464,11 +465,7 @@ def export_refinement_video(
             for j in range(n_output)
         ]
 
-        ext = os.path.splitext(out_path)[1].lower()
-        fourcc = cv2.VideoWriter_fourcc(*("XVID" if ext == ".avi" else "mp4v"))
-        writer = cv2.VideoWriter(out_path, fourcc, output_fps, (w, h))
-        if not writer.isOpened():
-            raise RuntimeError(f"Cannot create video file: {out_path}")
+        writer = FfmpegRawVideoWriter(out_path, output_fps, first.shape, "libx264")
 
         total = len(source_indices)
         prev_idx = None

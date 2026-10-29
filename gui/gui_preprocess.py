@@ -43,8 +43,7 @@ from main.video_compat import ffmpeg_executable
 from main.video_encoders import (
     GPU_ENCODER_LABELS,
     detect_gpu_video_encoder,
-    bitrate_limited_encoder_args,
-    video_stream_bitrate,
+    quality_encoder_args,
 )
 from main.video_frame_count import detect_seekable_frame_count
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
@@ -158,10 +157,6 @@ def ffmpeg_exe() -> str:
     shows it instead of letting a traceback end the export.
     """
     return ffmpeg_executable()
-
-
-def _video_encoder_args(encoder: str, max_bitrate: int) -> list[str]:
-    return bitrate_limited_encoder_args(encoder, max_bitrate)
 
 
 def _rgb_hex(color: tuple[int, int, int]) -> str:
@@ -3388,9 +3383,9 @@ class PreprocessApp(ctk.CTk):
         return max(1, int(round(duration_s * max(1e-9, job.output_fps))))
 
     def _encode_export_region(
-        self, job: ExportJob, region: ExportRegion, region_index: int, max_bitrate: int,
+        self, job: ExportJob, region: ExportRegion, region_index: int,
     ) -> None:
-        cmd = self._build_ffmpeg_command(job, region, max_bitrate)
+        cmd = self._build_ffmpeg_command(job, region)
         target_frames = self._expected_export_frame_count(job)
         total_regions = max(1, len(job.regions))
         proc = subprocess.Popen(
@@ -3447,21 +3442,13 @@ class PreprocessApp(ctk.CTk):
         current_output: str | None = None
         try:
             os.makedirs(job.output_folder, exist_ok=True)
-            self.export_queue.put(("log", "Measuring source video bitrate..."))
-            source_bitrate = video_stream_bitrate(
-                job.ffmpeg, job.video_path, cancel_event=self.export_cancel,
-            )
-            max_bitrate = max(1, int(source_bitrate * 0.95))
+            self.export_queue.put(("log", "High-quality encoding without a source bitrate ceiling."))
             if self.export_cancel.is_set():
                 raise ExportCancelled()
             source_reader = VideoFrameReader(job.video_path)
             try:
                 encoder_label = GPU_ENCODER_LABELS.get(job.video_encoder, "CPU (libx264)")
                 self.export_queue.put(("log", f"Video encoder: {encoder_label}"))
-                self.export_queue.put((
-                    "log", f"Video bitrate limit: {max_bitrate / 1000:.1f} kb/s "
-                    f"(source {source_bitrate / 1000:.1f} kb/s)",
-                ))
                 for region_index, region in enumerate(job.regions):
                     if self.export_cancel.is_set():
                         raise ExportCancelled()
@@ -3469,7 +3456,7 @@ class PreprocessApp(ctk.CTk):
                     self.export_queue.put(("log", f"Exporting {region.display_name}: {region.output_path}"))
                     start_time = time.perf_counter()
                     try:
-                        self._encode_export_region(job, region, region_index, max_bitrate)
+                        self._encode_export_region(job, region, region_index)
                     except ExportCancelled:
                         raise
                     except RuntimeError as exc:
@@ -3480,7 +3467,7 @@ class PreprocessApp(ctk.CTk):
                         self._delete_partial(current_output)
                         self.export_queue.put(("log", f"GPU export failed: {exc}. Retrying with CPU (libx264)."))
                         job = replace(job, video_encoder="libx264", video_encoder_device=None)
-                        self._encode_export_region(job, region, region_index, max_bitrate)
+                        self._encode_export_region(job, region, region_index)
                     outputs.append(region.output_path)
                     elapsed = time.perf_counter() - start_time
                     self.export_queue.put(("log", f"Completed {region.display_name} in {elapsed:.1f}s"))
@@ -3499,7 +3486,7 @@ class PreprocessApp(ctk.CTk):
             else:
                 self.export_queue.put(("error", str(exc)))
 
-    def _build_ffmpeg_command(self, job: ExportJob, region: ExportRegion, max_bitrate: int) -> list[str]:
+    def _build_ffmpeg_command(self, job: ExportJob, region: ExportRegion) -> list[str]:
         filters: list[str] = [
             f"trim=start_frame={job.in_frame}:end_frame={job.out_frame + 1}",
             (
@@ -3562,7 +3549,7 @@ class PreprocessApp(ctk.CTk):
             "0:v:0",
             "-an",
         ])
-        cmd.extend(["-vf", ",".join(filters), *_video_encoder_args(job.video_encoder, max_bitrate)])
+        cmd.extend(["-vf", ",".join(filters), *quality_encoder_args(job.video_encoder)])
         cmd.extend(["-progress", "pipe:1", region.output_path])
         return cmd
 
