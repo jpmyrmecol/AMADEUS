@@ -45,6 +45,7 @@ from main.video_encoders import (
     detect_gpu_video_encoder,
     prefer_hardware_video_encoder,
     quality_encoder_args,
+    normalize_video_quality,
 )
 from main.video_frame_count import detect_seekable_frame_count
 from gui.preview_key_navigation import ArrowKeyHoldPlayback
@@ -572,6 +573,7 @@ class ExportJob:
     out_frame: int
     regions: tuple[ExportRegion, ...]
     video_encoder_device: str | None = None
+    quality: str = "high"
 
 
 class ExportCancelled(RuntimeError):
@@ -608,6 +610,7 @@ class PreprocessApp(ctk.CTk):
         self.contrast_var = tk.DoubleVar(value=1.0)
         self.color_mode_var = tk.StringVar(value="Color")
         self.output_fps_var = tk.DoubleVar(value=30.0)
+        self.video_quality_var = tk.StringVar(value="High")
         self.crop_label_var = tk.StringVar(value="No crop selected.")
         self.crop_x_var = tk.IntVar(value=0)
         self.crop_y_var = tk.IntVar(value=0)
@@ -953,6 +956,19 @@ class PreprocessApp(ctk.CTk):
             anchor="e",
             text_color=MUTED_TEXT,
         ).pack(side="right", fill="x", expand=True, padx=(6, 0))
+
+        quality_row = ctk.CTkFrame(export, corner_radius=0)
+        quality_row.pack(fill="x", padx=8, pady=(0, 6))
+        ctk.CTkLabel(quality_row, text="Video quality", width=110, anchor="w").pack(side="left")
+        self.video_quality_combo = ctk.CTkComboBox(
+            quality_row,
+            values=["Standard", "High"],
+            variable=self.video_quality_var,
+            command=lambda _value: self._schedule_crop_trimming_config_save(),
+            state="readonly",
+            width=130,
+        )
+        self.video_quality_combo.pack(side="right")
 
         self.gpu_acceleration_check = ctk.CTkCheckBox(
             export,
@@ -1711,6 +1727,7 @@ class PreprocessApp(ctk.CTk):
                 "template": self.template_var.get().strip() or "{stem}_{region}",
                 "speed": float(self.output_speed_var.get()),
                 "fps": float(self.output_fps_var.get()),
+                "quality": normalize_video_quality(self.video_quality_var.get()),
                 "use_gpu_acceleration": bool(self.gpu_acceleration_var.get()),
                 "video_encoder": (
                     self.gpu_video_encoder
@@ -1863,6 +1880,7 @@ class PreprocessApp(ctk.CTk):
                 raise ValueError("Cropping config trim/output must be mappings.")
             speed = float(output.get("speed", 1.0))
             output_fps = float(output.get("fps", 30.0))
+            quality = normalize_video_quality(output.get("quality", "high"))
             if not (math.isfinite(speed) and math.isfinite(output_fps)
                     and OUTPUT_SPEED_MIN <= speed <= OUTPUT_SPEED_MAX
                     and 1.0 <= output_fps <= 240.0):
@@ -1918,6 +1936,7 @@ class PreprocessApp(ctk.CTk):
             self.output_fps_var.set(output_fps)
             self.output_fps_spin.delete(0, tk.END)
             self.output_fps_spin.insert(0, f"{output_fps:.3f}")
+            self.video_quality_var.set(quality.capitalize())
             self.export_view_rotation_var.set(bool(output.get("apply_view_rotation", True)))
             acceleration = bool(output.get("use_gpu_acceleration", False))
             if self.gpu_encoder_detection_complete:
@@ -3251,6 +3270,7 @@ class PreprocessApp(ctk.CTk):
             )
         if not (1.0 <= output_fps <= 240.0):
             raise RuntimeError("Output fps must be between 1.0 and 240.0.")
+        quality = normalize_video_quality(self.video_quality_var.get())
         video_encoder = "libx264"
         video_encoder_device = None
         export_ffmpeg = ffmpeg_exe()
@@ -3316,6 +3336,7 @@ class PreprocessApp(ctk.CTk):
             output_speed=output_speed,
             video_encoder=video_encoder,
             video_encoder_device=video_encoder_device,
+            quality=quality,
             frame_count=int(self.reader.frame_count),
             source_width=int(self.reader.width),
             source_height=int(self.reader.height),
@@ -3353,6 +3374,7 @@ class PreprocessApp(ctk.CTk):
         self.brightness_entry.configure(state=state)
         self.contrast_entry.configure(state=state)
         self.color_mode_combo.configure(state="disabled" if running else "readonly")
+        self.video_quality_combo.configure(state="disabled" if running else "readonly")
         self.output_speed_spin.configure(state=state)
         self.output_fps_spin.configure(state=state)
         self.gpu_acceleration_check.configure(
@@ -3446,7 +3468,7 @@ class PreprocessApp(ctk.CTk):
         current_output: str | None = None
         try:
             os.makedirs(job.output_folder, exist_ok=True)
-            self.export_queue.put(("log", "High-quality encoding without a source bitrate ceiling."))
+            self.export_queue.put(("log", f"Video quality: {job.quality.capitalize()} (no bitrate ceiling)."))
             if self.export_cancel.is_set():
                 raise ExportCancelled()
             source_reader = VideoFrameReader(job.video_path)
@@ -3553,7 +3575,10 @@ class PreprocessApp(ctk.CTk):
             "0:v:0",
             "-an",
         ])
-        cmd.extend(["-vf", ",".join(filters), *quality_encoder_args(job.video_encoder)])
+        cmd.extend([
+            "-vf", ",".join(filters),
+            *quality_encoder_args(job.video_encoder, quality=job.quality),
+        ])
         cmd.extend(["-progress", "pipe:1", region.output_path])
         return cmd
 

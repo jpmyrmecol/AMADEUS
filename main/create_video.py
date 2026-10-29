@@ -465,7 +465,7 @@ def make_video_from_image_sequence(
             "-framerate", str(float(fps)),
             "-i", os.path.join(image_dir, f"%06d.{ext}"),
             "-vf", ",".join(filters),
-            *quality_encoder_args(encoder),
+            *quality_encoder_args(encoder, quality="standard"),
             out_path,
         ])
         print(f"[INFO] AMADEUS FFmpeg image-sequence encoder for {os.path.basename(out_path)}: {encoder}")
@@ -754,7 +754,8 @@ def _render_video_for_weight(
                     if writer is None:
                         encoder, device = _selected_video_encoder(video_acceleration, video_codec)
                         writer = FfmpegRawVideoWriter(
-                            video_path_out, output_fps, rendered.shape, encoder, device
+                            video_path_out, output_fps, rendered.shape, encoder, device,
+                            quality="standard",
                         )
                         print(f"[INFO] AMADEUS FFmpeg encoder for {os.path.basename(video_path_out)}: {encoder}")
                     if writer is not None:

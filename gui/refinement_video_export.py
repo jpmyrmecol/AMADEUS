@@ -465,7 +465,9 @@ def export_refinement_video(
             for j in range(n_output)
         ]
 
-        writer = FfmpegRawVideoWriter(out_path, output_fps, first.shape, "libx264")
+        writer = FfmpegRawVideoWriter(
+            out_path, output_fps, first.shape, "libx264", quality="standard"
+        )
 
         total = len(source_indices)
         prev_idx = None

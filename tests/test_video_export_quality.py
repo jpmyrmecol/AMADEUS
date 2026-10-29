@@ -12,30 +12,79 @@ import pytest
 from main import video_encoders
 
 
-@pytest.mark.parametrize("encoder", [
-    "h264_nvenc", "h264_qsv", "h264_amf", "h264_vaapi", "h264_videotoolbox",
-])
-def test_gpu_quality_same_in_all_export_profiles(encoder):
-    preprocess = video_encoders.gpu_encoder_args(encoder, profile="preprocess")
-    create_video = video_encoders.gpu_encoder_args(encoder, profile="create_video")
-    assert preprocess == create_video == video_encoders.quality_encoder_args(encoder)
-    assert "-maxrate:v" not in preprocess
-    assert "-bufsize:v" not in preprocess
-    if encoder != "h264_videotoolbox":
-        assert "18" in preprocess
-    if encoder == "h264_nvenc":
-        assert preprocess[preprocess.index("-cq:v") + 1] == "18"
-        assert preprocess[preprocess.index("-preset") + 1] == "p5"
-        assert preprocess[preprocess.index("-tune") + 1] == "hq"
-        assert preprocess[preprocess.index("-b:v") + 1] == "0"
+@pytest.mark.parametrize(
+    ("quality", "qp", "videotoolbox", "mpeg4"),
+    [
+        ("standard", "23", "70", "3"),
+        ("high", "18", "85", "2"),
+    ],
+)
+def test_quality_modes_for_cpu_and_gpu(quality, qp, videotoolbox, mpeg4):
+    cpu = video_encoders.quality_encoder_args("libx264", quality=quality)
+    assert cpu[cpu.index("-crf") + 1] == qp
+    assert cpu[cpu.index("-preset") + 1] == "medium"
+    legacy = video_encoders.quality_encoder_args("mpeg4", quality=quality)
+    assert legacy[legacy.index("-q:v") + 1] == mpeg4
+    for encoder, option in (
+        ("h264_nvenc", "-cq:v"),
+        ("h264_qsv", "-global_quality:v"),
+        ("h264_amf", "-qp_i"),
+        ("h264_vaapi", "-qp"),
+    ):
+        args = video_encoders.quality_encoder_args(encoder, quality=quality)
+        assert args[args.index(option) + 1] == qp
+        assert "-maxrate:v" not in args
+        assert "-bufsize:v" not in args
+    videotoolbox_args = video_encoders.quality_encoder_args(
+        "h264_videotoolbox", quality=quality
+    )
+    assert videotoolbox_args[videotoolbox_args.index("-q:v") + 1] == videotoolbox
+    assert "-maxrate:v" not in cpu
+    assert "-b:v" not in cpu
 
 
-def test_cpu_quality_has_no_bitrate_ceiling():
-    args = video_encoders.quality_encoder_args("libx264")
-    assert args[args.index("-crf") + 1] == "18"
-    assert args[args.index("-preset") + 1] == "medium"
-    assert "-maxrate:v" not in args
-    assert "-b:v" not in args
+def test_default_preview_quality_is_standard():
+    assert video_encoders.quality_encoder_args("libx264")[
+        video_encoders.quality_encoder_args("libx264").index("-crf") + 1
+    ] == "23"
+    for encoder in (
+        "h264_nvenc", "h264_qsv", "h264_amf", "h264_vaapi", "h264_videotoolbox",
+    ):
+        assert video_encoders.gpu_encoder_args(
+            encoder, profile="preprocess"
+        ) == video_encoders.gpu_encoder_args(encoder, profile="create_video")
+        assert video_encoders.gpu_encoder_args(encoder) == (
+            video_encoders.quality_encoder_args(encoder)
+        )
+
+
+@pytest.mark.parametrize("quality", ["unknown", "", "best", None])
+def test_invalid_quality_rejected(quality):
+    with pytest.raises(ValueError, match="Unsupported video quality"):
+        video_encoders.quality_encoder_args("libx264", quality=quality)
+
+
+def test_cropping_ffmpeg_command_respects_quality_choice():
+    from gui.gui_preprocess import ExportJob, ExportRegion, PreprocessApp
+
+    region = ExportRegion(
+        display_name="Full image", token="full", rect=None,
+        brightness=0.0, contrast=1.0, color_mode="color",
+        output_path="output.mp4",
+    )
+    for quality, expected in (("standard", "23"), ("high", "18")):
+        job = ExportJob(
+            ffmpeg="ffmpeg", video_path="source.mp4", output_folder=".",
+            fps=30.0, output_fps=30.0, output_speed=1.0,
+            video_encoder="libx264", frame_count=30,
+            source_width=320, source_height=240,
+            in_frame=0, out_frame=29, regions=(region,),
+            quality=quality,
+        )
+        cmd = PreprocessApp._build_ffmpeg_command(None, job, region)
+        assert cmd[cmd.index("-crf") + 1] == expected
+        assert "-maxrate:v" not in cmd
+        assert "-bufsize:v" not in cmd
 
 
 @pytest.mark.parametrize("extension", ["mp4", "avi"])

@@ -130,8 +130,8 @@ use its hardware implementation. Results are cached per executable and export
 profile for the process lifetime.
 
 On Windows and Linux, Cropping & Trimming enables GPU encoding by default
-only after a short encode succeeds. On macOS its default is CPU `libx264`
-with CRF 18, while the VideoToolbox checkbox offers faster hardware encoding.
+only after a short encode succeeds. On macOS its default is CPU `libx264`,
+while the VideoToolbox checkbox offers faster hardware encoding.
 Saved GPU selections remain effective. A failed GPU probe disables hardware
 encoding, and H.264 exports use CPU `libx264`.
 
@@ -143,13 +143,17 @@ requests hardware encoding, including VideoToolbox on macOS, and falls back
 to CPU with a warning when hardware encoding is unavailable. An explicit
 `VIDEO_CODEC=mp4v` selection retains CPU MPEG-4 encoding.
 
-Video exports use high-quality encoder settings rather than limits based on
-the source bitrate. CPU H.264 uses x264 CRF 18; hardware options are NVENC
-CQ 18, QSV/AMF/VAAPI quality 18 and VideoToolbox quality 85. These numbers
-do not correspond to identical visual quality across encoders. Output can be
-larger than its source when colored annotations add detail. Refinement uses
-CPU H.264 for MP4 and AVI. Tracking videos are encoded directly from rendered
-frames, including when separate JPEG or PNG images are exported.
+Cropping & Trimming offers Standard and High video quality (High by default)
+because the output may be used as analysis input. Old cropping/trimming YAML
+configurations without a quality setting load as High. All other video outputs,
+including tracking previews (OBB/Seg/Pose/All), raw model videos, and Refinement
+exports, use Standard. CPU x264 uses CRF 23 (Standard) or 18 (High).
+NVIDIA NVENC uses CQ 23 or 18; Intel QSV, AMD AMF and VAAPI use
+encoder-specific QP/quality 23 or 18. VideoToolbox uses its own quality
+control at 70 (Standard) or 85 (High). The numbers are not directly equivalent
+between encoders and no source bitrate ceiling is applied. Files may exceed
+the input video size. Separate exported JPEG/PNG images keep their own
+format-quality settings; video output is encoded from rendered frames.
 
 GPU acceleration applies to final H.264 encoding. Cropping, rotation, image
 adjustments, and overlay rendering still run on the CPU. A short test cannot

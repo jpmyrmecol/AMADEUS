@@ -32,7 +32,9 @@ _WINDOWS_ENCODERS = {
 }
 
 
-HIGH_QUALITY_QP = "18"  # CRF for x264, CQ/QP for supported hardware encoders
+VIDEO_QUALITY_QP = {"standard": "23", "high": "18"}
+VIDEO_QUALITY_VIDEOTOOLBOX = {"standard": "70", "high": "85"}
+VIDEO_QUALITY_MPEG4 = {"standard": "3", "high": "2"}
 
 
 class GpuVideoEncodingError(RuntimeError):
@@ -44,39 +46,52 @@ def prefer_hardware_video_encoder(mode: str) -> bool:
     return mode == "gpu" or (mode == "auto" and sys.platform != "darwin")
 
 
-def gpu_encoder_args(encoder: str, *, profile: str = "create_video") -> list[str]:
-    """Use common quality targets across preprocessing and rendered exports.
+def normalize_video_quality(value: str) -> str:
+    """Validate the two exported video-quality profiles."""
+    quality = str(value).strip().lower()
+    if quality not in VIDEO_QUALITY_QP:
+        raise ValueError(f"Unsupported video quality: {value!r}. Use 'standard' or 'high'.")
+    return quality
 
-    Encoder-specific quality controls are not numerically equivalent.
+
+def gpu_encoder_args(
+    encoder: str, *, profile: str = "create_video", quality: str = "standard",
+) -> list[str]:
+    """Return hardware encoder settings for the requested quality profile.
+
+    The quality numbers are not equivalent between hardware encoder families.
     """
     if profile not in {"preprocess", "create_video"}:
         raise ValueError(f"Unsupported video encoding profile: {profile}")
+    quality = normalize_video_quality(quality)
+    qp = VIDEO_QUALITY_QP[quality]
     if encoder == "h264_nvenc":
         return ["-c:v", encoder, "-preset", "p5", "-tune", "hq", "-rc:v", "vbr",
-                "-cq:v", HIGH_QUALITY_QP, "-b:v", "0", "-pix_fmt", "yuv420p"]
+                "-cq:v", qp, "-b:v", "0", "-pix_fmt", "yuv420p"]
     if encoder == "h264_qsv":
         return ["-c:v", encoder, "-preset", "medium",
-                "-global_quality:v", HIGH_QUALITY_QP, "-pix_fmt", "nv12"]
+                "-global_quality:v", qp, "-pix_fmt", "nv12"]
     if encoder == "h264_amf":
         return ["-c:v", encoder, "-quality", "quality", "-rc:v", "cqp",
-                "-qp_i", HIGH_QUALITY_QP, "-qp_p", HIGH_QUALITY_QP,
-                "-qp_b", HIGH_QUALITY_QP, "-pix_fmt", "yuv420p"]
+                "-qp_i", qp, "-qp_p", qp, "-qp_b", qp, "-pix_fmt", "yuv420p"]
     if encoder == "h264_vaapi":
-        return ["-c:v", encoder, "-qp", HIGH_QUALITY_QP]
+        return ["-c:v", encoder, "-qp", qp]
     if encoder == "h264_videotoolbox":
-        return ["-c:v", encoder, "-q:v", "85", "-allow_sw", "0",
-                "-pix_fmt", "yuv420p"]
+        return ["-c:v", encoder, "-q:v", VIDEO_QUALITY_VIDEOTOOLBOX[quality],
+                "-allow_sw", "0", "-pix_fmt", "yuv420p"]
     raise ValueError(f"Unsupported GPU video encoder: {encoder}")
 
 
-def quality_encoder_args(encoder: str) -> list[str]:
-    """Encode at high visual quality without a source bitrate ceiling."""
+def quality_encoder_args(encoder: str, *, quality: str = "standard") -> list[str]:
+    """Encode previews at Standard and input-preparation video at High quality."""
+    quality = normalize_video_quality(quality)
     if encoder == "libx264":
         return ["-c:v", encoder, "-preset", "medium",
-                "-crf", HIGH_QUALITY_QP, "-pix_fmt", "yuv420p"]
+                "-crf", VIDEO_QUALITY_QP[quality], "-pix_fmt", "yuv420p"]
     if encoder == "mpeg4":
-        return ["-c:v", encoder, "-q:v", "2", "-pix_fmt", "yuv420p"]
-    return gpu_encoder_args(encoder)
+        return ["-c:v", encoder, "-q:v", VIDEO_QUALITY_MPEG4[quality],
+                "-pix_fmt", "yuv420p"]
+    return gpu_encoder_args(encoder, quality=quality)
 
 
 class FfmpegRawVideoWriter:
@@ -89,6 +104,8 @@ class FfmpegRawVideoWriter:
         frame_shape: tuple[int, int, int],
         encoder: str,
         device: str | None = None,
+        *,
+        quality: str = "standard",
     ) -> None:
         h, w = frame_shape[:2]
         ffmpeg = ffmpeg_executable()
@@ -112,7 +129,7 @@ class FfmpegRawVideoWriter:
             "-r", str(float(fps)),
             "-i", "pipe:0",
             "-vf", ",".join(filters),
-            *quality_encoder_args(encoder),
+            *quality_encoder_args(encoder, quality=quality),
             path,
         ])
         self.proc = subprocess.Popen(
